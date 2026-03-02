@@ -169,8 +169,18 @@ struct CodeGenIntrinsic {
   bool isParamAPointer(unsigned ParamIdx) const;
 
   bool isParamImmArg(unsigned ParamIdx) const;
+  unsigned getNumFlattenedRetTys() const;
+  unsigned getNumFlattenedParamTys() const;
+  bool isFlatParamAPointer(unsigned FlatParamIdx) const;
+  bool isFlatParamImmArg(unsigned FlatParamIdx) const;
 
   CodeGenIntrinsic(const Record *R, const CodeGenIntrinsicContext &Ctx);
+
+private:
+  static bool isPointerLikeRecord(const Record *Ty);
+  static bool isStructRecord(const Record *Ty);
+  static void flattenRecordTypes(ArrayRef<const Record *> Tys,
+                                 SmallVectorImpl<const Record *> &FlatTys);
 };
 
 class CodeGenIntrinsicTable {

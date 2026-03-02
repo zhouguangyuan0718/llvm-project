@@ -410,6 +410,21 @@ class LLVMAnyPointerType : LLVMAnyType<pAny> {
   assert isAny, "pAny should have isOverloaded";
 }
 
+class LLVMStructType<list<LLVMType> element_types> : LLVMType<OtherVT> {
+  list<LLVMType> ElementTypes = element_types;
+  assert !ne(!size(ElementTypes), 1),
+         "LLVMStructType only supports 0 or at least 2 elements";
+  list<int> StructPrefix = !if(!empty(ElementTypes), [
+    IIT_STRUCT.Number,
+    !sub(!size(ElementTypes), 2),
+  ], [
+    IIT_EMPTYSTRUCT.Number,
+  ]);
+  let Sig =
+      !listconcat(StructPrefix,
+                  !listflatten(!foreach(ty, ElementTypes, ty.Sig)));
+}
+
 // Match the type of another intrinsic parameter.  Number is an index into the
 // list of overloaded types for the intrinsic, excluding all the fixed types.
 // The Number value must refer to a previously listed type.  For example:

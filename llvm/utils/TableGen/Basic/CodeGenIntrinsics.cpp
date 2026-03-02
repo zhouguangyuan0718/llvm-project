@@ -457,8 +457,7 @@ void CodeGenIntrinsic::setProperty(const Record *R) {
 bool CodeGenIntrinsic::isParamAPointer(unsigned ParamIdx) const {
   if (ParamIdx >= IS.ParamTys.size())
     return false;
-  return IS.ParamTys[ParamIdx]->isSubClassOf("LLVMQualPointerType") ||
-         IS.ParamTys[ParamIdx]->isSubClassOf("LLVMAnyPointerType");
+  return isPointerLikeRecord(IS.ParamTys[ParamIdx]);
 }
 
 bool CodeGenIntrinsic::isParamImmArg(unsigned ParamIdx) const {
@@ -468,6 +467,62 @@ bool CodeGenIntrinsic::isParamImmArg(unsigned ParamIdx) const {
     return false;
   ArgAttribute Val{ImmArg, 0, 0};
   return llvm::binary_search(ArgumentAttributes[ParamIdx], Val);
+}
+
+bool CodeGenIntrinsic::isPointerLikeRecord(const Record *Ty) {
+  return Ty->isSubClassOf("LLVMQualPointerType") ||
+         Ty->isSubClassOf("LLVMAnyPointerType");
+}
+
+bool CodeGenIntrinsic::isStructRecord(const Record *Ty) {
+  return Ty->isSubClassOf("LLVMStructType");
+}
+
+void CodeGenIntrinsic::flattenRecordTypes(
+    ArrayRef<const Record *> Tys, SmallVectorImpl<const Record *> &FlatTys) {
+  for (const Record *Ty : Tys) {
+    if (!isStructRecord(Ty)) {
+      FlatTys.push_back(Ty);
+      continue;
+    }
+
+    const ListInit *Elements = Ty->getValueAsListInit("ElementTypes");
+    for (const Init *Elt : Elements->getValues())
+      flattenRecordTypes({cast<DefInit>(Elt)->getDef()}, FlatTys);
+  }
+}
+
+unsigned CodeGenIntrinsic::getNumFlattenedRetTys() const {
+  SmallVector<const Record *, 8> FlatTys;
+  flattenRecordTypes(IS.RetTys, FlatTys);
+  return FlatTys.size();
+}
+
+unsigned CodeGenIntrinsic::getNumFlattenedParamTys() const {
+  SmallVector<const Record *, 8> FlatTys;
+  flattenRecordTypes(IS.ParamTys, FlatTys);
+  return FlatTys.size();
+}
+
+bool CodeGenIntrinsic::isFlatParamAPointer(unsigned FlatParamIdx) const {
+  SmallVector<const Record *, 8> FlatTys;
+  flattenRecordTypes(IS.ParamTys, FlatTys);
+  if (FlatParamIdx >= FlatTys.size())
+    return false;
+  return isPointerLikeRecord(FlatTys[FlatParamIdx]);
+}
+
+bool CodeGenIntrinsic::isFlatParamImmArg(unsigned FlatParamIdx) const {
+  unsigned CurFlatIdx = 0;
+  SmallVector<const Record *, 8> FlatTys;
+  for (unsigned ParamIdx = 0; ParamIdx != IS.ParamTys.size(); ++ParamIdx) {
+    FlatTys.clear();
+    flattenRecordTypes({IS.ParamTys[ParamIdx]}, FlatTys);
+    if (FlatParamIdx < CurFlatIdx + FlatTys.size())
+      return FlatTys.size() == 1 && isParamImmArg(ParamIdx);
+    CurFlatIdx += FlatTys.size();
+  }
+  return false;
 }
 
 void CodeGenIntrinsic::addArgAttribute(unsigned Idx, ArgAttrKind AK, uint64_t V,

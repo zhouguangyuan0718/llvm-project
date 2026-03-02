@@ -391,7 +391,7 @@ bool CodeGenInstructionPattern::hasVariadicDefs() const {
 
 unsigned CodeGenInstructionPattern::getNumInstDefs() const {
   if (isIntrinsic())
-    return IntrinInfo->IS.RetTys.size();
+    return IntrinInfo->getNumFlattenedRetTys();
 
   if (!isVariadic() || !hasVariadicDefs())
     return I.Operands.NumDefs;
@@ -402,7 +402,8 @@ unsigned CodeGenInstructionPattern::getNumInstDefs() const {
 
 unsigned CodeGenInstructionPattern::getNumInstOperands() const {
   if (isIntrinsic())
-    return IntrinInfo->IS.RetTys.size() + IntrinInfo->IS.ParamTys.size();
+    return IntrinInfo->getNumFlattenedRetTys() +
+           IntrinInfo->getNumFlattenedParamTys();
 
   unsigned NumCGIOps = I.Operands.size();
   return isVariadic() ? std::max<unsigned>(NumCGIOps, Operands.size())

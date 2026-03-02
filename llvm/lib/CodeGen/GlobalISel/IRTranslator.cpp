@@ -2877,9 +2877,10 @@ bool IRTranslator::translateIntrinsic(
       MIB.addMetadata(MDN);
     } else {
       ArrayRef<Register> VRegs = getOrCreateVRegs(*Arg.value());
-      if (VRegs.size() > 1)
+      if (VRegs.empty())
         return false;
-      MIB.addUse(VRegs[0]);
+      for (Register Reg : VRegs)
+        MIB.addUse(Reg);
     }
   }
 
