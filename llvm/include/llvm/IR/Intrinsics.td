@@ -439,7 +439,9 @@ class LLVMArrayType<int num_elements, LLVMType element_type>
 }
 
 
-// MLIR lowered memref descriptor layout:
+// MLIR lowered memref descriptor layout.
+//
+// Ranked memref descriptor (Rank >= 0):
 // struct {
 //   ptr allocatedPtr;
 //   ptr alignedPtr;
@@ -447,21 +449,45 @@ class LLVMArrayType<int num_elements, LLVMType element_type>
 //   index sizes[Rank];   // omitted when Rank == 0
 //   index strides[Rank]; // omitted when Rank == 0
 // }
-// See mlir::LLVMTypeConverter::getMemRefDescriptorFields.
+//
+// Unranked memref descriptor (Rank == -1):
+// struct {
+//   index rank;
+//   ptr descriptor;
+// }
+//
+// See mlir::LLVMTypeConverter::getMemRefDescriptorFields and
+// mlir::LLVMTypeConverter::getUnrankedMemRefDescriptorFields.
 class LLVMMemRefDescriptorType<int rank,
                                LLVMType ptr_type = llvm_ptr_ty,
                                LLVMType index_type = llvm_i64_ty>
-  : LLVMStructType<!if(!eq(rank, 0),
-      [ptr_type, ptr_type, index_type],
-      [ptr_type, ptr_type, index_type,
-       LLVMArrayType<rank, index_type>,
-       LLVMArrayType<rank, index_type>])> {
+  : LLVMStructType<!if(!eq(rank, -1),
+      [index_type, ptr_type],
+      !if(!eq(rank, 0),
+        [ptr_type, ptr_type, index_type],
+        [ptr_type, ptr_type, index_type,
+         LLVMArrayType<rank, index_type>,
+         LLVMArrayType<rank, index_type>]))> {
   int Rank = rank;
   LLVMType PtrType = ptr_type;
   LLVMType IndexType = index_type;
-  assert !and(!le(0, Rank), !le(Rank, 255)),
-         "LLVMMemRefDescriptorType only supports ranks in range [0, 255]";
+  assert !and(!le(-1, Rank), !le(Rank, 255)),
+         "LLVMMemRefDescriptorType only supports ranks in range [-1, 255]";
 }
+
+
+class LLVMRankedMemRefDescriptorType<int rank,
+                                     LLVMType ptr_type = llvm_ptr_ty,
+                                     LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<rank, ptr_type, index_type> {
+  assert !and(!le(0, Rank), !le(Rank, 255)),
+         "LLVMRankedMemRefDescriptorType only supports ranks in range [0, 255]";
+}
+
+class LLVMUnrankedMemRefDescriptorType<
+    LLVMType ptr_type = llvm_ptr_ty,
+    LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<-1, ptr_type, index_type>;
 
 // Match the type of another intrinsic parameter.  Number is an index into the
 // list of overloaded types for the intrinsic, excluding all the fixed types.
