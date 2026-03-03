@@ -430,6 +430,10 @@ class LLVMArrayType<int num_elements, LLVMType element_type>
   : LLVMType<OtherVT> {
   int NumElements = num_elements;
   LLVMType ElementType = element_type;
+  // Keep array wrapper types overloadable when their element type is
+  // overloadable (e.g. LLVMArrayType<4, llvm_anyint_ty>).
+  let isAny = ElementType.isAny;
+  let ArgCode = ElementType.ArgCode;
   assert !and(!le(0, NumElements), !le(NumElements, 255)),
          "LLVMArrayType only supports element counts in range [0, 255]";
   let Sig = !listconcat([
@@ -707,8 +711,9 @@ class TypeInfoGen<
     !foreach(ty, ACTys, ty.isAny)>.RIdxs;
 
   // D63507: Exclude LLVMPointerType<llvm_any_ty>
-  bit isOverloaded = !not(!empty(!filter(ty, AllTypes,
-    !isa<LLVMAnyType>(ty))));
+  // Query isAny instead of class type so wrapper types that carry overloaded
+  // elements (e.g. LLVMArrayType<..., llvm_any*_ty>) are also recognized.
+  bit isOverloaded = !not(!empty(!filter(ty, AllTypes, ty.isAny)));
 
   list<LLVMType> Types = !foreach(ty, AllTypes,
     !if(!isa<LLVMMatchType>(ty), ACTys[MappingRIdxs[ty.Number]], ty));

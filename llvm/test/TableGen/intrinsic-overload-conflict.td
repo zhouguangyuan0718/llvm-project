@@ -6,6 +6,10 @@ include "llvm/IR/Intrinsics.td"
 // CHECK: foo = 1,
 def int_foo : Intrinsic<[llvm_any_ty]>;
 
+// Array wrapper around overloaded element types should also make intrinsic overloaded.
+// CHECK: foo_arr_any,
+def int_foo_arr_any : Intrinsic<[LLVMArrayType<2, llvm_anyint_ty>]>;
+
 // No conflicts, since .bar is not a valid mangled type.
 // CHECK: foo_bar,
 def int_foo_bar : Intrinsic<[llvm_i32_ty]>;
@@ -28,7 +32,8 @@ def int_foo_i : Intrinsic<[llvm_i32_ty]>;
 // CHECK-CONFLICT: error: intrinsic `llvm.foo.p3` cannot share prefix `llvm.foo.p3` with another overloaded intrinsic `llvm.foo`
 // CHECK-CONFLICT: error: intrinsic `llvm.foo.s_3` cannot share prefix `llvm.foo.s_3` with another overloaded intrinsic `llvm.foo`
 // CHECK-CONFLICT: error: intrinsic `llvm.foo.v4` cannot share prefix `llvm.foo.v4` with another overloaded intrinsic `llvm.foo`
-// CHECK-CONFLICT: 10 errors
+// CHECK-CONFLICT: error: intrinsic `llvm.foo.a2i32` cannot share prefix `llvm.foo.a2i32` with another overloaded intrinsic `llvm.foo.arr.any`
+// CHECK-CONFLICT: 11 errors
 // CHECK-CONFLICT-NOT: error
 
 // Conflicts due to suffix being a possible mangled type.
@@ -43,5 +48,8 @@ def int_foo_struct : Intrinsic<[llvm_i32_ty], [], [], "llvm.foo.s_3">;
 def int_foo_t3 : Intrinsic<[llvm_i32_ty]>;
 def int_foo_i65 : Intrinsic<[llvm_i32_ty]>;
 def int_foo_i65_bar : Intrinsic<[llvm_i32_ty]>;
+
+// Conflicts due to array mangling for overloaded array element type variants.
+def int_foo_a2i32 : Intrinsic<[llvm_i32_ty]>;
 
 #endif
