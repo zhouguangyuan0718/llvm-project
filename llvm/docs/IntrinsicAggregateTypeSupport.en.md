@@ -83,15 +83,13 @@ Array handling is complete in three places:
 Example:
 
 ```tablegen
-let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
-      [], [llvm_memref_ty]>;
-}
+defm int_memref_elem_add : LLVMMemRefIntrinsic<
+    [], [llvm_memref_ty]>;
 ```
 
 Auto-generates:
 
-- `int_mytarget_memref_add_rank1` ... `rank5`.
+- `int_memref_elem_add_rank1` ... `rank5`.
 
 ### 3.4 Definition placement
 

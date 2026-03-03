@@ -10,23 +10,21 @@ def P0RC : RegisterClass<"MyTarget", [p0], 32, (add R0)>;
 // LLVM intrinsic signatures are statically typed, so rank is encoded in the
 // descriptor type. Use the helper multiclass to define a family of concrete
 // rank variants with one declaration.
-let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
-      [], [llvm_memref_ty]>;
-}
+defm int_memref_elem_add : LLVMMemRefIntrinsic<
+    [], [llvm_memref_ty]>;
 
 // Rank-2 descriptor flattens to 7 operands (ptr, ptr, i64, i64, i64, i64, i64).
-// GISEL: GIM_CheckIntrinsicID, /*MI*/0, /*Op*/0, GIMT_Encode2(Intrinsic::mytarget_memref_add_rank2),
+// GISEL: GIM_CheckIntrinsicID, /*MI*/0, /*Op*/0, GIMT_Encode2(Intrinsic::memref_elem_add_rank2),
 def MEMREF_RANK2_USE : I<(outs),
   (ins P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d, GPR64:$e, GPR64:$f, GPR64:$g),
-  [(int_mytarget_memref_add_rank2 P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d,
+  [(int_memref_elem_add_rank2 P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d,
                               GPR64:$e, GPR64:$f, GPR64:$g)]>;
 
 // Rank-3 descriptor flattens to 9 operands (ptr, ptr, i64, i64, i64, i64, i64, i64, i64).
-// GISEL: GIM_CheckIntrinsicID, /*MI*/0, /*Op*/0, GIMT_Encode2(Intrinsic::mytarget_memref_add_rank3),
+// GISEL: GIM_CheckIntrinsicID, /*MI*/0, /*Op*/0, GIMT_Encode2(Intrinsic::memref_elem_add_rank3),
 def MEMREF_RANK3_USE : I<(outs),
   (ins P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d, GPR64:$e,
        GPR64:$f, GPR64:$g, GPR64:$h, GPR64:$i),
-  [(int_mytarget_memref_add_rank3 P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d,
+  [(int_memref_elem_add_rank3 P0RC:$a, P0RC:$b, GPR64:$c, GPR64:$d,
                               GPR64:$e, GPR64:$f, GPR64:$g, GPR64:$h,
                               GPR64:$i)]>;

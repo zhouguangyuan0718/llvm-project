@@ -778,12 +778,10 @@ class DefaultAttrsIntrinsic<list<LLVMType> ret_types,
 // to be replaced by rank-specific memref descriptor types.
 //
 // Example:
-//   let TargetPrefix = "mytarget" in {
-//     defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
-//         [llvm_void_ty], [llvm_memref_ty, llvm_i32_ty], [IntrNoMem]>;
-//   }
+//   defm int_memref_elem_add : LLVMMemRefIntrinsic<
+//       [llvm_void_ty], [llvm_memref_ty, llvm_i32_ty], [IntrNoMem]>;
 // This generates:
-//   int_mytarget_memref_add_rank1 ... int_mytarget_memref_add_rank5
+//   int_memref_elem_add_rank1 ... int_memref_elem_add_rank5
 multiclass LLVMMemRefIntrinsic<
     list<LLVMType> RetTypes,
     list<LLVMType> ParamTypes = [],
@@ -823,11 +821,9 @@ class MSBuiltin<string name> {
 // memref add: src0 + src1 -> dst
 // The marker llvm_memref_ty is expanded by LLVMMemRefIntrinsic into rank1..5
 // concrete variants in the form:
-//   llvm.mytarget.memref.add.rankN
-let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
-      [], [llvm_memref_ty, llvm_memref_ty, llvm_memref_ty], [IntrNoMem]>;
-}
+//   llvm.memref.elem.add.rankN
+defm int_memref_elem_add : LLVMMemRefIntrinsic<
+    [], [llvm_memref_ty, llvm_memref_ty, llvm_memref_ty], [IntrNoMem]>;
 
 //===--------------- Variable Argument Handling Intrinsics ----------------===//
 //

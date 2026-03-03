@@ -83,15 +83,13 @@ Array 在三处形成闭环：
 示例：
 
 ```tablegen
-let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
-      [], [llvm_memref_ty]>;
-}
+defm int_memref_elem_add : LLVMMemRefIntrinsic<
+    [], [llvm_memref_ty]>;
 ```
 
 自动生成：
 
-- `int_mytarget_memref_add_rank1` ... `rank5`。
+- `int_memref_elem_add_rank1` ... `rank5`。
 
 ### 3.4 组织与放置
 
