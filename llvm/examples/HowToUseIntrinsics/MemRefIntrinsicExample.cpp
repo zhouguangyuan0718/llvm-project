@@ -35,9 +35,10 @@ int main() {
   StructType *MemRefDescTy =
       StructType::get(Ctx, {Ptr, Ptr, I64, Arr2I64, Arr2I64});
 
-  Function *Intr = Intrinsic::getOrInsertDeclaration(
-      &M, Intrinsic::memref_elem_add_rank2,
-      {MemRefDescTy, MemRefDescTy, MemRefDescTy});
+  // int_memref_elem_add_rank2 is a concrete (non-overloaded) intrinsic.
+  // So we must not pass overloaded type parameters here.
+  Function *Intr =
+      Intrinsic::getOrInsertDeclaration(&M, Intrinsic::memref_elem_add_rank2);
 
   Value *A = PoisonValue::get(MemRefDescTy);
   Value *Bv = PoisonValue::get(MemRefDescTy);
