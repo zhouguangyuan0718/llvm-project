@@ -139,3 +139,83 @@ Cost:
 - make rank set configurable (instead of fixed 1..5),
 - add coverage for multiple markers, marker+prefix/suffix mixing, and composite return cases,
 - introduce optional extension helpers only when real backend needs appear.
+
+
+---
+
+## 7. C++ API example: build and print a memref intrinsic call
+
+The following minimal example uses LLVM IRBuilder API to:
+
+1. create module/function,
+2. get `llvm.memref.elem.add.rank2` declaration through `Intrinsic::getOrInsertDeclaration`,
+3. call the intrinsic with rank-2 memref descriptor struct values,
+4. print IR.
+
+```c++
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/raw_ostream.h"
+
+using namespace llvm;
+
+int main() {
+  LLVMContext Ctx;
+  Module M("memref_intrinsic_demo", Ctx);
+  IRBuilder<> B(Ctx);
+
+  // void @demo()
+  FunctionType *FT = FunctionType::get(Type::getVoidTy(Ctx), false);
+  Function *F = Function::Create(FT, Function::ExternalLinkage, "demo", M);
+  BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", F);
+  B.SetInsertPoint(Entry);
+
+  // Rank-2 memref descriptor type:
+  // { ptr, ptr, i64, [2 x i64], [2 x i64] }
+  Type *I64 = Type::getInt64Ty(Ctx);
+  Type *Ptr = PointerType::get(Ctx, 0);
+  Type *Arr2I64 = ArrayType::get(I64, 2);
+  StructType *MemRefDescTy = StructType::get(Ctx, {Ptr, Ptr, I64, Arr2I64, Arr2I64});
+
+  // Declare intrinsic: llvm.memref.elem.add.rank2
+  Function *Intr = Intrinsic::getOrInsertDeclaration(
+      &M, Intrinsic::memref_elem_add_rank2,
+      {MemRefDescTy, MemRefDescTy, MemRefDescTy});
+
+  // Use poison values as demo operands.
+  Value *A = PoisonValue::get(MemRefDescTy);
+  Value *Bv = PoisonValue::get(MemRefDescTy);
+  Value *C = PoisonValue::get(MemRefDescTy);
+  B.CreateCall(Intr, {A, Bv, C});
+  B.CreateRetVoid();
+
+  if (verifyModule(M, &errs())) {
+    errs() << "module verification failed\n";
+    return 1;
+  }
+
+  M.print(outs(), nullptr);
+  return 0;
+}
+```
+
+Expected IR shape (simplified):
+
+```llvm
+declare void @llvm.memref.elem.add.rank2(
+  { ptr, ptr, i64, [2 x i64], [2 x i64] },
+  { ptr, ptr, i64, [2 x i64], [2 x i64] },
+  { ptr, ptr, i64, [2 x i64], [2 x i64] })
+
+define void @demo() {
+entry:
+  call void @llvm.memref.elem.add.rank2(
+    { ptr, ptr, i64, [2 x i64], [2 x i64] } poison,
+    { ptr, ptr, i64, [2 x i64], [2 x i64] } poison,
+    { ptr, ptr, i64, [2 x i64], [2 x i64] } poison)
+  ret void
+}
+```
