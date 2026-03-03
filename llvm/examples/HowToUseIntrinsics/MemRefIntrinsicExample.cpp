@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
@@ -27,18 +26,14 @@ int main() {
   BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", F);
   B.SetInsertPoint(Entry);
 
-  // Rank-2 memref descriptor type:
-  // { ptr, ptr, i64, [2 x i64], [2 x i64] }
-  Type *I64 = Type::getInt64Ty(Ctx);
-  Type *Ptr = PointerType::get(Ctx, 0);
-  Type *Arr2I64 = ArrayType::get(I64, 2);
-  StructType *MemRefDescTy =
-      StructType::get(Ctx, {Ptr, Ptr, I64, Arr2I64, Arr2I64});
-
   // int_memref_elem_add_rank2 is a concrete (non-overloaded) intrinsic.
   // So we must not pass overloaded type parameters here.
   Function *Intr =
       Intrinsic::getOrInsertDeclaration(&M, Intrinsic::memref_elem_add_rank2);
+
+  // Always use the exact parameter type from the declaration to avoid
+  // signature mismatches across type-system/ABI evolution.
+  Type *MemRefDescTy = Intr->getFunctionType()->getParamType(0);
 
   Value *A = PoisonValue::get(MemRefDescTy);
   Value *Bv = PoisonValue::get(MemRefDescTy);
