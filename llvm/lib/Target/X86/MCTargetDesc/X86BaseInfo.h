@@ -1268,6 +1268,11 @@ inline bool canUseApxExtendedReg(const MCInstrDesc &Desc) {
   // MOV32r0 is always expanded to XOR32rr
   if (Opcode == X86::MOV32r0)
     return true;
+  // MOV32ri64 is always expanded to MOV32ri on the 32-bit subregister plus an
+  // implicit-def of the full 64-bit register, so it can use EGPR whenever the
+  // underlying MOV32ri can.
+  if (Opcode == X86::MOV32ri64)
+    return true;
   // To be conservative, egpr is not used for all pseudo instructions
   // because we are not sure what instruction it will become.
   // FIXME: Could we improve it in X86ExpandPseudo?
