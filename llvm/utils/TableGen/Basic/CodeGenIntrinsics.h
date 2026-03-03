@@ -179,6 +179,7 @@ struct CodeGenIntrinsic {
 private:
   static bool isPointerLikeRecord(const Record *Ty);
   static bool isStructRecord(const Record *Ty);
+  static bool isArrayRecord(const Record *Ty);
   static void flattenRecordTypes(ArrayRef<const Record *> Tys,
                                  SmallVectorImpl<const Record *> &FlatTys);
 };
