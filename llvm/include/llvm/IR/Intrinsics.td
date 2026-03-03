@@ -471,6 +471,28 @@ class LLVMRankedMemRefDescriptorType<int rank,
                                      LLVMType index_type = llvm_i64_ty>
   : LLVMMemRefDescriptorType<rank, ptr_type, index_type>;
 
+
+// Convenience templates for common concrete ranks.
+class LLVMRankedMemRefDescriptorType1<LLVMType ptr_type = llvm_ptr_ty,
+                                      LLVMType index_type = llvm_i64_ty>
+  : LLVMRankedMemRefDescriptorType<1, ptr_type, index_type>;
+
+class LLVMRankedMemRefDescriptorType2<LLVMType ptr_type = llvm_ptr_ty,
+                                      LLVMType index_type = llvm_i64_ty>
+  : LLVMRankedMemRefDescriptorType<2, ptr_type, index_type>;
+
+class LLVMRankedMemRefDescriptorType3<LLVMType ptr_type = llvm_ptr_ty,
+                                      LLVMType index_type = llvm_i64_ty>
+  : LLVMRankedMemRefDescriptorType<3, ptr_type, index_type>;
+
+class LLVMRankedMemRefDescriptorType4<LLVMType ptr_type = llvm_ptr_ty,
+                                      LLVMType index_type = llvm_i64_ty>
+  : LLVMRankedMemRefDescriptorType<4, ptr_type, index_type>;
+
+class LLVMRankedMemRefDescriptorType5<LLVMType ptr_type = llvm_ptr_ty,
+                                      LLVMType index_type = llvm_i64_ty>
+  : LLVMRankedMemRefDescriptorType<5, ptr_type, index_type>;
+
 // Match the type of another intrinsic parameter.  Number is an index into the
 // list of overloaded types for the intrinsic, excluding all the fixed types.
 // The Number value must refer to a previously listed type.  For example:
