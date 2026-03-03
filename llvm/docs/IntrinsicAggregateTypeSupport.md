@@ -1,70 +1,72 @@
-# Intrinsic 聚合类型支持设计说明（Struct 基线 + Array/MemRef 最终方案）
+# LLVM Intrinsic 聚合类型支持设计说明
 
 ## 1. 背景与目标
 
-本文档总结两阶段能力演进：
+本设计为 LLVM intrinsic 类型系统新增聚合类型表达与匹配能力，覆盖：
 
-1. **基线阶段（Struct）**：为 LLVM intrinsic 类型系统增加 `struct` 表达能力，并打通 GlobalISel 对 intrinsic 聚合参数/返回的匹配。  
-2. **最终阶段（Array + MemRef）**：在上述能力上扩展 `array`，并提供可复用的 memref 描述符建模与 rank 扩展宏，以支持 MLIR lowered memref descriptor 场景。
+- `array` 类型描述与 IIT 编解码；
+- memref 描述符类型建模（固定布局，按 rank 实例化）；
+- TableGen / GlobalISel / DAG pattern 的统一 flatten 语义。
 
-核心目标是：
-
-- 在 intrinsic 签名中直接表达聚合类型（struct / array）。
-- 在 TableGen / GlobalISel / DAG pattern 侧按“**flatten 后的叶子元素**”进行匹配与约束。
-- 让前端或方言侧以更少重复定义，声明 rank 变化的 memref intrinsic 族。
+目标是让 intrinsic 签名、类型匹配和指令选择链路对聚合类型具备一致、可预测的行为。
 
 ---
 
-## 2. 基线：Struct 支持（已在基线分支）
+## 2. 相对原有 LLVM 的核心变化
 
-### 2.1 类型表达层
+### 2.1 Intrinsic IIT 类型系统扩展（Array）
 
-基线在 `Intrinsics.td` 中引入了 `LLVMStructType<...>`，用于在 intrinsic 参数/返回里表达聚合结构。其编码沿用 IIT 体系：
+新增 `IIT_ARRAY` 与对应的 `IITDescriptor::Array`，并打通：
 
-- 空 struct 使用 `IIT_EMPTYSTRUCT`。
-- 非空 struct 使用 `IIT_STRUCT` + 元素个数编码 + 递归元素签名。
+- IIT 表解码；
+- 固定 LLVM 类型构造（`ArrayType`）；
+- intrinsic 调用签名匹配（长度 + 元素类型递归匹配）。
 
-### 2.2 GlobalISel 导入语义
+这使 array 从“外部约定”变为 LLVM intrinsic 核心基础设施的一等类型。
 
-基线还修复了 intrinsic 翻译/匹配中“聚合参数只允许单 vreg”的限制，使聚合展开后可作为多个 operand/use 进入匹配流程。
+### 2.2 TableGen 类型表达扩展
 
-### 2.3 TableGen 语义
+新增 `LLVMArrayType<num_elements, element_type>`，用于直接在 intrinsic 签名中表达固定大小数组。
 
-在 TableGen 侧，基线引入“flatten 视图”概念：
+并新增 `LLVMMemRefDescriptorType<rank>`（固定 `ptr/ptr/i64/[rank x i64]/[rank x i64]` 布局）用于表达 MLIR lowered memref descriptor。
 
-- 返回值个数、参数个数不再只看顶层 `RetTys/ParamTys`，而看 flatten 后叶子数。
-- ImmArg/Pointer 判定也要映射到 flatten 后参数索引。
+### 2.3 Marker + 宏展开的 memref intrinsic 声明能力
 
-这一步是后续 array/memref 方案成立的前置条件。
+新增：
+
+- marker 类型：`llvm_memref_ty`；
+- rank 具体别名：`llvm_rank1_memref_ty ... llvm_rank5_memref_ty`；
+- 替换工具：`ReplaceMemRefMarker`；
+- 声明宏：`LLVMMemRefIntrinsic`。
+
+开发者可通过单个 `defm` 声明自动生成 rank1..5 的 intrinsic 族，而无需手写 5 份重复定义。
+
+### 2.4 统一 flatten 语义（TableGen/GlobalISel/DAG）
+
+`CodeGenIntrinsics` 中的 flatten 逻辑扩展为同时递归处理 struct 与 array：
+
+- struct：递归展开元素；
+- array：按元素个数重复展开元素类型（元素可继续递归）。
+
+`CodeGenDAGPatterns` 的 intrinsic 检查与类型约束改为基于 flatten 后的结果/参数列表，不再依赖顶层计数。
+
+这消除了“顶层签名个数”与“匹配器实际 operand 个数”不一致的问题。
 
 ---
 
-## 3. 最终方案：Array + MemRef
+## 3. 设计细节
 
-### 3.1 Array 一等公民化
+### 3.1 Array 的 IIT/IR 路径
 
-#### 3.1.1 IIT 与 IR 匹配层
+Array 在三处形成闭环：
 
-新增 `IIT_ARRAY` / `IITDescriptor::Array`，并在 IR intrinsic 解码与匹配中完整支持：
+1. `DecodeIITType`：读取数组长度与元素描述；
+2. `DecodeFixedType`：构造 `ArrayType`；
+3. `matchIntrinsicType`：按长度和元素递归匹配。
 
-- `DecodeIITType`：解析数组长度与元素类型描述。
-- `DecodeFixedType`：还原为 LLVM `ArrayType`。
-- `matchIntrinsicType`：按长度 + 元素类型递归匹配。
+### 3.2 MemRef 描述符模型
 
-这使 array 在 intrinsic 签名中不再是“外部约定”，而是可被 LLVM intrinsic 基础设施理解的类型。
-
-#### 3.1.2 TableGen flatten
-
-`CodeGenIntrinsics` flatten 逻辑扩展为：
-
-- struct：递归展开元素。
-- array：按元素数量重复展开元素类型（元素本身可继续递归）。
-
-因此 `array<2 x i32>` 将被视为两个 `i32` 叶子 operand。
-
-### 3.2 MemRef 描述符建模
-
-在 `Intrinsics.td` 提供固定布局的 `LLVMMemRefDescriptorType<rank>`：
+`LLVMMemRefDescriptorType<rank>` 固定布局：
 
 ```text
 { ptr allocatedPtr,
@@ -74,18 +76,11 @@
   [rank x i64] strides }
 ```
 
-并提供 rank 固定别名：
+`rank` 为编译期常量，匹配 LLVM intrinsic 静态签名模型。
 
-- `llvm_rank1_memref_ty` ... `llvm_rank5_memref_ty`。
+### 3.3 单声明多 rank 生成
 
-### 3.3 单点声明、多 rank 展开
-
-提供 marker + multiclass 机制：
-
-- marker：`llvm_memref_ty`。
-- helper：`LLVMMemRefIntrinsic`。
-
-定义时可写：
+示例：
 
 ```tablegen
 let TargetPrefix = "mytarget" in {
@@ -98,72 +93,51 @@ let TargetPrefix = "mytarget" in {
 
 - `int_mytarget_memref_add_rank1` ... `rank5`。
 
-内部通过 `ReplaceMemRefMarker` 将 `llvm_memref_ty` 替换为对应 `llvm_rankN_memref_ty`。
+### 3.4 组织与放置
 
-### 3.4 放置位置与组织
-
-为可维护性，memref 相关基础类型定义放在 `llvm_*_ty` 基础类型定义之后；
-`LLVMMemRefIntrinsic` 作为 `Intrinsic` 派生辅助，放在 `Intrinsic/DefaultAttrsIntrinsic` 定义之后。
+- memref 相关基础类型别名定义放在 `llvm_*_ty` 基础类型定义之后；
+- `LLVMMemRefIntrinsic` 放在 `Intrinsic/DefaultAttrsIntrinsic` 之后，保证派生关系清晰。
 
 ---
 
-## 4. 关键设计权衡
+## 4. 方案优势
 
-### 4.1 为什么按 flatten 叶子匹配？
+1. **表达能力提升**：intrinsic 可原生描述 array 与 memref descriptor。  
+2. **行为一致性提升**：IIT 解码、类型匹配、TableGen flatten、DAG 约束使用同一语义。  
+3. **匹配可预测**：避免因顶层参数计数导致的 matcher reject/不导入问题。  
+4. **声明成本降低**：通过 marker + `defm` 自动展开 rank 变体。  
+5. **维护成本降低**：减少手写 rank 变体复制粘贴与分叉逻辑。
+
+---
+
+## 5. 关键权衡
+
+### 5.1 Flatten 叶子匹配
 
 优点：
 
-- 与 MachineIR/GlobalISel 实际 operand 形态一致。
-- 匹配器与约束逻辑统一，不需要“聚合整体”特例。
-- 便于 ImmArg/Pointer 等属性复用既有机制。
+- 与 MachineIR operand 现实一致；
+- 匹配逻辑更统一。
 
 代价：
 
-- 语义上“一个参数”在 matcher 里会变成多个叶子参数。
-- 测试 pattern 必须使用正确叶子类型（例如 memref 前两项是 `ptr`，其余是 `i64`）。
+- 测试/模式需使用正确叶子类型（memref 前两项为 ptr，后续为 i64）。
 
-### 4.2 为什么 memref helper 固定 `ptr + i64`？
+### 5.2 固定 memref 字段类型（ptr + i64）
 
 优点：
 
-- 与当前 MLIR lowered memref descriptor 约定一致。
-- 避免模板参数化带来的类型组合膨胀与测试复杂度。
-- 用户心智更稳定：marker 一替换就是标准 descriptor。
+- 与当前 MLIR lowered descriptor 一致；
+- 降低模板组合复杂度。
 
 代价：
 
-- 若未来需要非 `i64` index 或特定 pointer 变体，需要新增专门 helper（而非重用同一 helper 参数化）。
+- 若未来需要变体字段类型，需新增扩展 helper。
 
 ---
 
-## 5. 与基线方案的关系
+## 6. 后续建议
 
-- **基线 struct 支持**提供了聚合 flatten 的总体框架。  
-- **最终 array/memref 方案**是在同一 flatten 架构上的自然扩展：
-  - struct + array 统一递归展开；
-  - DAG/GlobalISel 统一按 flatten 视图做检查与匹配；
-  - memref 只是“由 struct+array 组成的具体高频模型”，并通过 marker/multiclass 提供声明层抽象。
-
-这保证了方案一致性：不是“为 memref 单独打补丁”，而是“在聚合类型体系上增量建模”。
-
----
-
-## 6. 方案收益（相对基线/历史）
-
-1. **表达能力增强**：intrinsic 可直接描述 array 与 memref descriptor。  
-2. **匹配行为可预测**：统一 flatten 语义，减少“顶层参数个数”与“实际 matcher 个数”不一致问题。  
-3. **声明成本下降**：`LLVMMemRefIntrinsic` 支持单点声明自动展开 rank1..5 变体。  
-4. **实现可维护**：IIT 解码、类型匹配、TableGen flatten、DAG 约束四层逻辑保持一致演进。  
-5. **对 GlobalISel 友好**：聚合在导入阶段即可落为叶子 operand，避免后续 pass 做额外聚合拆解。
-
----
-
-## 7. 后续可演进方向
-
-- 将 rank 扩展范围从固定 1..5 提升为可配置列表（例如由 `defset` 驱动）。
-- 在保持固定布局 helper 的同时，增加“可选扩展 helper”满足特定后端 index/pointer 变体需求。
-- 补充更多 lit 覆盖：
-  - 多 marker 参数（一个 intrinsic 带多个 memref 参数）；
-  - `arg_prefix/arg_suffix` 与 marker 混用；
-  - 返回值含 struct/array/memref 组合场景。
-
+- 支持可配置 rank 集（而非固定 1..5）。
+- 增加多 marker、prefix/suffix 混用、复合返回值等测试覆盖。
+- 如有目标后端需求，再引入可选扩展 descriptor helper。

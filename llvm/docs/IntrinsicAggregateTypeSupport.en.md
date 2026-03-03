@@ -1,70 +1,72 @@
-# Intrinsic Aggregate Type Support Design (Struct Baseline + Final Array/MemRef Plan)
+# LLVM Intrinsic Aggregate Type Support Design
 
 ## 1. Background and Goals
 
-This document summarizes the two-stage evolution:
+This design introduces aggregate-type support for LLVM intrinsics across the full pipeline:
 
-1. **Baseline stage (Struct)**: add `struct` support to LLVM intrinsic type descriptions and make GlobalISel intrinsic matching work with aggregate signatures.
-2. **Final stage (Array + MemRef)**: extend the same framework to `array`, and provide reusable memref-descriptor modeling plus rank-expansion helpers for MLIR-lowered memref descriptor scenarios.
+- `array` type description and IIT encode/decode/match support;
+- memref descriptor modeling with rank-instantiated signatures;
+- a unified flatten model for TableGen / GlobalISel / DAG patterns.
 
-Primary goals:
-
-- Express aggregate types directly in intrinsic signatures (`struct` / `array`).
-- Use a single **flattened leaf-type view** in TableGen / GlobalISel / DAG patterns.
-- Reduce declaration duplication for memref intrinsic families across concrete ranks.
+The goal is to make intrinsic signatures, type matching, and instruction-selection behavior consistent and predictable for aggregate types.
 
 ---
 
-## 2. Baseline: Struct Support
+## 2. What changes relative to existing LLVM behavior
 
-### 2.1 Type-expression layer
+### 2.1 Intrinsic IIT extension for Array
 
-The baseline introduces `LLVMStructType<...>` in `Intrinsics.td` to represent aggregate intrinsic parameter/return types. Encoding follows IIT conventions:
+Add `IIT_ARRAY` and `IITDescriptor::Array`, and wire them through:
 
-- Empty struct: `IIT_EMPTYSTRUCT`.
-- Non-empty struct: `IIT_STRUCT` + element-count encoding + recursive element signatures.
+- IIT decoding,
+- fixed LLVM type materialization (`ArrayType`),
+- intrinsic signature matching (recursive length + element-type checks).
 
-### 2.2 GlobalISel import semantics
+This promotes array support to first-class intrinsic infrastructure.
 
-The baseline also removes assumptions that intrinsic aggregate arguments map to a single vreg. Expanded aggregate pieces can now be represented as multiple machine operands/uses.
+### 2.2 TableGen type-expression extension
 
-### 2.3 TableGen semantics
+Add `LLVMArrayType<num_elements, element_type>` so fixed-size arrays can be expressed directly in intrinsic signatures.
 
-A flatten-view model is introduced:
+Add `LLVMMemRefDescriptorType<rank>` to model MLIR-lowered memref descriptors with fixed layout.
 
-- Number of intrinsic params/results is based on flattened leaves, not only top-level `ParamTys`/`RetTys`.
-- Pointer/ImmArg checks are mapped to flattened parameter indices.
+### 2.3 Marker + macro expansion for memref intrinsic families
 
-This is the prerequisite for array/memref support.
+Add:
+
+- marker type: `llvm_memref_ty`,
+- concrete rank aliases: `llvm_rank1_memref_ty ... llvm_rank5_memref_ty`,
+- replacement helper: `ReplaceMemRefMarker`,
+- expansion multiclass: `LLVMMemRefIntrinsic`.
+
+A single `defm` can generate rank1..5 intrinsic variants without manual duplication.
+
+### 2.4 Unified flatten semantics across TableGen/GlobalISel/DAG
+
+`CodeGenIntrinsics` flattening now recursively handles both struct and array:
+
+- struct: recursive element expansion,
+- array: repeat element expansion `N` times.
+
+`CodeGenDAGPatterns` intrinsic checks and type application now use flattened parameter/result lists instead of top-level counts.
+
+This removes common operand-count mismatches between signature-level and matcher-level views.
 
 ---
 
-## 3. Final Plan: Array + MemRef
+## 3. Design details
 
-### 3.1 First-class array support
+### 3.1 Array in IIT/IR path
 
-#### 3.1.1 IIT and IR matching support
+Array handling is complete in three places:
 
-`IIT_ARRAY` / `IITDescriptor::Array` are added, and the IR intrinsic pipeline fully handles them:
+1. `DecodeIITType`: parse length + element descriptor,
+2. `DecodeFixedType`: build LLVM `ArrayType`,
+3. `matchIntrinsicType`: recursive length and element matching.
 
-- `DecodeIITType`: parse array length and element descriptors.
-- `DecodeFixedType`: materialize LLVM `ArrayType`.
-- `matchIntrinsicType`: recursively match length + element type.
+### 3.2 MemRef descriptor model
 
-So arrays are no longer ad-hoc; they are understood by intrinsic core infrastructure.
-
-#### 3.1.2 TableGen flattening
-
-`CodeGenIntrinsics` flattening is extended to:
-
-- Recursively expand structs.
-- Expand arrays by repeating element flattening `N` times.
-
-Therefore `[2 x i32]` becomes two flattened `i32` operands.
-
-### 3.2 MemRef descriptor modeling
-
-`Intrinsics.td` defines fixed-layout `LLVMMemRefDescriptorType<rank>`:
+`LLVMMemRefDescriptorType<rank>` uses fixed layout:
 
 ```text
 { ptr allocatedPtr,
@@ -74,16 +76,9 @@ Therefore `[2 x i32]` becomes two flattened `i32` operands.
   [rank x i64] strides }
 ```
 
-Rank-fixed aliases are provided:
+`rank` is a compile-time constant, aligned with LLVM intrinsic static typing.
 
-- `llvm_rank1_memref_ty` ... `llvm_rank5_memref_ty`.
-
-### 3.3 Single declaration, multi-rank expansion
-
-Marker + multiclass pattern:
-
-- Marker type: `llvm_memref_ty`
-- Expansion helper: `LLVMMemRefIntrinsic`
+### 3.3 Single declaration, multi-rank generation
 
 Example:
 
@@ -94,78 +89,55 @@ let TargetPrefix = "mytarget" in {
 }
 ```
 
-This generates:
+Auto-generates:
 
 - `int_mytarget_memref_add_rank1` ... `rank5`.
 
-Internally `ReplaceMemRefMarker` replaces `llvm_memref_ty` with corresponding `llvm_rankN_memref_ty`.
+### 3.4 Definition placement
 
-### 3.4 Placement and organization
-
-For maintainability:
-
-- Memref type aliases are defined after base `llvm_*_ty` type aliases.
-- `LLVMMemRefIntrinsic` is defined after `Intrinsic/DefaultAttrsIntrinsic`, since it expands to intrinsic definitions.
+- memref base aliases are placed after base `llvm_*_ty` type aliases,
+- `LLVMMemRefIntrinsic` is placed after `Intrinsic/DefaultAttrsIntrinsic` definitions.
 
 ---
 
-## 4. Key Trade-offs
+## 4. Advantages of the approach
 
-### 4.1 Why match on flattened leaves?
+1. **Higher expressiveness**: intrinsics can natively model array and memref-descriptor shapes.  
+2. **Cross-layer consistency**: IIT decode, type matching, TableGen flattening, and DAG constraints share one semantic model.  
+3. **Predictable matcher behavior**: avoids top-level-vs-leaf operand count mismatches.  
+4. **Lower declaration cost**: marker + `defm` expands rank variants automatically.  
+5. **Lower maintenance cost**: less repetitive rank-specific boilerplate.
 
-Benefits:
+---
 
-- Matches MachineIR/GlobalISel operand reality.
-- Keeps matcher/type-constraint logic uniform (no aggregate-only special case).
-- Reuses existing pointer/ImmArg machinery.
+## 5. Trade-offs
+
+### 5.1 Flattened leaf matching
+
+Pros:
+
+- aligns with MachineIR operand reality,
+- keeps matcher logic uniform.
 
 Cost:
 
-- One semantic high-level argument can become multiple matcher operands.
-- Tests/patterns must use correct leaf types (for memref: `ptr`, `ptr`, then `i64...`).
+- tests/patterns must use correct leaf operand types (for memref: `ptr`, `ptr`, then `i64...`).
 
-### 4.2 Why fixed `ptr + i64` memref helper?
+### 5.2 Fixed memref field types (`ptr + i64`)
 
-Benefits:
+Pros:
 
-- Matches current MLIR lowered memref descriptor convention.
-- Avoids template explosion and test complexity.
-- Stable user model: marker replacement always yields canonical descriptor layout.
+- aligned with current MLIR-lowered descriptor convention,
+- avoids template explosion.
 
 Cost:
 
-- Future non-`i64` index or custom pointer variants require dedicated helper extensions.
+- future field-type variants require explicit extension helpers.
 
 ---
 
-## 5. Relation Between Baseline and Final Design
+## 6. Recommended follow-ups
 
-- The **struct baseline** establishes the aggregate flatten framework.
-- The **final array/memref plan** is a direct extension of the same framework:
-  - struct + array recursive flattening,
-  - unified flattened checks in DAG/GlobalISel,
-  - memref as a high-frequency modeled aggregate (struct+array composition).
-
-This keeps the implementation coherent instead of introducing one-off memref-only paths.
-
----
-
-## 6. Benefits of the Final Approach
-
-1. **Higher expressiveness**: intrinsic signatures can natively model array and memref descriptor shapes.
-2. **Predictable matching behavior**: flattened semantics avoid top-level-vs-leaf operand-count mismatches.
-3. **Lower declaration cost**: one marker-based declaration expands into rank1..5 variants.
-4. **Better maintainability**: IIT decoding, type matching, TableGen flattening, and DAG constraints evolve consistently.
-5. **GlobalISel-friendly**: aggregates are lowered to leaf operands early, avoiding later aggregate splitting complexity.
-
----
-
-## 7. Future Work
-
-- Make rank expansion range configurable (instead of fixed 1..5).
-- Keep fixed-layout helper as default, and add optional extension helpers for special targets if needed.
-- Add more lit coverage for:
-  - multiple memref markers in one intrinsic,
-  - marker mixed with argument prefix/suffix,
-  - return types combining struct/array/memref patterns.
-
+- make rank set configurable (instead of fixed 1..5),
+- add coverage for multiple markers, marker+prefix/suffix mixing, and composite return cases,
+- introduce optional extension helpers only when real backend needs appear.
