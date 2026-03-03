@@ -1957,7 +1957,7 @@ static unsigned GetNumNodeResults(const Record *Operator,
     return 0; // All return nothing.
 
   if (Operator->isSubClassOf("Intrinsic"))
-    return CDP.getIntrinsic(Operator).getNumFlattenedRetTys();
+    return CDP.getIntrinsic(Operator).IS.RetTys.size();
 
   if (Operator->isSubClassOf("SDNode"))
     return CDP.getSDNodeInfo(Operator).getNumResults();
@@ -2609,19 +2609,14 @@ bool TreePatternNode::ApplyTypeConstraints(TreePattern &TP, bool NotRegisters) {
   if (const CodeGenIntrinsic *Int = getIntrinsicInfo(CDP)) {
     bool MadeChange = false;
 
-    SmallVector<const Record *, 8> FlatRetTys;
-    SmallVector<const Record *, 8> FlatParamTys;
-    Int->getFlattenedRetTys(FlatRetTys);
-    Int->getFlattenedParamTys(FlatParamTys);
-
     // Apply the result type to the node.
-    for (unsigned i = 0, e = FlatRetTys.size(); i != e; ++i)
+    for (unsigned i = 0, e = Int->IS.RetTys.size(); i != e; ++i)
       MadeChange |= UpdateNodeType(
-          i, getValueType(FlatRetTys[i]->getValueAsDef("VT")), TP);
+          i, getValueType(Int->IS.RetTys[i]->getValueAsDef("VT")), TP);
 
-    if (getNumChildren() != FlatParamTys.size() + 1) {
+    if (getNumChildren() != Int->IS.ParamTys.size() + 1) {
       TP.error("Intrinsic '" + Int->Name + "' expects " +
-               Twine(FlatParamTys.size()) + " operands, not " +
+               Twine(Int->IS.ParamTys.size()) + " operands, not " +
                Twine(getNumChildren() - 1) + " operands!");
       return false;
     }
@@ -2633,7 +2628,7 @@ bool TreePatternNode::ApplyTypeConstraints(TreePattern &TP, bool NotRegisters) {
       MadeChange |= getChild(i + 1).ApplyTypeConstraints(TP, NotRegisters);
 
       MVT::SimpleValueType OpVT =
-          getValueType(FlatParamTys[i]->getValueAsDef("VT"));
+          getValueType(Int->IS.ParamTys[i]->getValueAsDef("VT"));
       assert(getChild(i + 1).getNumTypes() == 1 && "Unhandled case");
       MadeChange |= getChild(i + 1).UpdateNodeType(0, OpVT, TP);
     }
