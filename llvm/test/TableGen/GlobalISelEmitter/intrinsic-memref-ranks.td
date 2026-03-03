@@ -11,7 +11,7 @@ def P0RC : RegisterClass<"MyTarget", [p0], 32, (add R0)>;
 // descriptor type. Use the helper multiclass to define a family of concrete
 // rank variants with one declaration.
 let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
+  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
       [], [llvm_memref_ty]>;
 }
 
