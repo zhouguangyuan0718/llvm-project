@@ -2609,14 +2609,30 @@ bool TreePatternNode::ApplyTypeConstraints(TreePattern &TP, bool NotRegisters) {
   if (const CodeGenIntrinsic *Int = getIntrinsicInfo(CDP)) {
     bool MadeChange = false;
 
-    // Apply the result type to the node.
-    for (unsigned i = 0, e = Int->IS.RetTys.size(); i != e; ++i)
-      MadeChange |= UpdateNodeType(
-          i, getValueType(Int->IS.RetTys[i]->getValueAsDef("VT")), TP);
+    SmallVector<const Record *, 8> FlatRetTys;
+    SmallVector<const Record *, 8> FlatParamTys;
+    Int->getFlattenedRetTys(FlatRetTys);
+    Int->getFlattenedParamTys(FlatParamTys);
 
-    if (getNumChildren() != Int->IS.ParamTys.size() + 1) {
+    ArrayRef<const Record *> ActiveRetTys = Int->IS.RetTys;
+    ArrayRef<const Record *> ActiveParamTys = Int->IS.ParamTys;
+
+    // Keep the intrinsic signature as the default (so aggregate operands stay
+    // representable as top-level types), but also accept flattened operands
+    // used by GlobalISel import/matching paths.
+    if (getNumChildren() == FlatParamTys.size() + 1) {
+      ActiveRetTys = FlatRetTys;
+      ActiveParamTys = FlatParamTys;
+    }
+
+    // Apply the result type to the node.
+    for (unsigned i = 0, e = ActiveRetTys.size(); i != e; ++i)
+      MadeChange |= UpdateNodeType(
+          i, getValueType(ActiveRetTys[i]->getValueAsDef("VT")), TP);
+
+    if (getNumChildren() != ActiveParamTys.size() + 1) {
       TP.error("Intrinsic '" + Int->Name + "' expects " +
-               Twine(Int->IS.ParamTys.size()) + " operands, not " +
+               Twine(ActiveParamTys.size()) + " operands, not " +
                Twine(getNumChildren() - 1) + " operands!");
       return false;
     }
@@ -2628,7 +2644,7 @@ bool TreePatternNode::ApplyTypeConstraints(TreePattern &TP, bool NotRegisters) {
       MadeChange |= getChild(i + 1).ApplyTypeConstraints(TP, NotRegisters);
 
       MVT::SimpleValueType OpVT =
-          getValueType(Int->IS.ParamTys[i]->getValueAsDef("VT"));
+          getValueType(ActiveParamTys[i]->getValueAsDef("VT"));
       assert(getChild(i + 1).getNumTypes() == 1 && "Unhandled case");
       MadeChange |= getChild(i + 1).UpdateNodeType(0, OpVT, TP);
     }
