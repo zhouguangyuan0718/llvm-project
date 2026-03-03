@@ -656,11 +656,11 @@ class LLVMMemRefDescriptorType<int rank>
 }
 
 // Convenience templates for common concrete ranks.
-class LLVMMemRefDescriptorType1 : LLVMMemRefDescriptorType<1>;
-class LLVMMemRefDescriptorType2 : LLVMMemRefDescriptorType<2>;
-class LLVMMemRefDescriptorType3 : LLVMMemRefDescriptorType<3>;
-class LLVMMemRefDescriptorType4 : LLVMMemRefDescriptorType<4>;
-class LLVMMemRefDescriptorType5 : LLVMMemRefDescriptorType<5>;
+def llvm_memref1_ty : LLVMMemRefDescriptorType<1>;
+def llvm_memref2_ty : LLVMMemRefDescriptorType<2>;
+def llvm_memref3_ty : LLVMMemRefDescriptorType<3>;
+def llvm_memref4_ty : LLVMMemRefDescriptorType<4>;
+def llvm_memref5_ty : LLVMMemRefDescriptorType<5>;
 
 // Marker type used by LLVMMemRefIntrinsic1To5 helper below.
 def llvm_memref_ty : LLVMType<OtherVT>;
@@ -789,19 +789,19 @@ multiclass LLVMMemRefIntrinsic1To5<
     list<LLVMType> ParamTypes = [],
     list<IntrinsicProperty> IntrProperties = []> {
   def _rank1 : Intrinsic<RetTypes,
-      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType1>.ret,
+      ReplaceMemRefMarker<ParamTypes, llvm_memref1_ty>.ret,
       IntrProperties>;
   def _rank2 : Intrinsic<RetTypes,
-      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType2>.ret,
+      ReplaceMemRefMarker<ParamTypes, llvm_memref2_ty>.ret,
       IntrProperties>;
   def _rank3 : Intrinsic<RetTypes,
-      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType3>.ret,
+      ReplaceMemRefMarker<ParamTypes, llvm_memref3_ty>.ret,
       IntrProperties>;
   def _rank4 : Intrinsic<RetTypes,
-      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType4>.ret,
+      ReplaceMemRefMarker<ParamTypes, llvm_memref4_ty>.ret,
       IntrProperties>;
   def _rank5 : Intrinsic<RetTypes,
-      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType5>.ret,
+      ReplaceMemRefMarker<ParamTypes, llvm_memref5_ty>.ret,
       IntrProperties>;
 }
 
