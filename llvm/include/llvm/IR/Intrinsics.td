@@ -190,6 +190,10 @@ def IntrHasSideEffects : IntrinsicProperty;
 // poison.
 def IntrNoCreateUndefOrPoison : IntrinsicProperty;
 
+// Allow SelectionDAG pattern type constraints to accept flattened aggregate
+// intrinsic operands/results (used by GlobalISel intrinsic import patterns).
+def IntrAllowFlattenedTypeConstraints : IntrinsicProperty;
+
 //===----------------------------------------------------------------------===//
 // IIT constants and utils
 //===----------------------------------------------------------------------===//
@@ -791,21 +795,24 @@ multiclass LLVMMemRefIntrinsic<
     list<LLVMType> RetTypes,
     list<LLVMType> ParamTypes = [],
     list<IntrinsicProperty> IntrProperties = []> {
+  list<IntrinsicProperty> EffectiveIntrProperties = !listconcat(
+      IntrProperties, [IntrAllowFlattenedTypeConstraints]);
+
   def _rank1 : DefaultAttrsIntrinsic<RetTypes,
       ReplaceMemRefMarker<ParamTypes, llvm_rank1_memref_ty>.ret,
-      IntrProperties>;
+      EffectiveIntrProperties>;
   def _rank2 : DefaultAttrsIntrinsic<RetTypes,
       ReplaceMemRefMarker<ParamTypes, llvm_rank2_memref_ty>.ret,
-      IntrProperties>;
+      EffectiveIntrProperties>;
   def _rank3 : DefaultAttrsIntrinsic<RetTypes,
       ReplaceMemRefMarker<ParamTypes, llvm_rank3_memref_ty>.ret,
-      IntrProperties>;
+      EffectiveIntrProperties>;
   def _rank4 : DefaultAttrsIntrinsic<RetTypes,
       ReplaceMemRefMarker<ParamTypes, llvm_rank4_memref_ty>.ret,
-      IntrProperties>;
+      EffectiveIntrProperties>;
   def _rank5 : DefaultAttrsIntrinsic<RetTypes,
       ReplaceMemRefMarker<ParamTypes, llvm_rank5_memref_ty>.ret,
-      IntrProperties>;
+      EffectiveIntrProperties>;
 }
 
 /// ClangBuiltin - If this intrinsic exactly corresponds to a Clang builtin, this

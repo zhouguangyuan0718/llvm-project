@@ -117,6 +117,9 @@ struct CodeGenIntrinsic {
   // True if the intrinsic is marked as IntrNoCreateUndefOrPoison.
   bool isNoCreateUndefOrPoison = false;
 
+  // True if DAG type constraints may use flattened aggregate types.
+  bool allowFlattenedTypeConstraints = false;
+
   enum ArgAttrKind {
     NoCapture,
     NoAlias,

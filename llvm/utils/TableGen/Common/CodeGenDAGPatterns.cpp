@@ -2620,7 +2620,8 @@ bool TreePatternNode::ApplyTypeConstraints(TreePattern &TP, bool NotRegisters) {
     // Keep the intrinsic signature as the default (so aggregate operands stay
     // representable as top-level types), but also accept flattened operands
     // used by GlobalISel import/matching paths.
-    if (getNumChildren() == FlatParamTys.size() + 1) {
+    if (Int->allowFlattenedTypeConstraints &&
+        getNumChildren() == FlatParamTys.size() + 1) {
       ActiveRetTys = FlatRetTys;
       ActiveParamTys = FlatParamTys;
     }
