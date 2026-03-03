@@ -171,6 +171,8 @@ struct CodeGenIntrinsic {
   bool isParamImmArg(unsigned ParamIdx) const;
   unsigned getNumFlattenedRetTys() const;
   unsigned getNumFlattenedParamTys() const;
+  void getFlattenedRetTys(SmallVectorImpl<const Record *> &FlatTys) const;
+  void getFlattenedParamTys(SmallVectorImpl<const Record *> &FlatTys) const;
   bool isFlatParamAPointer(unsigned FlatParamIdx) const;
   bool isFlatParamImmArg(unsigned FlatParamIdx) const;
 

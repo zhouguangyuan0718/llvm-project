@@ -506,19 +506,29 @@ void CodeGenIntrinsic::flattenRecordTypes(
 
 unsigned CodeGenIntrinsic::getNumFlattenedRetTys() const {
   SmallVector<const Record *, 8> FlatTys;
-  flattenRecordTypes(IS.RetTys, FlatTys);
+  getFlattenedRetTys(FlatTys);
   return FlatTys.size();
 }
 
 unsigned CodeGenIntrinsic::getNumFlattenedParamTys() const {
   SmallVector<const Record *, 8> FlatTys;
-  flattenRecordTypes(IS.ParamTys, FlatTys);
+  getFlattenedParamTys(FlatTys);
   return FlatTys.size();
+}
+
+void CodeGenIntrinsic::getFlattenedRetTys(
+    SmallVectorImpl<const Record *> &FlatTys) const {
+  flattenRecordTypes(IS.RetTys, FlatTys);
+}
+
+void CodeGenIntrinsic::getFlattenedParamTys(
+    SmallVectorImpl<const Record *> &FlatTys) const {
+  flattenRecordTypes(IS.ParamTys, FlatTys);
 }
 
 bool CodeGenIntrinsic::isFlatParamAPointer(unsigned FlatParamIdx) const {
   SmallVector<const Record *, 8> FlatTys;
-  flattenRecordTypes(IS.ParamTys, FlatTys);
+  getFlattenedParamTys(FlatTys);
   if (FlatParamIdx >= FlatTys.size())
     return false;
   return isPointerLikeRecord(FlatTys[FlatParamIdx]);
