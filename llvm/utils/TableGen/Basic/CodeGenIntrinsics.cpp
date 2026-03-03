@@ -478,17 +478,29 @@ bool CodeGenIntrinsic::isStructRecord(const Record *Ty) {
   return Ty->isSubClassOf("LLVMStructType");
 }
 
+bool CodeGenIntrinsic::isArrayRecord(const Record *Ty) {
+  return Ty->isSubClassOf("LLVMArrayType");
+}
+
 void CodeGenIntrinsic::flattenRecordTypes(
     ArrayRef<const Record *> Tys, SmallVectorImpl<const Record *> &FlatTys) {
   for (const Record *Ty : Tys) {
-    if (!isStructRecord(Ty)) {
-      FlatTys.push_back(Ty);
+    if (isStructRecord(Ty)) {
+      const ListInit *Elements = Ty->getValueAsListInit("ElementTypes");
+      for (const Init *Elt : Elements->getValues())
+        flattenRecordTypes({cast<DefInit>(Elt)->getDef()}, FlatTys);
       continue;
     }
 
-    const ListInit *Elements = Ty->getValueAsListInit("ElementTypes");
-    for (const Init *Elt : Elements->getValues())
-      flattenRecordTypes({cast<DefInit>(Elt)->getDef()}, FlatTys);
+    if (isArrayRecord(Ty)) {
+      const Record *ElementTy = Ty->getValueAsDef("ElementType");
+      int64_t NumElements = Ty->getValueAsInt("NumElements");
+      for (int64_t I = 0; I != NumElements; ++I)
+        flattenRecordTypes({ElementTy}, FlatTys);
+      continue;
+    }
+
+    FlatTys.push_back(Ty);
   }
 }
 

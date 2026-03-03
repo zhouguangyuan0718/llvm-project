@@ -148,6 +148,7 @@ namespace Intrinsic {
       Vector,
       Pointer,
       Struct,
+      Array,
       Argument,
       ExtendArgument,
       TruncArgument,
@@ -168,6 +169,7 @@ namespace Intrinsic {
       unsigned Float_Width;
       unsigned Pointer_AddressSpace;
       unsigned Struct_NumElements;
+      unsigned Array_NumElements;
       unsigned Argument_Info;
       ElementCount Vector_Width;
     };

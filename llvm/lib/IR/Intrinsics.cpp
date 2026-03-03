@@ -399,6 +399,13 @@ DecodeIITType(unsigned &NextElt, ArrayRef<unsigned char> Infos,
       DecodeIITType(NextElt, Infos, Info, OutputTable);
     return;
   }
+  case IIT_ARRAY: {
+    unsigned ArrayElts = Infos[NextElt++];
+
+    OutputTable.push_back(IITDescriptor::get(IITDescriptor::Array, ArrayElts));
+    DecodeIITType(NextElt, Infos, Info, OutputTable);
+    return;
+  }
   case IIT_SUBDIVIDE2_ARG: {
     unsigned ArgInfo = (NextElt == Infos.size() ? 0 : Infos[NextElt++]);
     OutputTable.push_back(
@@ -518,6 +525,9 @@ static Type *DecodeFixedType(ArrayRef<Intrinsic::IITDescriptor> &Infos,
       Elts.push_back(DecodeFixedType(Infos, Tys, Context));
     return StructType::get(Context, Elts);
   }
+  case IITDescriptor::Array:
+    return ArrayType::get(DecodeFixedType(Infos, Tys, Context),
+                          D.Array_NumElements);
   case IITDescriptor::Argument:
     return Tys[D.getArgumentNumber()];
   case IITDescriptor::ExtendArgument: {
@@ -867,6 +877,13 @@ matchIntrinsicType(Type *Ty, ArrayRef<Intrinsic::IITDescriptor> &Infos,
                              DeferredChecks, IsDeferredCheck))
         return true;
     return false;
+  }
+
+  case IITDescriptor::Array: {
+    ArrayType *AT = dyn_cast<ArrayType>(Ty);
+    return !AT || AT->getNumElements() != D.Array_NumElements ||
+           matchIntrinsicType(AT->getElementType(), Infos, ArgTys,
+                              DeferredChecks, IsDeferredCheck);
   }
 
   case IITDescriptor::Argument:

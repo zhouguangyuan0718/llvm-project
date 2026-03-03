@@ -334,6 +334,7 @@ def IIT_V6 : IIT_Vec<6, 50>;
 def IIT_V10 : IIT_Vec<10, 51>;
 def IIT_V2048 : IIT_Vec<2048, 52>;
 def IIT_V4096 : IIT_Vec<4096, 53>;
+def IIT_ARRAY : IIT_Base<54>;
 }
 
 defvar IIT_all_FixedTypes = !filter(iit, IIT_all,
@@ -423,6 +424,43 @@ class LLVMStructType<list<LLVMType> element_types> : LLVMType<OtherVT> {
   let Sig =
       !listconcat(StructPrefix,
                   !listflatten(!foreach(ty, ElementTypes, ty.Sig)));
+}
+
+class LLVMArrayType<int num_elements, LLVMType element_type>
+  : LLVMType<OtherVT> {
+  int NumElements = num_elements;
+  LLVMType ElementType = element_type;
+  assert !and(!le(0, NumElements), !le(NumElements, 255)),
+         "LLVMArrayType only supports element counts in range [0, 255]";
+  let Sig = !listconcat([
+    IIT_ARRAY.Number,
+    NumElements,
+  ], ElementType.Sig);
+}
+
+
+// MLIR lowered memref descriptor layout:
+// struct {
+//   ptr allocatedPtr;
+//   ptr alignedPtr;
+//   index offset;
+//   index sizes[Rank];   // omitted when Rank == 0
+//   index strides[Rank]; // omitted when Rank == 0
+// }
+// See mlir::LLVMTypeConverter::getMemRefDescriptorFields.
+class LLVMMemRefDescriptorType<int rank,
+                               LLVMType ptr_type = llvm_ptr_ty,
+                               LLVMType index_type = llvm_i64_ty>
+  : LLVMStructType<!if(!eq(rank, 0),
+      [ptr_type, ptr_type, index_type],
+      [ptr_type, ptr_type, index_type,
+       LLVMArrayType<rank, index_type>,
+       LLVMArrayType<rank, index_type>])> {
+  int Rank = rank;
+  LLVMType PtrType = ptr_type;
+  LLVMType IndexType = index_type;
+  assert !and(!le(0, Rank), !le(Rank, 255)),
+         "LLVMMemRefDescriptorType only supports ranks in range [0, 255]";
 }
 
 // Match the type of another intrinsic parameter.  Number is an index into the
