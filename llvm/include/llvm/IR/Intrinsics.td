@@ -439,108 +439,6 @@ class LLVMArrayType<int num_elements, LLVMType element_type>
 }
 
 
-// MLIR lowered ranked memref descriptor layout:
-// struct {
-//   ptr allocatedPtr;
-//   ptr alignedPtr;
-//   index offset;
-//   index sizes[Rank];   // omitted when Rank == 0
-//   index strides[Rank]; // omitted when Rank == 0
-// }
-//
-// Rank is part of the descriptor type and should be instantiated as a concrete
-// constant (e.g. Rank = 2/3/4) in intrinsic definitions.
-// See mlir::LLVMTypeConverter::getMemRefDescriptorFields.
-class LLVMMemRefDescriptorType<int rank,
-                               LLVMType ptr_type = llvm_ptr_ty,
-                               LLVMType index_type = llvm_i64_ty>
-  : LLVMStructType<!if(!eq(rank, 0),
-      [ptr_type, ptr_type, index_type],
-      [ptr_type, ptr_type, index_type,
-       LLVMArrayType<rank, index_type>,
-       LLVMArrayType<rank, index_type>])> {
-  int Rank = rank;
-  LLVMType PtrType = ptr_type;
-  LLVMType IndexType = index_type;
-  assert !and(!le(0, Rank), !le(Rank, 255)),
-         "LLVMMemRefDescriptorType only supports ranks in range [0, 255]";
-}
-
-class LLVMRankedMemRefDescriptorType<int rank,
-                                     LLVMType ptr_type = llvm_ptr_ty,
-                                     LLVMType index_type = llvm_i64_ty>
-  : LLVMMemRefDescriptorType<rank, ptr_type, index_type>;
-
-
-// Convenience templates for common concrete ranks.
-class LLVMRankedMemRefDescriptorType1<LLVMType ptr_type = llvm_ptr_ty,
-                                      LLVMType index_type = llvm_i64_ty>
-  : LLVMRankedMemRefDescriptorType<1, ptr_type, index_type>;
-
-class LLVMRankedMemRefDescriptorType2<LLVMType ptr_type = llvm_ptr_ty,
-                                      LLVMType index_type = llvm_i64_ty>
-  : LLVMRankedMemRefDescriptorType<2, ptr_type, index_type>;
-
-class LLVMRankedMemRefDescriptorType3<LLVMType ptr_type = llvm_ptr_ty,
-                                      LLVMType index_type = llvm_i64_ty>
-  : LLVMRankedMemRefDescriptorType<3, ptr_type, index_type>;
-
-class LLVMRankedMemRefDescriptorType4<LLVMType ptr_type = llvm_ptr_ty,
-                                      LLVMType index_type = llvm_i64_ty>
-  : LLVMRankedMemRefDescriptorType<4, ptr_type, index_type>;
-
-class LLVMRankedMemRefDescriptorType5<LLVMType ptr_type = llvm_ptr_ty,
-                                      LLVMType index_type = llvm_i64_ty>
-  : LLVMRankedMemRefDescriptorType<5, ptr_type, index_type>;
-
-
-// Macro helper: define one intrinsic family for ranked memref descriptors with
-// concrete rank variants [1..5].
-//
-// Example:
-//   let TargetPrefix = "mytarget" in {
-//     defm int_mytarget_memref_add : LLVMRankedMemRefIntrinsic1To5<
-//         [llvm_void_ty], [], [llvm_i32_ty], llvm_i32_ty, llvm_i32_ty,
-//         [IntrNoMem]>;
-//   }
-// This generates:
-//   int_mytarget_memref_add_rank1 ... int_mytarget_memref_add_rank5
-// each with parameter list:
-//   <ArgPrefix..., memref_descriptor(rankN), ArgSuffix...>
-multiclass LLVMRankedMemRefIntrinsic1To5<
-    list<LLVMType> ret_types,
-    list<LLVMType> arg_prefix = [],
-    list<LLVMType> arg_suffix = [],
-    LLVMType ptr_type = llvm_ptr_ty,
-    LLVMType index_type = llvm_i64_ty,
-    list<IntrinsicProperty> intr_properties = []> {
-  def _rank1 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMRankedMemRefDescriptorType1<ptr_type, index_type>],
-                  arg_suffix),
-      intr_properties>;
-  def _rank2 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMRankedMemRefDescriptorType2<ptr_type, index_type>],
-                  arg_suffix),
-      intr_properties>;
-  def _rank3 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMRankedMemRefDescriptorType3<ptr_type, index_type>],
-                  arg_suffix),
-      intr_properties>;
-  def _rank4 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMRankedMemRefDescriptorType4<ptr_type, index_type>],
-                  arg_suffix),
-      intr_properties>;
-  def _rank5 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMRankedMemRefDescriptorType5<ptr_type, index_type>],
-                  arg_suffix),
-      intr_properties>;
-}
-
 // Match the type of another intrinsic parameter.  Number is an index into the
 // list of overloaded types for the intrinsic, excluding all the fixed types.
 // The Number value must refer to a previously listed type.  For example:
@@ -733,6 +631,102 @@ def llvm_vararg_ty     : LLVMType<isVoid>;   // this means vararg here
 def llvm_externref_ty  : LLVMType<externref>;
 def llvm_funcref_ty    : LLVMType<funcref>;
 def llvm_exnref_ty     : LLVMType<exnref>;
+
+// MLIR lowered ranked memref descriptor layout:
+// struct {
+//   ptr allocatedPtr;
+//   ptr alignedPtr;
+//   index offset;
+//   index sizes[Rank];   // omitted when Rank == 0
+//   index strides[Rank]; // omitted when Rank == 0
+// }
+//
+// Rank is part of the descriptor type and should be instantiated as a concrete
+// constant (e.g. Rank = 2/3/4) in intrinsic definitions.
+// See mlir::LLVMTypeConverter::getMemRefDescriptorFields.
+class LLVMMemRefDescriptorType<int rank,
+                               LLVMType ptr_type = llvm_ptr_ty,
+                               LLVMType index_type = llvm_i64_ty>
+  : LLVMStructType<!if(!eq(rank, 0),
+      [ptr_type, ptr_type, index_type],
+      [ptr_type, ptr_type, index_type,
+       LLVMArrayType<rank, index_type>,
+       LLVMArrayType<rank, index_type>])> {
+  int Rank = rank;
+  LLVMType PtrType = ptr_type;
+  LLVMType IndexType = index_type;
+  assert !and(!le(0, Rank), !le(Rank, 255)),
+         "LLVMMemRefDescriptorType only supports ranks in range [0, 255]";
+}
+
+// Convenience templates for common concrete ranks.
+class LLVMMemRefDescriptorType1<LLVMType ptr_type = llvm_ptr_ty,
+                                LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<1, ptr_type, index_type>;
+
+class LLVMMemRefDescriptorType2<LLVMType ptr_type = llvm_ptr_ty,
+                                LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<2, ptr_type, index_type>;
+
+class LLVMMemRefDescriptorType3<LLVMType ptr_type = llvm_ptr_ty,
+                                LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<3, ptr_type, index_type>;
+
+class LLVMMemRefDescriptorType4<LLVMType ptr_type = llvm_ptr_ty,
+                                LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<4, ptr_type, index_type>;
+
+class LLVMMemRefDescriptorType5<LLVMType ptr_type = llvm_ptr_ty,
+                                LLVMType index_type = llvm_i64_ty>
+  : LLVMMemRefDescriptorType<5, ptr_type, index_type>;
+
+// Macro helper: define one intrinsic family for memref descriptors with
+// concrete rank variants [1..5].
+//
+// Example:
+//   let TargetPrefix = "mytarget" in {
+//     defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
+//         [llvm_void_ty], [], [llvm_i32_ty], llvm_i32_ty, llvm_i32_ty,
+//         [IntrNoMem]>;
+//   }
+// This generates:
+//   int_mytarget_memref_add_rank1 ... int_mytarget_memref_add_rank5
+// each with parameter list:
+//   <ArgPrefix..., memref_descriptor(rankN), ArgSuffix...>
+multiclass LLVMMemRefIntrinsic1To5<
+    list<LLVMType> ret_types,
+    list<LLVMType> arg_prefix = [],
+    list<LLVMType> arg_suffix = [],
+    LLVMType ptr_type = llvm_ptr_ty,
+    LLVMType index_type = llvm_i64_ty,
+    list<IntrinsicProperty> intr_properties = []> {
+  def _rank1 : Intrinsic<ret_types,
+      !listconcat(arg_prefix,
+                  [LLVMMemRefDescriptorType1<ptr_type, index_type>],
+                  arg_suffix),
+      intr_properties>;
+  def _rank2 : Intrinsic<ret_types,
+      !listconcat(arg_prefix,
+                  [LLVMMemRefDescriptorType2<ptr_type, index_type>],
+                  arg_suffix),
+      intr_properties>;
+  def _rank3 : Intrinsic<ret_types,
+      !listconcat(arg_prefix,
+                  [LLVMMemRefDescriptorType3<ptr_type, index_type>],
+                  arg_suffix),
+      intr_properties>;
+  def _rank4 : Intrinsic<ret_types,
+      !listconcat(arg_prefix,
+                  [LLVMMemRefDescriptorType4<ptr_type, index_type>],
+                  arg_suffix),
+      intr_properties>;
+  def _rank5 : Intrinsic<ret_types,
+      !listconcat(arg_prefix,
+                  [LLVMMemRefDescriptorType5<ptr_type, index_type>],
+                  arg_suffix),
+      intr_properties>;
+}
+
 
 //===----------------------------------------------------------------------===//
 

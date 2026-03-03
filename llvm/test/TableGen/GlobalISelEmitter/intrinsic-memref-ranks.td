@@ -7,7 +7,7 @@ include "GlobalISelEmitterCommon.td"
 // descriptor type. Use the helper multiclass to define a family of concrete
 // rank variants with one declaration.
 let TargetPrefix = "mytarget" in {
-  defm int_mytarget_memref_add : LLVMRankedMemRefIntrinsic1To5<
+  defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
       [], [], [], llvm_i32_ty, llvm_i32_ty>;
 }
 
