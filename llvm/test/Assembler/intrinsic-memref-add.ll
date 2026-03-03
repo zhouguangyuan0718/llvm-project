@@ -1,34 +1,29 @@
 ; RUN: llvm-as < %s >/dev/null
 
-; Ensure rank-expanded memref add intrinsic declarations are representable in IR.
-; Signature shape for rank1 memref descriptor:
-;   (ptr, ptr, i64, i64, i64)
-; Three memref args (src0, src1, dst) => 15 operands.
-declare void @llvm.mytarget.memref.add.rank1(
-  ptr, ptr, i64, i64, i64,
-  ptr, ptr, i64, i64, i64,
-  ptr, ptr, i64, i64, i64)
+; Ensure rank-expanded memref add intrinsics are callable with memref descriptor
+; struct arguments (not flattened leaf argument lists).
 
-; Signature shape for rank2 memref descriptor:
-;   (ptr, ptr, i64, i64, i64, i64, i64)
-; Three memref args (src0, src1, dst) => 21 operands.
+%mref_rank1_t = type { ptr, ptr, i64, i64, i64 }
+%mref_rank2_t = type { ptr, ptr, i64, [2 x i64], [2 x i64] }
+
+declare void @llvm.mytarget.memref.add.rank1(
+  %mref_rank1_t, %mref_rank1_t, %mref_rank1_t)
+
 declare void @llvm.mytarget.memref.add.rank2(
-  ptr, ptr, i64, i64, i64, i64, i64,
-  ptr, ptr, i64, i64, i64, i64, i64,
-  ptr, ptr, i64, i64, i64, i64, i64)
+  %mref_rank2_t, %mref_rank2_t, %mref_rank2_t)
 
 define void @test_rank1() {
   call void @llvm.mytarget.memref.add.rank1(
-    ptr null, ptr null, i64 0, i64 4, i64 1,
-    ptr null, ptr null, i64 0, i64 4, i64 1,
-    ptr null, ptr null, i64 0, i64 4, i64 1)
+    %mref_rank1_t poison,
+    %mref_rank1_t poison,
+    %mref_rank1_t poison)
   ret void
 }
 
 define void @test_rank2() {
   call void @llvm.mytarget.memref.add.rank2(
-    ptr null, ptr null, i64 0, i64 4, i64 8, i64 8, i64 1,
-    ptr null, ptr null, i64 0, i64 4, i64 8, i64 8, i64 1,
-    ptr null, ptr null, i64 0, i64 4, i64 8, i64 8, i64 1)
+    %mref_rank2_t poison,
+    %mref_rank2_t poison,
+    %mref_rank2_t poison)
   ret void
 }
