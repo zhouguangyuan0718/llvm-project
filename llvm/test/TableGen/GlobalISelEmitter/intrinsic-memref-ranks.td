@@ -8,7 +8,7 @@ include "GlobalISelEmitterCommon.td"
 // rank variants with one declaration.
 let TargetPrefix = "mytarget" in {
   defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
-      [], [], []>;
+      [], [llvm_memref_ty]>;
 }
 
 // Rank-2 descriptor flattens to 7 i32 operands:

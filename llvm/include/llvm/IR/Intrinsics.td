@@ -657,59 +657,18 @@ class LLVMMemRefDescriptorType<int rank>
 
 // Convenience templates for common concrete ranks.
 class LLVMMemRefDescriptorType1 : LLVMMemRefDescriptorType<1>;
-
 class LLVMMemRefDescriptorType2 : LLVMMemRefDescriptorType<2>;
-
 class LLVMMemRefDescriptorType3 : LLVMMemRefDescriptorType<3>;
-
 class LLVMMemRefDescriptorType4 : LLVMMemRefDescriptorType<4>;
-
 class LLVMMemRefDescriptorType5 : LLVMMemRefDescriptorType<5>;
 
-// Macro helper: define one intrinsic family for memref descriptors with
-// concrete rank variants [1..5].
-//
-// Example:
-//   let TargetPrefix = "mytarget" in {
-//     defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
-//         [llvm_void_ty], [], [llvm_i32_ty], [IntrNoMem]>;
-//   }
-// This generates:
-//   int_mytarget_memref_add_rank1 ... int_mytarget_memref_add_rank5
-// each with parameter list:
-//   <ArgPrefix..., memref_descriptor(rankN), ArgSuffix...>
-multiclass LLVMMemRefIntrinsic1To5<
-    list<LLVMType> ret_types,
-    list<LLVMType> arg_prefix = [],
-    list<LLVMType> arg_suffix = [],
-    list<IntrinsicProperty> intr_properties = []> {
-  def _rank1 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMMemRefDescriptorType1],
-                  arg_suffix),
-      intr_properties>;
-  def _rank2 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMMemRefDescriptorType2],
-                  arg_suffix),
-      intr_properties>;
-  def _rank3 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMMemRefDescriptorType3],
-                  arg_suffix),
-      intr_properties>;
-  def _rank4 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMMemRefDescriptorType4],
-                  arg_suffix),
-      intr_properties>;
-  def _rank5 : Intrinsic<ret_types,
-      !listconcat(arg_prefix,
-                  [LLVMMemRefDescriptorType5],
-                  arg_suffix),
-      intr_properties>;
-}
+// Marker type used by LLVMMemRefIntrinsic1To5 helper below.
+def llvm_memref_ty : LLVMType<OtherVT>;
 
+class ReplaceMemRefMarker<list<LLVMType> ParamTypes, LLVMType MemRefTy> {
+  list<LLVMType> ret = !foreach(ty, ParamTypes,
+                                !if(!eq(ty, llvm_memref_ty), MemRefTy, ty));
+}
 
 //===----------------------------------------------------------------------===//
 
@@ -812,6 +771,39 @@ class DefaultAttrsIntrinsic<list<LLVMType> ret_types,
                 : Intrinsic<ret_types, param_types,
                             intr_properties, name,
                             sd_properties, /*disable_default_attributes*/ 0> {}
+
+
+// Macro helper: define one intrinsic family for memref descriptors with
+// concrete rank variants [1..5]. Use llvm_memref_ty in ParamTypes as a marker
+// to be replaced by rank-specific memref descriptor types.
+//
+// Example:
+//   let TargetPrefix = "mytarget" in {
+//     defm int_mytarget_memref_add : LLVMMemRefIntrinsic1To5<
+//         [llvm_void_ty], [llvm_memref_ty, llvm_i32_ty], [IntrNoMem]>;
+//   }
+// This generates:
+//   int_mytarget_memref_add_rank1 ... int_mytarget_memref_add_rank5
+multiclass LLVMMemRefIntrinsic1To5<
+    list<LLVMType> RetTypes,
+    list<LLVMType> ParamTypes = [],
+    list<IntrinsicProperty> IntrProperties = []> {
+  def _rank1 : Intrinsic<RetTypes,
+      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType1>.ret,
+      IntrProperties>;
+  def _rank2 : Intrinsic<RetTypes,
+      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType2>.ret,
+      IntrProperties>;
+  def _rank3 : Intrinsic<RetTypes,
+      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType3>.ret,
+      IntrProperties>;
+  def _rank4 : Intrinsic<RetTypes,
+      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType4>.ret,
+      IntrProperties>;
+  def _rank5 : Intrinsic<RetTypes,
+      ReplaceMemRefMarker<ParamTypes, LLVMMemRefDescriptorType5>.ret,
+      IntrProperties>;
+}
 
 /// ClangBuiltin - If this intrinsic exactly corresponds to a Clang builtin, this
 /// specifies the name of the builtin.  This provides automatic CBE and CFE
