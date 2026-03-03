@@ -818,6 +818,17 @@ class MSBuiltin<string name> {
 
 #ifndef TEST_INTRINSICS_SUPPRESS_DEFS
 
+//===------------------- MemRef Descriptor Intrinsics ---------------------===//
+//
+// memref add: src0 + src1 -> dst
+// The marker llvm_memref_ty is expanded by LLVMMemRefIntrinsic into rank1..5
+// concrete variants in the form:
+//   llvm.mytarget.memref.add.rankN
+let TargetPrefix = "mytarget" in {
+  defm int_mytarget_memref_add : LLVMMemRefIntrinsic<
+      [], [llvm_memref_ty, llvm_memref_ty, llvm_memref_ty], [IntrNoMem]>;
+}
+
 //===--------------- Variable Argument Handling Intrinsics ----------------===//
 //
 
