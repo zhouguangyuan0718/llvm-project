@@ -334,6 +334,7 @@ def IIT_V6 : IIT_Vec<6, 50>;
 def IIT_V10 : IIT_Vec<10, 51>;
 def IIT_V2048 : IIT_Vec<2048, 52>;
 def IIT_V4096 : IIT_Vec<4096, 53>;
+def IIT_ARRAY : IIT_Base<54>;
 }
 
 defvar IIT_all_FixedTypes = !filter(iit, IIT_all,
@@ -423,6 +424,18 @@ class LLVMStructType<list<LLVMType> element_types> : LLVMType<OtherVT> {
   let Sig =
       !listconcat(StructPrefix,
                   !listflatten(!foreach(ty, ElementTypes, ty.Sig)));
+}
+
+class LLVMArrayType<int num_elements, LLVMType element_type>
+  : LLVMType<OtherVT> {
+  int NumElements = num_elements;
+  LLVMType ElementType = element_type;
+  assert !and(!le(0, NumElements), !le(NumElements, 255)),
+         "LLVMArrayType only supports element counts in range [0, 255]";
+  let Sig = !listconcat([
+    IIT_ARRAY.Number,
+    NumElements,
+  ], ElementType.Sig);
 }
 
 // Match the type of another intrinsic parameter.  Number is an index into the
