@@ -2,11 +2,13 @@
 
 // CHECK: ModuleID = 'target_gen2'
 // CHECK: @tg2.isa.name.BaseIS = private unnamed_addr constant [7 x i8] c"BaseIS\00", align 1
-// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD()
-// CHECK: entry:
-// CHECK: %[[CMP:.*]] = icmp ne i64
+// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD(i64 %rd)
+// CHECK-NOT: alloca
+// CHECK: %[[CMP:.*]] = icmp ne i64 %rd, 0
 // CHECK: br i1 %[[CMP]], label %if.then, label %if.else
 // CHECK: if.then:
+// CHECK: br label %if.end
+// CHECK: if.end:
 // CHECK: ret i64 0
 
 InstructionSet BaseIS {
