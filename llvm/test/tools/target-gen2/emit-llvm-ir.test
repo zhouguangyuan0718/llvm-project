@@ -1,0 +1,17 @@
+// RUN: target-gen2 --emit=llvm-ir %s -o - | FileCheck %s
+
+// CHECK: ModuleID = 'target_gen2'
+// CHECK: @tg2.isa.name.BaseIS = private unnamed_addr constant [7 x i8] c"BaseIS\00", align 1
+// CHECK: @tg2.inst.BaseIS.ADD.behavior.stmt_nodes = private unnamed_addr constant [2 x { i32, i32, ptr }]
+// CHECK: @tg2.inst.BaseIS.ADD.behavior.expr_nodes = private unnamed_addr constant [5 x { i32, i32, i32, ptr }]
+// CHECK: @tg2.inst.BaseIS.ADD.behavior.summary = private unnamed_addr constant [26 x i8] c"stmt_count=2,expr_count=5\00", align 1
+// CHECK: define i32 @tg2_emit_metadata()
+
+InstructionSet BaseIS {
+  instructions {
+    ADD {
+      encoding: rd[4:0] :: 7'b0110011;
+      behavior: if (rd != 0) rd = rd;
+    }
+  }
+}
