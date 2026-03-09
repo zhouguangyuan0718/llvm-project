@@ -32,6 +32,48 @@ enum class ExprKind {
   Group,
 };
 
+enum class ExprOp {
+  None,
+  Assign,
+  MulAssign,
+  DivAssign,
+  ModAssign,
+  AddAssign,
+  SubAssign,
+  ShlAssign,
+  ShrAssign,
+  AndAssign,
+  XorAssign,
+  OrAssign,
+  LogicalOr,
+  LogicalAnd,
+  BitOr,
+  BitXor,
+  BitAnd,
+  Eq,
+  Ne,
+  Lt,
+  Gt,
+  Le,
+  Ge,
+  Shl,
+  Shr,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  PreInc,
+  PreDec,
+  PostInc,
+  PostDec,
+  UnaryPlus,
+  UnaryMinus,
+  LogicalNot,
+  BitNot,
+  Member,
+};
+
 enum class StatementKind {
   Empty,
   Compound,
@@ -66,7 +108,7 @@ struct Assembly {
 struct Expr {
   ExprKind Kind = ExprKind::Unknown;
   std::string Text;
-  std::string Op;
+  ExprOp Op = ExprOp::None;
   std::string Value;
   std::vector<Expr> Children;
 };

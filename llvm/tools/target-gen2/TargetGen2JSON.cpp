@@ -46,6 +46,51 @@ StringRef toString(StatementKind K) {
   return "expression";
 }
 
+StringRef toString(ExprOp Op) {
+  switch (Op) {
+  case ExprOp::None: return "";
+  case ExprOp::Assign: return "=";
+  case ExprOp::MulAssign: return "*=";
+  case ExprOp::DivAssign: return "/=";
+  case ExprOp::ModAssign: return "%=";
+  case ExprOp::AddAssign: return "+=";
+  case ExprOp::SubAssign: return "-=";
+  case ExprOp::ShlAssign: return "<<=";
+  case ExprOp::ShrAssign: return ">>=";
+  case ExprOp::AndAssign: return "&=";
+  case ExprOp::XorAssign: return "^=";
+  case ExprOp::OrAssign: return "|=";
+  case ExprOp::LogicalOr: return "||";
+  case ExprOp::LogicalAnd: return "&&";
+  case ExprOp::BitOr: return "|";
+  case ExprOp::BitXor: return "^";
+  case ExprOp::BitAnd: return "&";
+  case ExprOp::Eq: return "==";
+  case ExprOp::Ne: return "!=";
+  case ExprOp::Lt: return "<";
+  case ExprOp::Gt: return ">";
+  case ExprOp::Le: return "<=";
+  case ExprOp::Ge: return ">=";
+  case ExprOp::Shl: return "<<";
+  case ExprOp::Shr: return ">>";
+  case ExprOp::Add: return "+";
+  case ExprOp::Sub: return "-";
+  case ExprOp::Mul: return "*";
+  case ExprOp::Div: return "/";
+  case ExprOp::Mod: return "%";
+  case ExprOp::PreInc: return "++";
+  case ExprOp::PreDec: return "--";
+  case ExprOp::PostInc: return "++";
+  case ExprOp::PostDec: return "--";
+  case ExprOp::UnaryPlus: return "+";
+  case ExprOp::UnaryMinus: return "-";
+  case ExprOp::LogicalNot: return "!";
+  case ExprOp::BitNot: return "~";
+  case ExprOp::Member: return ".";
+  }
+  return "";
+}
+
 json::Value toJSON(const EncodingField &Field) {
   if (Field.IsBitValue)
     return json::Object{{"kind", "bit_value"}, {"value", Field.Value}};
@@ -70,7 +115,7 @@ json::Value toJSON(const Statement &Stmt) {
       Kids.push_back(Self(C, Self));
     return json::Object{{"kind", toString(E.Kind)},
                         {"text", E.Text},
-                        {"op", E.Op},
+                        {"op", toString(E.Op)},
                         {"value", E.Value},
                         {"children", std::move(Kids)}};
   };

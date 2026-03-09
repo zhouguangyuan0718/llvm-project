@@ -336,11 +336,11 @@ private:
   StringRef text(size_t B, size_t E) const { return Source.slice(B, E).trim(); }
 
   Expr makeNode(ExprKind Kind, size_t B, size_t E, std::vector<Expr> Children = {},
-                StringRef Op = "", StringRef Value = "") {
+                ExprOp Op = ExprOp::None, StringRef Value = "") {
     Expr R;
     R.Kind = Kind;
     R.Text = text(B, E).str();
-    R.Op = Op.str();
+    R.Op = Op;
     R.Value = Value.str();
     R.Children = std::move(Children);
     return R;
@@ -366,6 +366,44 @@ private:
            Op == "|=";
   }
 
+  ExprOp mapOp(StringRef Op, bool IsPrefix = false, bool IsPostfix = false) const {
+    if (Op == "=") return ExprOp::Assign;
+    if (Op == "*=") return ExprOp::MulAssign;
+    if (Op == "/=") return ExprOp::DivAssign;
+    if (Op == "%=") return ExprOp::ModAssign;
+    if (Op == "+=") return ExprOp::AddAssign;
+    if (Op == "-=") return ExprOp::SubAssign;
+    if (Op == "<<=") return ExprOp::ShlAssign;
+    if (Op == ">>=") return ExprOp::ShrAssign;
+    if (Op == "&=") return ExprOp::AndAssign;
+    if (Op == "^=") return ExprOp::XorAssign;
+    if (Op == "|=") return ExprOp::OrAssign;
+    if (Op == "||") return ExprOp::LogicalOr;
+    if (Op == "&&") return ExprOp::LogicalAnd;
+    if (Op == "|") return ExprOp::BitOr;
+    if (Op == "^") return ExprOp::BitXor;
+    if (Op == "&") return ExprOp::BitAnd;
+    if (Op == "==") return ExprOp::Eq;
+    if (Op == "!=") return ExprOp::Ne;
+    if (Op == "<") return ExprOp::Lt;
+    if (Op == ">") return ExprOp::Gt;
+    if (Op == "<=") return ExprOp::Le;
+    if (Op == ">=") return ExprOp::Ge;
+    if (Op == "<<") return ExprOp::Shl;
+    if (Op == ">>") return ExprOp::Shr;
+    if (Op == "+") return IsPrefix ? ExprOp::UnaryPlus : ExprOp::Add;
+    if (Op == "-") return IsPrefix ? ExprOp::UnaryMinus : ExprOp::Sub;
+    if (Op == "*") return ExprOp::Mul;
+    if (Op == "/") return ExprOp::Div;
+    if (Op == "%") return ExprOp::Mod;
+    if (Op == "!") return ExprOp::LogicalNot;
+    if (Op == "~") return ExprOp::BitNot;
+    if (Op == "++") return IsPostfix ? ExprOp::PostInc : ExprOp::PreInc;
+    if (Op == "--") return IsPostfix ? ExprOp::PostDec : ExprOp::PreDec;
+    if (Op == ".") return ExprOp::Member;
+    return ExprOp::None;
+  }
+
   Expr parseAssignment() {
     size_t B = cur().B;
     Expr L = parseConditional();
@@ -374,7 +412,7 @@ private:
       adv();
       Expr R = parseAssignment();
       return makeNode(ExprKind::Assignment, B, R.Text.empty() ? cur().E : Tokens[I-1].E,
-                      {std::move(L), std::move(R)}, Op);
+                      {std::move(L), std::move(R)}, mapOp(Op));
     }
     return L;
   }
@@ -404,7 +442,7 @@ private:
       size_t Start = L.Text.empty() ? B : 0;
       (void)Start;
       L = makeNode(ExprKind::Binary, Tokens[I==0?0:I-1].B, Tokens[I-1].E,
-                   {std::move(L), std::move(R)}, Op);
+                   {std::move(L), std::move(R)}, mapOp(Op));
     }
     return L;
   }
@@ -436,7 +474,8 @@ private:
       StringRef Op = cur().Text;
       adv();
       Expr X = parseUnary();
-      return makeNode(ExprKind::Unary, B, Tokens[I-1].E, {std::move(X)}, Op);
+      return makeNode(ExprKind::Unary, B, Tokens[I-1].E, {std::move(X)},
+                      mapOp(Op, true));
     }
     if (isTypeCastPattern()) {
       size_t B = cur().B;
@@ -451,7 +490,7 @@ private:
       size_t TypeE = cur().B;
       if (cur().K == ExprTok::RParen) adv();
       Expr X = parseUnary();
-      return makeNode(ExprKind::Cast, B, Tokens[I-1].E, {std::move(X)}, "", text(TypeB, TypeE));
+      return makeNode(ExprKind::Cast, B, Tokens[I-1].E, {std::move(X)}, ExprOp::None, text(TypeB, TypeE));
     }
     return parsePostfix();
   }
@@ -495,14 +534,16 @@ private:
         adv();
         std::string Member;
         if (cur().K == ExprTok::Ident) { Member = cur().Text.str(); adv(); }
-        Base = makeNode(ExprKind::Member, B, Tokens[I-1].E, {std::move(Base)}, ".", Member);
+        Base = makeNode(ExprKind::Member, B, Tokens[I-1].E, {std::move(Base)},
+                        ExprOp::Member, Member);
         continue;
       }
       if (cur().K == ExprTok::Op && (cur().Text == "++" || cur().Text == "--")) {
         StringRef Op = cur().Text;
         size_t B = cur().B;
         adv();
-        Base = makeNode(ExprKind::Postfix, B, Tokens[I-1].E, {std::move(Base)}, Op);
+        Base = makeNode(ExprKind::Postfix, B, Tokens[I-1].E, {std::move(Base)},
+                        mapOp(Op, false, true));
         continue;
       }
       break;
@@ -512,12 +553,12 @@ private:
 
   Expr parsePrimary() {
     if (cur().K == ExprTok::Ident) {
-      Expr R = makeNode(ExprKind::Identifier, cur().B, cur().E, {}, "", cur().Text);
+      Expr R = makeNode(ExprKind::Identifier, cur().B, cur().E, {}, ExprOp::None, cur().Text);
       adv();
       return R;
     }
     if (cur().K == ExprTok::Number || cur().K == ExprTok::String) {
-      Expr R = makeNode(ExprKind::Literal, cur().B, cur().E, {}, "", cur().Text);
+      Expr R = makeNode(ExprKind::Literal, cur().B, cur().E, {}, ExprOp::None, cur().Text);
       adv();
       return R;
     }
@@ -529,7 +570,7 @@ private:
         adv();
       return makeNode(ExprKind::Group, B, Tokens[I-1].E, {std::move(In)});
     }
-    Expr R = makeNode(ExprKind::Unknown, cur().B, cur().E, {}, "", cur().Text);
+    Expr R = makeNode(ExprKind::Unknown, cur().B, cur().E, {}, ExprOp::None, cur().Text);
     adv();
     return R;
   }
