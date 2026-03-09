@@ -657,7 +657,7 @@ private:
     if (!consume(TokenKind::Colon, "expected ':' after behavior"))
       return std::nullopt;
 
-    auto Behavior = parseBehaviorUntilInstructionEnd();
+    auto Behavior = parseStatement();
     if (!Behavior)
       return std::nullopt;
     Inst.Behavior = std::move(*Behavior);
@@ -779,12 +779,231 @@ private:
     Block.Name = *Name;
     Block.Attributes = parseAttributes();
 
-    auto Body = parseRawBracedBlock();
+    if (Cur.Kind != TokenKind::LBrace) {
+      addDiag("expected compound statement for always block behavior");
+      return std::nullopt;
+    }
+
+    auto Body = parseStatement();
     if (!Body)
       return std::nullopt;
     Block.Behavior = std::move(*Body);
 
     return Block;
+  }
+
+  bool isIdentifier(StringRef Text) const {
+    return Cur.Kind == TokenKind::Identifier && Cur.Lexeme == Text;
+  }
+
+  bool consumeParenthesizedExpression() {
+    if (!consume(TokenKind::LParen, "expected '('"))
+      return false;
+
+    int Depth = 1;
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::LParen)
+        ++Depth;
+      else if (Cur.Kind == TokenKind::RParen)
+        --Depth;
+      advance();
+      if (Depth == 0)
+        return true;
+    }
+
+    addDiag("unterminated parenthesized expression");
+    return false;
+  }
+
+  bool consumeUntilSemicolon() {
+    int ParenDepth = 0;
+    int BracketDepth = 0;
+    int BraceDepth = 0;
+
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::LParen)
+        ++ParenDepth;
+      else if (Cur.Kind == TokenKind::RParen)
+        --ParenDepth;
+      else if (Cur.Kind == TokenKind::LBracket)
+        ++BracketDepth;
+      else if (Cur.Kind == TokenKind::RBracket)
+        --BracketDepth;
+      else if (Cur.Kind == TokenKind::LBrace)
+        ++BraceDepth;
+      else if (Cur.Kind == TokenKind::RBrace)
+        --BraceDepth;
+
+      if (Cur.Kind == TokenKind::Semicolon && ParenDepth == 0 &&
+          BracketDepth == 0 && BraceDepth == 0) {
+        advance();
+        return true;
+      }
+      advance();
+    }
+
+    addDiag("expected ';' to terminate statement");
+    return false;
+  }
+
+  bool parseSwitchSection() {
+    if (isIdentifier("case")) {
+      advance();
+      int ParenDepth = 0;
+      int BracketDepth = 0;
+      int BraceDepth = 0;
+      while (Cur.Kind != TokenKind::Eof) {
+        if (Cur.Kind == TokenKind::LParen)
+          ++ParenDepth;
+        else if (Cur.Kind == TokenKind::RParen)
+          --ParenDepth;
+        else if (Cur.Kind == TokenKind::LBracket)
+          ++BracketDepth;
+        else if (Cur.Kind == TokenKind::RBracket)
+          --BracketDepth;
+        else if (Cur.Kind == TokenKind::LBrace)
+          ++BraceDepth;
+        else if (Cur.Kind == TokenKind::RBrace)
+          --BraceDepth;
+
+        if (Cur.Kind == TokenKind::Colon && ParenDepth == 0 &&
+            BracketDepth == 0 && BraceDepth == 0) {
+          advance();
+          break;
+        }
+        advance();
+      }
+      if (Cur.Kind == TokenKind::Eof) {
+        addDiag("unterminated switch case label");
+        return false;
+      }
+    } else if (isIdentifier("default")) {
+      advance();
+      if (!consume(TokenKind::Colon, "expected ':' after default"))
+        return false;
+    } else {
+      addDiag("expected 'case' or 'default' in switch");
+      return false;
+    }
+
+    while (Cur.Kind != TokenKind::Eof && Cur.Kind != TokenKind::RBrace &&
+           !isIdentifier("case") && !isIdentifier("default")) {
+      if (!parseStatement())
+        return false;
+    }
+    return true;
+  }
+
+  std::optional<std::string> parseStatement() {
+    const size_t Start = Cur.Loc.Offset;
+
+    if (Cur.Kind == TokenKind::Semicolon) {
+      advance();
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (Cur.Kind == TokenKind::LBrace) {
+      advance();
+      while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
+        if (!parseStatement())
+          return std::nullopt;
+      }
+      if (!consume(TokenKind::RBrace, "expected '}' to close compound statement"))
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("if")) {
+      advance();
+      if (!consumeParenthesizedExpression())
+        return std::nullopt;
+      if (!parseStatement())
+        return std::nullopt;
+      if (isIdentifier("else")) {
+        advance();
+        if (!parseStatement())
+          return std::nullopt;
+      }
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("switch")) {
+      advance();
+      if (!consumeParenthesizedExpression())
+        return std::nullopt;
+      if (!consume(TokenKind::LBrace, "expected '{' after switch condition"))
+        return std::nullopt;
+      while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
+        if (!parseSwitchSection())
+          return std::nullopt;
+      }
+      if (!consume(TokenKind::RBrace, "expected '}' to close switch"))
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("while")) {
+      advance();
+      if (!consumeParenthesizedExpression())
+        return std::nullopt;
+      if (!parseStatement())
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("for")) {
+      advance();
+      if (!consumeParenthesizedExpression())
+        return std::nullopt;
+      if (!parseStatement())
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("do")) {
+      advance();
+      if (!parseStatement())
+        return std::nullopt;
+      if (!isIdentifier("while")) {
+        addDiag("expected 'while' after do-body");
+        return std::nullopt;
+      }
+      advance();
+      if (!consumeParenthesizedExpression())
+        return std::nullopt;
+      if (!consume(TokenKind::Semicolon, "expected ';' after do-while"))
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("spawn")) {
+      advance();
+      if (!parseStatement())
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("continue") || isIdentifier("break")) {
+      advance();
+      if (!consume(TokenKind::Semicolon, "expected ';' after jump statement"))
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (isIdentifier("return")) {
+      advance();
+      if (Cur.Kind == TokenKind::Semicolon) {
+        advance();
+        return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      }
+      if (!consumeUntilSemicolon())
+        return std::nullopt;
+      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    }
+
+    if (!consumeUntilSemicolon())
+      return std::nullopt;
+    return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
   }
 
   std::optional<std::string> parseRawBracedBlock() {
@@ -809,25 +1028,6 @@ private:
     }
 
     addDiag("unterminated '{...}' block");
-    return std::nullopt;
-  }
-
-  std::optional<std::string> parseBehaviorUntilInstructionEnd() {
-    const size_t Start = Cur.Loc.Offset;
-    int BraceDepth = 0;
-
-    while (Cur.Kind != TokenKind::Eof) {
-      if (Cur.Kind == TokenKind::LBrace)
-        ++BraceDepth;
-      else if (Cur.Kind == TokenKind::RBrace) {
-        if (BraceDepth == 0)
-          return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
-        --BraceDepth;
-      }
-      advance();
-    }
-
-    addDiag("unterminated behavior statement");
     return std::nullopt;
   }
 
