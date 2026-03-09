@@ -1,0 +1,50 @@
+// RUN: target-gen %s -o - | FileCheck %s
+
+// CHECK: "imports": [
+// CHECK-NEXT:   "base.core_desc"
+// CHECK: "instruction_sets": [
+// CHECK: "name": "BaseIS"
+// CHECK: "instructions": [
+// CHECK: "name": "ADD"
+// CHECK: "attributes": [
+// CHECK-NEXT:   "[[arith]]"
+// CHECK: "kind": "bit_field"
+// CHECK: "name": "rd"
+// CHECK: "kind": "bit_value"
+// CHECK: "value": "7'b0110011"
+// CHECK: "assembly": {
+// CHECK: "kind": "structured"
+// CHECK: "mnemonic": "add"
+// CHECK: "behavior": "if (rd != 0) rd = rd;"
+// CHECK: "cores": [
+// CHECK: "name": "Tiny"
+// CHECK: "provides": [
+// CHECK-NEXT:   "BaseIS"
+// CHECK: "architectural_state":
+// CHECK: "name": "NOP"
+// CHECK: "value": "32'h00000013"
+
+import "base.core_desc"
+
+InstructionSet BaseIS {
+  instructions {
+    ADD [[arith]] {
+      encoding: rd[4:0] :: 7'b0110011;
+      assembly: {"add", "add %rd"};
+      behavior: if (rd != 0) rd = rd;
+    }
+  }
+}
+
+Core Tiny provides BaseIS {
+  architectural_state {
+    unsigned int XLEN = 32;
+  }
+
+  instructions {
+    NOP {
+      encoding: 32'h00000013;
+      behavior: ;
+    }
+  }
+}
