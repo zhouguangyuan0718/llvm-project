@@ -1,0 +1,39 @@
+// RUN: target-gen2 %s -o - | FileCheck %s
+
+// CHECK: "name": "CTRL"
+// CHECK: "behavior": {
+// CHECK: "kind": "compound"
+// CHECK: "children": [
+// CHECK: "kind": "if"
+// CHECK: "kind": "for"
+// CHECK: "kind": "while"
+// CHECK: "kind": "switch"
+// CHECK: "kind": "case"
+// CHECK: "kind": "default"
+// CHECK: "kind": "do-while"
+// CHECK: "kind": "return"
+// CHECK: "kind": "index"
+// CHECK: "kind": "assignment"
+// CHECK: "kind": "binary"
+
+Core BehavCore {
+  instructions {
+    CTRL {
+      encoding: rd[4:0] :: 7'b0110011;
+      behavior: {
+        if (rd != 0) {
+          for (i = 0; i < 4; i = i + 1) {
+            while (i < 3) i = i + 1;
+            X[i] = (unsigned<32>) (X[i] + 1);
+          }
+        } else {
+          switch (rd) {
+          case 0: break;
+          default: do rd = rd - 1; while (rd > 0);
+          }
+        }
+        return;
+      }
+    }
+  }
+}

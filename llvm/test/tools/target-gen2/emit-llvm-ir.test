@@ -1,0 +1,21 @@
+// RUN: target-gen2 --emit=llvm-ir %s -o - | FileCheck %s
+
+// CHECK: ModuleID = 'target_gen2'
+// CHECK: @tg2.isa.name.BaseIS = private unnamed_addr constant [7 x i8] c"BaseIS\00", align 1
+// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD(i64 %rd)
+// CHECK-NOT: alloca
+// CHECK: %[[CMP:.*]] = icmp ne i64 %rd, 0
+// CHECK: br i1 %[[CMP]], label %if.then, label %if.else
+// CHECK: if.then:
+// CHECK: br label %if.end
+// CHECK: if.end:
+// CHECK: ret i64 0
+
+InstructionSet BaseIS {
+  instructions {
+    ADD {
+      encoding: rd[4:0] :: 7'b0110011;
+      behavior: if (rd != 0) rd = rd;
+    }
+  }
+}
