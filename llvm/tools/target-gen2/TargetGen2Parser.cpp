@@ -335,10 +335,10 @@ private:
   void adv() { if (I < Tokens.size() - 1) ++I; }
   StringRef text(size_t B, size_t E) const { return Source.slice(B, E).trim(); }
 
-  Expr makeNode(StringRef Kind, size_t B, size_t E, std::vector<Expr> Children = {},
+  Expr makeNode(ExprKind Kind, size_t B, size_t E, std::vector<Expr> Children = {},
                 StringRef Op = "", StringRef Value = "") {
     Expr R;
-    R.Kind = Kind.str();
+    R.Kind = Kind;
     R.Text = text(B, E).str();
     R.Op = Op.str();
     R.Value = Value.str();
@@ -373,7 +373,7 @@ private:
       StringRef Op = cur().Text;
       adv();
       Expr R = parseAssignment();
-      return makeNode("assignment", B, R.Text.empty() ? cur().E : Tokens[I-1].E,
+      return makeNode(ExprKind::Assignment, B, R.Text.empty() ? cur().E : Tokens[I-1].E,
                       {std::move(L), std::move(R)}, Op);
     }
     return L;
@@ -387,7 +387,7 @@ private:
       Expr T = parseAssignment();
       if (cur().K == ExprTok::Colon) adv();
       Expr E = parseConditional();
-      return makeNode("conditional", B, Tokens[I-1].E, {std::move(C), std::move(T), std::move(E)});
+      return makeNode(ExprKind::Conditional, B, Tokens[I-1].E, {std::move(C), std::move(T), std::move(E)});
     }
     return C;
   }
@@ -403,7 +403,7 @@ private:
       Expr R = parseBinary(P + 1);
       size_t Start = L.Text.empty() ? B : 0;
       (void)Start;
-      L = makeNode("binary", Tokens[I==0?0:I-1].B, Tokens[I-1].E,
+      L = makeNode(ExprKind::Binary, Tokens[I==0?0:I-1].B, Tokens[I-1].E,
                    {std::move(L), std::move(R)}, Op);
     }
     return L;
@@ -436,7 +436,7 @@ private:
       StringRef Op = cur().Text;
       adv();
       Expr X = parseUnary();
-      return makeNode("unary", B, Tokens[I-1].E, {std::move(X)}, Op);
+      return makeNode(ExprKind::Unary, B, Tokens[I-1].E, {std::move(X)}, Op);
     }
     if (isTypeCastPattern()) {
       size_t B = cur().B;
@@ -451,7 +451,7 @@ private:
       size_t TypeE = cur().B;
       if (cur().K == ExprTok::RParen) adv();
       Expr X = parseUnary();
-      return makeNode("cast", B, Tokens[I-1].E, {std::move(X)}, "", text(TypeB, TypeE));
+      return makeNode(ExprKind::Cast, B, Tokens[I-1].E, {std::move(X)}, "", text(TypeB, TypeE));
     }
     return parsePostfix();
   }
@@ -471,7 +471,7 @@ private:
           Ch.push_back(parseAssignment());
         }
         if (cur().K == ExprTok::RBracket) adv();
-        Base = makeNode("index", B, Tokens[I-1].E, std::move(Ch));
+        Base = makeNode(ExprKind::Index, B, Tokens[I-1].E, std::move(Ch));
         continue;
       }
       if (cur().K == ExprTok::LParen) {
@@ -487,7 +487,7 @@ private:
           }
         }
         if (cur().K == ExprTok::RParen) adv();
-        Base = makeNode("call", B, Tokens[I-1].E, std::move(Ch));
+        Base = makeNode(ExprKind::Call, B, Tokens[I-1].E, std::move(Ch));
         continue;
       }
       if (cur().K == ExprTok::Dot) {
@@ -495,14 +495,14 @@ private:
         adv();
         std::string Member;
         if (cur().K == ExprTok::Ident) { Member = cur().Text.str(); adv(); }
-        Base = makeNode("member", B, Tokens[I-1].E, {std::move(Base)}, ".", Member);
+        Base = makeNode(ExprKind::Member, B, Tokens[I-1].E, {std::move(Base)}, ".", Member);
         continue;
       }
       if (cur().K == ExprTok::Op && (cur().Text == "++" || cur().Text == "--")) {
         StringRef Op = cur().Text;
         size_t B = cur().B;
         adv();
-        Base = makeNode("postfix", B, Tokens[I-1].E, {std::move(Base)}, Op);
+        Base = makeNode(ExprKind::Postfix, B, Tokens[I-1].E, {std::move(Base)}, Op);
         continue;
       }
       break;
@@ -512,12 +512,12 @@ private:
 
   Expr parsePrimary() {
     if (cur().K == ExprTok::Ident) {
-      Expr R = makeNode("identifier", cur().B, cur().E, {}, "", cur().Text);
+      Expr R = makeNode(ExprKind::Identifier, cur().B, cur().E, {}, "", cur().Text);
       adv();
       return R;
     }
     if (cur().K == ExprTok::Number || cur().K == ExprTok::String) {
-      Expr R = makeNode("literal", cur().B, cur().E, {}, "", cur().Text);
+      Expr R = makeNode(ExprKind::Literal, cur().B, cur().E, {}, "", cur().Text);
       adv();
       return R;
     }
@@ -527,9 +527,9 @@ private:
       Expr In = parseAssignment();
       if (cur().K == ExprTok::RParen)
         adv();
-      return makeNode("group", B, Tokens[I-1].E, {std::move(In)});
+      return makeNode(ExprKind::Group, B, Tokens[I-1].E, {std::move(In)});
     }
-    Expr R = makeNode("unknown", cur().B, cur().E, {}, "", cur().Text);
+    Expr R = makeNode(ExprKind::Unknown, cur().B, cur().E, {}, "", cur().Text);
     adv();
     return R;
   }
@@ -1011,9 +1011,9 @@ std::optional<std::string> Parser::Impl::consumeUntilSemicolonText() {
 
 std::optional<Statement> Parser::Impl::parseSwitchSection() {
   size_t Start = Cur.Loc.Offset;
-  std::string Kind;
+  StatementKind Kind = StatementKind::Case;
   if (isIdentifier("case")) {
-    Kind = "case";
+    Kind = StatementKind::Case;
     advance();
     int ParenDepth = 0, BracketDepth = 0, BraceDepth = 0;
     while (Cur.Kind != TokenKind::Eof) {
@@ -1041,7 +1041,7 @@ std::optional<Statement> Parser::Impl::parseSwitchSection() {
       return std::nullopt;
     }
   } else if (isIdentifier("default")) {
-    Kind = "default";
+    Kind = StatementKind::Default;
     advance();
     if (!consume(TokenKind::Colon, "expected ':' after default"))
       return std::nullopt;
@@ -1065,7 +1065,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
   size_t Start = Cur.Loc.Offset;
   if (Cur.Kind == TokenKind::Semicolon) {
     advance();
-    return Statement{"empty", Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {}, {}};
+    return Statement{StatementKind::Empty, Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {}, {}};
   }
   if (Cur.Kind == TokenKind::LBrace) {
     std::vector<Statement> Children;
@@ -1078,7 +1078,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
     }
     if (!consume(TokenKind::RBrace, "expected '}' to close compound statement"))
       return std::nullopt;
-    return Statement{"compound", Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
+    return Statement{StatementKind::Compound, Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
                      std::move(Children)};
   }
   if (isIdentifier("if")) {
@@ -1098,7 +1098,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
         return std::nullopt;
       Children.push_back(std::move(*ElseStmt));
     }
-    return Statement{"if", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::If, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*Cond)}, std::move(Children)};
   }
   if (isIdentifier("switch")) {
@@ -1117,7 +1117,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
     }
     if (!consume(TokenKind::RBrace, "expected '}' to close switch"))
       return std::nullopt;
-    return Statement{"switch", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::Switch, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*Cond)}, std::move(Children)};
   }
   if (isIdentifier("while")) {
@@ -1128,7 +1128,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
     auto Body = parseStatement();
     if (!Body)
       return std::nullopt;
-    return Statement{"while", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::While, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*Cond)}, {*Body}};
   }
   if (isIdentifier("for")) {
@@ -1139,7 +1139,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
     auto Body = parseStatement();
     if (!Body)
       return std::nullopt;
-    return Statement{"for", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::For, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*Header)}, {*Body}};
   }
   if (isIdentifier("do")) {
@@ -1157,7 +1157,7 @@ std::optional<Statement> Parser::Impl::parseStatement() {
       return std::nullopt;
     if (!consume(TokenKind::Semicolon, "expected ';' after do-while"))
       return std::nullopt;
-    return Statement{"do-while", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::DoWhile, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*Cond)}, {*Body}};
   }
   if (isIdentifier("spawn")) {
@@ -1165,34 +1165,34 @@ std::optional<Statement> Parser::Impl::parseStatement() {
     auto Body = parseStatement();
     if (!Body)
       return std::nullopt;
-    return Statement{"spawn", Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
+    return Statement{StatementKind::Spawn, Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
                      {*Body}};
   }
   if (isIdentifier("continue") || isIdentifier("break")) {
-    std::string Kind = Cur.Lexeme.str();
+    StatementKind Kind = isIdentifier("continue") ? StatementKind::Continue : StatementKind::Break;
     advance();
     if (!consume(TokenKind::Semicolon, "expected ';' after jump statement"))
       return std::nullopt;
-    return Statement{std::move(Kind), Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
+    return Statement{Kind, Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
                      {}};
   }
   if (isIdentifier("return")) {
     advance();
     if (Cur.Kind == TokenKind::Semicolon) {
       advance();
-      return Statement{"return", Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
+      return Statement{StatementKind::Return, Buffer.slice(Start, Cur.Loc.Offset).trim().str(), {},
                        {}};
     }
     auto ExprText = consumeUntilSemicolonText();
     if (!ExprText)
       return std::nullopt;
-    return Statement{"return", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+    return Statement{StatementKind::Return, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                      {parseExpressionAST(*ExprText)}, {}};
   }
   auto ExprText = consumeUntilSemicolonText();
   if (!ExprText)
     return std::nullopt;
-  return Statement{"expression", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+  return Statement{StatementKind::Expression, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
                    {parseExpressionAST(*ExprText)}, {}};
 }
 

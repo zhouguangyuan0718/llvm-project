@@ -7,6 +7,45 @@ using namespace llvm::targetgen2;
 
 namespace detail {
 
+StringRef toString(ExprKind K) {
+  switch (K) {
+  case ExprKind::Unknown: return "unknown";
+  case ExprKind::Assignment: return "assignment";
+  case ExprKind::Conditional: return "conditional";
+  case ExprKind::Binary: return "binary";
+  case ExprKind::Unary: return "unary";
+  case ExprKind::Cast: return "cast";
+  case ExprKind::Index: return "index";
+  case ExprKind::Call: return "call";
+  case ExprKind::Member: return "member";
+  case ExprKind::Postfix: return "postfix";
+  case ExprKind::Identifier: return "identifier";
+  case ExprKind::Literal: return "literal";
+  case ExprKind::Group: return "group";
+  }
+  return "unknown";
+}
+
+StringRef toString(StatementKind K) {
+  switch (K) {
+  case StatementKind::Empty: return "empty";
+  case StatementKind::Compound: return "compound";
+  case StatementKind::If: return "if";
+  case StatementKind::Switch: return "switch";
+  case StatementKind::Case: return "case";
+  case StatementKind::Default: return "default";
+  case StatementKind::While: return "while";
+  case StatementKind::For: return "for";
+  case StatementKind::DoWhile: return "do-while";
+  case StatementKind::Spawn: return "spawn";
+  case StatementKind::Continue: return "continue";
+  case StatementKind::Break: return "break";
+  case StatementKind::Return: return "return";
+  case StatementKind::Expression: return "expression";
+  }
+  return "expression";
+}
+
 json::Value toJSON(const EncodingField &Field) {
   if (Field.IsBitValue)
     return json::Object{{"kind", "bit_value"}, {"value", Field.Value}};
@@ -29,7 +68,7 @@ json::Value toJSON(const Statement &Stmt) {
     json::Array Kids;
     for (const Expr &C : E.Children)
       Kids.push_back(Self(C, Self));
-    return json::Object{{"kind", E.Kind},
+    return json::Object{{"kind", toString(E.Kind)},
                         {"text", E.Text},
                         {"op", E.Op},
                         {"value", E.Value},
@@ -43,7 +82,7 @@ json::Value toJSON(const Statement &Stmt) {
   json::Array Children;
   for (const Statement &Child : Stmt.Children)
     Children.push_back(toJSON(Child));
-  return json::Object{{"kind", Stmt.Kind},
+  return json::Object{{"kind", toString(Stmt.Kind)},
                       {"text", Stmt.Text},
                       {"expressions", std::move(Exprs)},
                       {"children", std::move(Children)}};

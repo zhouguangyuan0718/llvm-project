@@ -16,6 +16,39 @@
 namespace llvm {
 namespace targetgen2 {
 
+enum class ExprKind {
+  Unknown,
+  Assignment,
+  Conditional,
+  Binary,
+  Unary,
+  Cast,
+  Index,
+  Call,
+  Member,
+  Postfix,
+  Identifier,
+  Literal,
+  Group,
+};
+
+enum class StatementKind {
+  Empty,
+  Compound,
+  If,
+  Switch,
+  Case,
+  Default,
+  While,
+  For,
+  DoWhile,
+  Spawn,
+  Continue,
+  Break,
+  Return,
+  Expression,
+};
+
 struct EncodingField {
   bool IsBitValue = false;
   std::string Value;
@@ -31,7 +64,7 @@ struct Assembly {
 };
 
 struct Expr {
-  std::string Kind;
+  ExprKind Kind = ExprKind::Unknown;
   std::string Text;
   std::string Op;
   std::string Value;
@@ -39,7 +72,7 @@ struct Expr {
 };
 
 struct Statement {
-  std::string Kind;
+  StatementKind Kind = StatementKind::Expression;
   std::string Text;
   std::vector<Expr> Expressions;
   std::vector<Statement> Children;
