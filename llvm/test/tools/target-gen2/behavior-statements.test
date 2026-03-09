@@ -12,6 +12,9 @@
 // CHECK: "kind": "default"
 // CHECK: "kind": "do-while"
 // CHECK: "kind": "return"
+// CHECK: "kind": "index"
+// CHECK: "kind": "assignment"
+// CHECK: "kind": "binary"
 
 Core BehavCore {
   instructions {
@@ -21,6 +24,7 @@ Core BehavCore {
         if (rd != 0) {
           for (i = 0; i < 4; i = i + 1) {
             while (i < 3) i = i + 1;
+            X[i] = (unsigned<32>) (X[i] + 1);
           }
         } else {
           switch (rd) {

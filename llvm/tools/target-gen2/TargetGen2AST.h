@@ -30,9 +30,18 @@ struct Assembly {
   std::string Template;
 };
 
+struct Expr {
+  std::string Kind;
+  std::string Text;
+  std::string Op;
+  std::string Value;
+  std::vector<Expr> Children;
+};
+
 struct Statement {
   std::string Kind;
   std::string Text;
+  std::vector<Expr> Expressions;
   std::vector<Statement> Children;
 };
 

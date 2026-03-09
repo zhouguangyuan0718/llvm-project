@@ -25,11 +25,27 @@ json::Value toJSON(const Assembly &Asm) {
 }
 
 json::Value toJSON(const Statement &Stmt) {
+  auto ToExprJSON = [](const Expr &E, const auto &Self) -> json::Value {
+    json::Array Kids;
+    for (const Expr &C : E.Children)
+      Kids.push_back(Self(C, Self));
+    return json::Object{{"kind", E.Kind},
+                        {"text", E.Text},
+                        {"op", E.Op},
+                        {"value", E.Value},
+                        {"children", std::move(Kids)}};
+  };
+
+  json::Array Exprs;
+  for (const Expr &E : Stmt.Expressions)
+    Exprs.push_back(ToExprJSON(E, ToExprJSON));
+
   json::Array Children;
   for (const Statement &Child : Stmt.Children)
     Children.push_back(toJSON(Child));
   return json::Object{{"kind", Stmt.Kind},
                       {"text", Stmt.Text},
+                      {"expressions", std::move(Exprs)},
                       {"children", std::move(Children)}};
 }
 

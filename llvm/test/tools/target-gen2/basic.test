@@ -18,9 +18,15 @@
 // CHECK: "behavior": {
 // CHECK: "kind": "if"
 // CHECK: "text": "if (rd != 0) rd = rd;"
+// CHECK: "expressions": [
+// CHECK: "kind": "binary"
+// CHECK: "op": "!="
 // CHECK: "children": [
 // CHECK: "kind": "expression"
 // CHECK: "text": "rd = rd;"
+// CHECK: "expressions": [
+// CHECK: "kind": "assignment"
+// CHECK: "op": "="
 // CHECK: "cores": [
 // CHECK: "name": "Tiny"
 // CHECK: "provides": [
