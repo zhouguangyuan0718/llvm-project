@@ -27,6 +27,8 @@ struct IRFunctionEmitter {
   std::unordered_map<std::string, std::string> Env;
   bool Terminated = false;
   std::string LastValue = "0";
+  bool UsedMemLoad = false;
+  bool UsedMemStore = false;
 
   std::string nextValue() { return "%v" + std::to_string(ValueID++); }
   std::string nextLabel(StringRef Prefix) {
@@ -60,6 +62,27 @@ struct IRFunctionEmitter {
   }
 
   std::string emitExpr(const Expr &E) {
+    auto isMemIndex = [](const Expr &Node) {
+      return Node.Kind == ExprKind::Index && Node.Children.size() >= 2 &&
+             Node.Children[0].Kind == ExprKind::Identifier &&
+             Node.Children[0].Text == "MEM";
+    };
+
+    auto parseWidth = [](StringRef Tok) -> std::optional<unsigned> {
+      Tok = Tok.trim();
+      if (Tok.empty())
+        return std::nullopt;
+      if (Tok == "XLEN")
+        return 64;
+      unsigned W = 0;
+      for (char C : Tok) {
+        if (!std::isdigit(static_cast<unsigned char>(C)))
+          return std::nullopt;
+        W = W * 10 + (C - '0');
+      }
+      return W;
+    };
+
     switch (E.Kind) {
     case ExprKind::Identifier: {
       auto It = Env.find(E.Text);
@@ -121,14 +144,48 @@ struct IRFunctionEmitter {
       std::string RHS = emitExpr(E.Children[1]);
       if (LHS.Kind == ExprKind::Identifier)
         Env[LHS.Text] = RHS;
+      else if (isMemIndex(LHS)) {
+        std::string Addr = emitExpr(LHS.Children[1]);
+        OS << "  call void @tg2.mem.store(i64 " << Addr << ", i64 " << RHS
+           << ")\n";
+        UsedMemStore = true;
+      }
       LastValue = RHS;
       return RHS;
     }
+    case ExprKind::Index:
+      if (isMemIndex(E)) {
+        std::string Addr = emitExpr(E.Children[1]);
+        std::string Res = nextValue();
+        OS << "  " << Res << " = call i64 @tg2.mem.load(i64 " << Addr << ")\n";
+        UsedMemLoad = true;
+        return Res;
+      }
+      return "0";
     case ExprKind::Group:
-    case ExprKind::Cast:
       if (!E.Children.empty())
         return emitExpr(E.Children.back());
       return "0";
+    case ExprKind::Cast: {
+      if (E.Children.empty())
+        return "0";
+      std::string V = emitExpr(E.Children.back());
+      SmallVector<StringRef, 4> Parts;
+      StringRef(E.Value.empty() ? E.Text : E.Value).split(Parts, ' ', -1, false);
+      bool IsUnsigned = !Parts.empty() && Parts.front() == "unsigned";
+      StringRef WidthTok;
+      if (IsUnsigned && Parts.size() >= 2)
+        WidthTok = Parts[1];
+      else if (!Parts.empty())
+        WidthTok = Parts.back();
+      std::optional<unsigned> Width = parseWidth(WidthTok);
+      if (!IsUnsigned || !Width || *Width >= 64)
+        return V;
+      uint64_t Mask = (1ULL << *Width) - 1ULL;
+      std::string Res = nextValue();
+      OS << "  " << Res << " = and i64 " << V << ", " << Mask << "\n";
+      return Res;
+    }
     default:
       return "0";
     }
@@ -226,6 +283,8 @@ static std::vector<std::string> inferParams(const Instruction &Inst) {
   std::vector<std::string> Params;
   std::unordered_set<std::string> Seen;
   for (const std::string &U : UsedOrder) {
+    if (U == "MEM")
+      continue;
     if (!Assigned.count(U) && Seen.insert(U).second)
       Params.push_back(U);
   }
@@ -241,8 +300,13 @@ static std::vector<std::string> inferParams(const Instruction &Inst) {
   return Params;
 }
 
-static void emitInstructionFunction(raw_ostream &OS, StringRef Scope,
-                                    const Instruction &Inst) {
+struct MemUse {
+  bool Load = false;
+  bool Store = false;
+};
+
+static MemUse emitInstructionFunction(raw_ostream &OS, StringRef Scope,
+                                      const Instruction &Inst) {
   std::vector<std::string> Params = inferParams(Inst);
   OS << "define i64 @tg2.exec." << Scope << "." << Inst.Name << "(";
   for (size_t I = 0; I < Params.size(); ++I) {
@@ -260,23 +324,44 @@ static void emitInstructionFunction(raw_ostream &OS, StringRef Scope,
   if (!E.Terminated)
     OS << "  ret i64 " << E.LastValue << "\n";
   OS << "}\n\n";
+  return {E.UsedMemLoad, E.UsedMemStore};
 }
 
 } // namespace
 
 std::string llvm::targetgen2::toLLVMIR(const Description &Desc) {
+  std::string Body;
+  raw_string_ostream BOS(Body);
+  bool AnyMemLoad = false;
+  bool AnyMemStore = false;
+
+  for (const InstructionSetDef &IS : Desc.InstructionSets)
+    for (const Instruction &Inst : IS.ISA.Instructions)
+      {
+        MemUse U = emitInstructionFunction(BOS, "inst." + IS.Name, Inst);
+        AnyMemLoad |= U.Load;
+        AnyMemStore |= U.Store;
+      }
+
+  for (const CoreDef &C : Desc.Cores)
+    for (const Instruction &Inst : C.ISA.Instructions)
+      {
+        MemUse U = emitInstructionFunction(BOS, "core." + C.Name, Inst);
+        AnyMemLoad |= U.Load;
+        AnyMemStore |= U.Store;
+      }
+
   std::string Out;
   raw_string_ostream OS(Out);
   OS << "; ModuleID = 'target-gen2'\n";
   OS << "source_filename = \"target-gen2\"\n\n";
-
-  for (const InstructionSetDef &IS : Desc.InstructionSets)
-    for (const Instruction &Inst : IS.ISA.Instructions)
-      emitInstructionFunction(OS, "inst." + IS.Name, Inst);
-
-  for (const CoreDef &C : Desc.Cores)
-    for (const Instruction &Inst : C.ISA.Instructions)
-      emitInstructionFunction(OS, "core." + C.Name, Inst);
+  if (AnyMemLoad)
+    OS << "declare i64 @tg2.mem.load(i64)\n";
+  if (AnyMemStore)
+    OS << "declare void @tg2.mem.store(i64, i64)\n";
+  if (AnyMemLoad || AnyMemStore)
+    OS << "\n";
+  OS << Body;
 
   return Out;
 }
