@@ -1,4 +1,4 @@
-//===- TargetGen2IR.cpp - CoreDSL LLVM IR emission --------------*- C++ -*-===//
+//===- TargetGen2IR.cpp - CoreDSL LLVM IR emission -----------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,268 +7,145 @@
 //===----------------------------------------------------------------------===//
 
 #include "TargetGen2IR.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cctype>
 #include <optional>
-#include <set>
 #include <string>
-#include <vector>
+#include <unordered_map>
+#include <unordered_set>
 
 using namespace llvm;
 using namespace llvm::targetgen2;
 
 namespace {
 
-std::string sanitizeName(StringRef S) {
-  std::string Out;
-  Out.reserve(S.size());
-  for (char C : S) {
-    if (isAlnum(static_cast<unsigned char>(C)) || C == '_' || C == '.')
-      Out.push_back(C);
-    else
-      Out.push_back('_');
-  }
-  if (Out.empty())
-    Out = "anon";
-  return Out;
-}
+struct IRFunctionEmitter {
+  raw_ostream &OS;
+  unsigned ValueID = 0;
+  unsigned LabelID = 0;
+  std::unordered_map<std::string, std::string> Env;
+  bool Terminated = false;
+  std::string LastValue = "0";
 
-GlobalVariable *addCStringGlobal(Module &M, StringRef Name, StringRef Value) {
-  LLVMContext &Ctx = M.getContext();
-  Constant *Init = ConstantDataArray::getString(Ctx, Value, true);
-  auto *GV = new GlobalVariable(M, Init->getType(), true,
-                                GlobalValue::PrivateLinkage, Init, Name);
-  GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-  GV->setAlignment(Align(1));
-  return GV;
-}
-
-class FunctionEmitter {
-public:
-  FunctionEmitter(LLVMContext &Ctx, Function &F)
-      : Ctx(Ctx), Builder(Ctx), F(F), I64(Type::getInt64Ty(Ctx)) {
-    Entry = BasicBlock::Create(Ctx, "entry", &F);
-    Builder.SetInsertPoint(Entry);
+  std::string nextValue() { return "%v" + std::to_string(ValueID++); }
+  std::string nextLabel(StringRef Prefix) {
+    return (Prefix.str() + std::to_string(LabelID++));
   }
 
-  void setParam(StringRef Name, Value *V) { Vars[Name] = V; }
-
-  void emitBehavior(const Statement &S) {
-    emitStmt(S);
-    if (!Builder.GetInsertBlock()->getTerminator())
-      Builder.CreateRet(ConstantInt::get(I64, 0));
+  static bool parseIntegerLiteral(StringRef S, uint64_t &Out) {
+    StringRef T = S.trim();
+    if (T.empty())
+      return false;
+    if (T.contains("'"))
+      return false;
+    unsigned Base = 10;
+    if (T.starts_with("0x") || T.starts_with("0X")) {
+      Base = 16;
+      T = T.drop_front(2);
+    }
+    if (T.empty())
+      return false;
+    Out = 0;
+    for (char C : T) {
+      if (!std::isxdigit(static_cast<unsigned char>(C)))
+        return false;
+      unsigned V = std::isdigit(static_cast<unsigned char>(C)) ? C - '0'
+                                                               : std::tolower(C) - 'a' + 10;
+      if (V >= Base)
+        return false;
+      Out = Out * Base + V;
+    }
+    return true;
   }
 
-private:
-  using Env = StringMap<Value *>;
-
-  LLVMContext &Ctx;
-  IRBuilder<> Builder;
-  Function &F;
-  BasicBlock *Entry = nullptr;
-  Type *I64 = nullptr;
-  Env Vars;
-
-  APInt parseInt(StringRef T) {
-    T = T.trim();
-    APInt V(64, 0);
-    if (T.starts_with("0x"))
-      return APInt(64, T.drop_front(2), 16);
-    if (!T.getAsInteger(10, V))
-      return V;
-    return APInt(64, 0);
-  }
-
-  Value *toBool(Value *V) {
-    return Builder.CreateICmpNE(V, ConstantInt::get(I64, 0));
-  }
-
-  static std::optional<ExprOp> textOp(StringRef T, size_t &Pos, unsigned &Len) {
-    struct OpInfo {
-      StringRef Op;
-      ExprOp Kind;
-    };
-    static constexpr OpInfo Ops[] = {{"!=", ExprOp::Ne}, {"==", ExprOp::Eq},
-                                     {"<=", ExprOp::Le}, {">=", ExprOp::Ge},
-                                     {"<<", ExprOp::Shl}, {">>", ExprOp::Shr},
-                                     {"<", ExprOp::Lt},  {">", ExprOp::Gt},
-                                     {"+", ExprOp::Add}, {"-", ExprOp::Sub},
-                                     {"*", ExprOp::Mul}, {"/", ExprOp::Div},
-                                     {"&", ExprOp::BitAnd}, {"|", ExprOp::BitOr},
-                                     {"^", ExprOp::BitXor}};
-    for (const auto &OI : Ops) {
-      Pos = T.find(OI.Op);
-      if (Pos != StringRef::npos) {
-        Len = OI.Op.size();
-        return OI.Kind;
+  std::string emitExpr(const Expr &E) {
+    switch (E.Kind) {
+    case ExprKind::Identifier: {
+      auto It = Env.find(E.Text);
+      if (It != Env.end())
+        return It->second;
+      return "0";
+    }
+    case ExprKind::Literal: {
+      uint64_t V = 0;
+      if (parseIntegerLiteral(E.Value.empty() ? E.Text : E.Value, V))
+        return std::to_string(V);
+      return "0";
+    }
+    case ExprKind::Binary: {
+      if (E.Children.size() < 2)
+        return "0";
+      std::string L = emitExpr(E.Children[0]);
+      std::string R = emitExpr(E.Children[1]);
+      std::string Res = nextValue();
+      switch (E.Op) {
+      case ExprOp::Add:
+        OS << "  " << Res << " = add i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Sub:
+        OS << "  " << Res << " = sub i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Mul:
+        OS << "  " << Res << " = mul i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Div:
+        OS << "  " << Res << " = sdiv i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Eq:
+        OS << "  " << Res << " = icmp eq i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Ne:
+        OS << "  " << Res << " = icmp ne i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Lt:
+        OS << "  " << Res << " = icmp slt i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Le:
+        OS << "  " << Res << " = icmp sle i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Gt:
+        OS << "  " << Res << " = icmp sgt i64 " << L << ", " << R << "\n";
+        return Res;
+      case ExprOp::Ge:
+        OS << "  " << Res << " = icmp sge i64 " << L << ", " << R << "\n";
+        return Res;
+      default:
+        return "0";
       }
     }
-    return std::nullopt;
-  }
-
-  Value *lookupVar(StringRef Name) {
-    auto It = Vars.find(Name);
-    if (It != Vars.end())
-      return It->second;
-    return ConstantInt::get(I64, 0);
-  }
-
-  Value *emitBinary(Value *L, Value *R, ExprOp Op) {
-    switch (Op) {
-    case ExprOp::Add:
-      return Builder.CreateAdd(L, R);
-    case ExprOp::Sub:
-      return Builder.CreateSub(L, R);
-    case ExprOp::Mul:
-      return Builder.CreateMul(L, R);
-    case ExprOp::Div:
-      return Builder.CreateSDiv(L, R);
-    case ExprOp::Mod:
-      return Builder.CreateSRem(L, R);
-    case ExprOp::Eq:
-      return Builder.CreateZExt(Builder.CreateICmpEQ(L, R), I64);
-    case ExprOp::Ne:
-      return Builder.CreateZExt(Builder.CreateICmpNE(L, R), I64);
-    case ExprOp::Lt:
-      return Builder.CreateZExt(Builder.CreateICmpSLT(L, R), I64);
-    case ExprOp::Le:
-      return Builder.CreateZExt(Builder.CreateICmpSLE(L, R), I64);
-    case ExprOp::Gt:
-      return Builder.CreateZExt(Builder.CreateICmpSGT(L, R), I64);
-    case ExprOp::Ge:
-      return Builder.CreateZExt(Builder.CreateICmpSGE(L, R), I64);
-    case ExprOp::BitAnd:
-      return Builder.CreateAnd(L, R);
-    case ExprOp::BitOr:
-      return Builder.CreateOr(L, R);
-    case ExprOp::BitXor:
-      return Builder.CreateXor(L, R);
-    case ExprOp::Shl:
-      return Builder.CreateShl(L, R);
-    case ExprOp::Shr:
-      return Builder.CreateAShr(L, R);
-    default:
-      return L;
-    }
-  }
-
-  std::optional<Value *> emitSimpleTextExpr(StringRef T) {
-    T = T.trim();
-    size_t Pos = StringRef::npos;
-    unsigned Len = 0;
-    auto Op = textOp(T, Pos, Len);
-    if (!Op)
-      return std::nullopt;
-
-    StringRef LHS = T.take_front(Pos).trim();
-    StringRef RHS = T.drop_front(Pos + Len).trim();
-
-    auto parseValue = [&](StringRef S) -> Value * {
-      APInt Parsed(64, 0);
-      if (!S.getAsInteger(10, Parsed))
-        return ConstantInt::get(I64, Parsed);
-      return lookupVar(S);
-    };
-
-    return emitBinary(parseValue(LHS), parseValue(RHS), *Op);
-  }
-
-  Value *emitExpr(const Expr &E) {
-    switch (E.Kind) {
-    case ExprKind::Literal:
-      return ConstantInt::get(I64, parseInt(E.Value.empty() ? E.Text : E.Value));
-    case ExprKind::Identifier:
-      return lookupVar(E.Value.empty() ? E.Text : E.Value);
     case ExprKind::Assignment: {
       if (E.Children.size() < 2)
-        return ConstantInt::get(I64, 0);
+        return "0";
       const Expr &LHS = E.Children[0];
-      Value *R = emitExpr(E.Children[1]);
+      std::string RHS = emitExpr(E.Children[1]);
       if (LHS.Kind == ExprKind::Identifier)
-        Vars[LHS.Value.empty() ? LHS.Text : LHS.Value] = R;
-      return R;
-    }
-    case ExprKind::Binary:
-      if (E.Children.size() < 2)
-        return ConstantInt::get(I64, 0);
-      return emitBinary(emitExpr(E.Children[0]), emitExpr(E.Children[1]), E.Op);
-    case ExprKind::Unary: {
-      if (E.Children.empty())
-        return ConstantInt::get(I64, 0);
-      Value *V = emitExpr(E.Children[0]);
-      switch (E.Op) {
-      case ExprOp::UnaryMinus:
-        return Builder.CreateNeg(V);
-      case ExprOp::LogicalNot:
-        return Builder.CreateZExt(Builder.CreateICmpEQ(V, ConstantInt::get(I64, 0)),
-                                  I64);
-      case ExprOp::BitNot:
-        return Builder.CreateNot(V);
-      default:
-        return V;
-      }
+        Env[LHS.Text] = RHS;
+      LastValue = RHS;
+      return RHS;
     }
     case ExprKind::Group:
     case ExprKind::Cast:
-      if (!E.Children.empty()) {
-        Value *V = emitExpr(E.Children[0]);
-        if (E.Children[0].Kind != ExprKind::Unknown)
-          return V;
-      }
-      if (!E.Value.empty()) {
-        if (auto V = emitSimpleTextExpr(E.Value))
-          return *V;
-      }
-      return ConstantInt::get(I64, 0);
-    default:
       if (!E.Children.empty())
         return emitExpr(E.Children.back());
-      return ConstantInt::get(I64, 0);
+      return "0";
+    default:
+      return "0";
     }
   }
 
-  void mergeEnvs(const Env &ThenEnv, BasicBlock *ThenBB, const Env &ElseEnv,
-                 BasicBlock *ElseBB, BasicBlock *MergeBB) {
-    std::set<std::string> Keys;
-    for (const auto &KV : ThenEnv)
-      Keys.insert(std::string(KV.first()));
-    for (const auto &KV : ElseEnv)
-      Keys.insert(std::string(KV.first()));
-
-    for (const std::string &K : Keys) {
-      Value *TV = nullptr;
-      if (auto It = ThenEnv.find(K); It != ThenEnv.end())
-        TV = It->second;
-      Value *EV = nullptr;
-      if (auto It = ElseEnv.find(K); It != ElseEnv.end())
-        EV = It->second;
-      if (!TV)
-        TV = ConstantInt::get(I64, 0);
-      if (!EV)
-        EV = ConstantInt::get(I64, 0);
-      if (TV == EV) {
-        Vars[K] = TV;
-        continue;
-      }
-      PHINode *PN = Builder.CreatePHI(I64, 2, sanitizeName(K) + ".phi");
-      PN->addIncoming(TV, ThenBB);
-      PN->addIncoming(EV, ElseBB);
-      Vars[K] = PN;
-    }
+  std::string emitCondition(const Expr &E) {
+    std::string V = emitExpr(E);
+    if (!V.empty() && V[0] == '%')
+      return V;
+    std::string Cmp = nextValue();
+    OS << "  " << Cmp << " = icmp ne i64 " << V << ", 0\n";
+    return Cmp;
   }
 
   void emitStmt(const Statement &S) {
-    if (Builder.GetInsertBlock()->getTerminator())
+    if (Terminated)
       return;
-
     switch (S.Kind) {
     case StatementKind::Compound:
       for (const Statement &C : S.Children)
@@ -276,125 +153,130 @@ private:
       return;
     case StatementKind::Expression:
       for (const Expr &E : S.Expressions)
-        (void)emitExpr(E);
+        LastValue = emitExpr(E);
       return;
-    case StatementKind::If: {
-      Value *CondV = ConstantInt::get(I64, 1);
+    case StatementKind::Return: {
+      std::string RV = "0";
       if (!S.Expressions.empty())
-        CondV = emitExpr(S.Expressions.front());
-      Value *Cond = toBool(CondV);
-
-      BasicBlock *ThenBB = BasicBlock::Create(Ctx, "if.then", &F);
-      BasicBlock *ElseBB = BasicBlock::Create(Ctx, "if.else", &F);
-      BasicBlock *MergeBB = BasicBlock::Create(Ctx, "if.end", &F);
-      Builder.CreateCondBr(Cond, ThenBB, ElseBB);
-
-      Env Before = Vars;
-
-      Builder.SetInsertPoint(ThenBB);
-      Vars = Before;
-      if (!S.Children.empty())
-        emitStmt(S.Children[0]);
-      if (!Builder.GetInsertBlock()->getTerminator())
-        Builder.CreateBr(MergeBB);
-      BasicBlock *ThenEnd = Builder.GetInsertBlock();
-      Env ThenEnv = Vars;
-
-      Builder.SetInsertPoint(ElseBB);
-      Vars = Before;
+        RV = emitExpr(S.Expressions.front());
+      OS << "  ret i64 " << RV << "\n";
+      Terminated = true;
+      return;
+    }
+    case StatementKind::If: {
+      if (S.Expressions.empty() || S.Children.empty())
+        return;
+      std::string ThenL = nextLabel("if.then.");
+      std::string ElseL = nextLabel("if.else.");
+      std::string EndL = nextLabel("if.end.");
+      std::string Cond = emitCondition(S.Expressions.front());
+      OS << "  br i1 " << Cond << ", label %" << ThenL << ", label %" << ElseL << "\n";
+      OS << ThenL << ":\n";
+      emitStmt(S.Children[0]);
+      if (!Terminated)
+        OS << "  br label %" << EndL << "\n";
+      bool ThenTerm = Terminated;
+      Terminated = false;
+      OS << ElseL << ":\n";
       if (S.Children.size() > 1)
         emitStmt(S.Children[1]);
-      if (!Builder.GetInsertBlock()->getTerminator())
-        Builder.CreateBr(MergeBB);
-      BasicBlock *ElseEnd = Builder.GetInsertBlock();
-      Env ElseEnv = Vars;
-
-      Builder.SetInsertPoint(MergeBB);
-      mergeEnvs(ThenEnv, ThenEnd, ElseEnv, ElseEnd, MergeBB);
+      if (!Terminated)
+        OS << "  br label %" << EndL << "\n";
+      bool ElseTerm = Terminated;
+      Terminated = ThenTerm && ElseTerm;
+      if (!Terminated)
+        OS << EndL << ":\n";
       return;
     }
-    case StatementKind::Return: {
-      Value *Ret = ConstantInt::get(I64, 0);
-      if (!S.Expressions.empty())
-        Ret = emitExpr(S.Expressions.front());
-      Builder.CreateRet(Ret);
-      return;
-    }
-    case StatementKind::Empty:
-      return;
     default:
-      for (const Expr &E : S.Expressions)
-        (void)emitExpr(E);
-      for (const Statement &C : S.Children)
-        emitStmt(C);
       return;
     }
   }
 };
 
-std::vector<std::string> collectParams(const llvm::targetgen2::Instruction &Inst) {
+static void collectIdentifiers(const Expr &E,
+                               std::vector<std::string> &UsedOrder,
+                               std::unordered_set<std::string> &UsedSet,
+                               std::unordered_set<std::string> &Assigned) {
+  if (E.Kind == ExprKind::Identifier && UsedSet.insert(E.Text).second)
+    UsedOrder.push_back(E.Text);
+  if (E.Kind == ExprKind::Assignment && E.Children.size() >= 2 &&
+      E.Children[0].Kind == ExprKind::Identifier)
+    Assigned.insert(E.Children[0].Text);
+  for (const Expr &C : E.Children)
+    collectIdentifiers(C, UsedOrder, UsedSet, Assigned);
+}
+
+static void collectIdentifiers(const Statement &S,
+                               std::vector<std::string> &UsedOrder,
+                               std::unordered_set<std::string> &UsedSet,
+                               std::unordered_set<std::string> &Assigned) {
+  for (const Expr &E : S.Expressions)
+    collectIdentifiers(E, UsedOrder, UsedSet, Assigned);
+  for (const Statement &C : S.Children)
+    collectIdentifiers(C, UsedOrder, UsedSet, Assigned);
+}
+
+static std::vector<std::string> inferParams(const Instruction &Inst) {
+  std::vector<std::string> UsedOrder;
+  std::unordered_set<std::string> UsedSet;
+  std::unordered_set<std::string> Assigned;
+  collectIdentifiers(Inst.Behavior, UsedOrder, UsedSet, Assigned);
+
   std::vector<std::string> Params;
-  std::set<std::string> Seen;
-  for (const EncodingField &EF : Inst.Encoding) {
-    if (EF.IsBitValue || EF.Name.empty())
+  std::unordered_set<std::string> Seen;
+  for (const std::string &U : UsedOrder) {
+    if (!Assigned.count(U) && Seen.insert(U).second)
+      Params.push_back(U);
+  }
+  if (!Params.empty())
+    return Params;
+
+  for (const EncodingField &F : Inst.Encoding) {
+    if (F.IsBitValue || F.Name.empty())
       continue;
-    std::string N = sanitizeName(EF.Name);
-    if (Seen.insert(N).second)
-      Params.push_back(N);
+    if (Seen.insert(F.Name).second)
+      Params.push_back(F.Name);
   }
   return Params;
 }
 
-void emitInstructionBehavior(Module &M, StringRef Prefix, const llvm::targetgen2::Instruction &Inst) {
-  LLVMContext &Ctx = M.getContext();
-  std::vector<std::string> Params = collectParams(Inst);
-
-  std::vector<Type *> ParamTypes(Params.size(), Type::getInt64Ty(Ctx));
-  FunctionType *FTy = FunctionType::get(Type::getInt64Ty(Ctx), ParamTypes, false);
-  Function *F = Function::Create(FTy, GlobalValue::ExternalLinkage,
-                                 sanitizeName(Prefix), M);
-
-  FunctionEmitter FE(Ctx, *F);
-  unsigned I = 0;
-  for (Argument &A : F->args()) {
-    A.setName(Params[I]);
-    FE.setParam(Params[I], &A);
-    ++I;
+static void emitInstructionFunction(raw_ostream &OS, StringRef Scope,
+                                    const Instruction &Inst) {
+  std::vector<std::string> Params = inferParams(Inst);
+  OS << "define i64 @tg2.exec." << Scope << "." << Inst.Name << "(";
+  for (size_t I = 0; I < Params.size(); ++I) {
+    if (I)
+      OS << ", ";
+    OS << "i64 %" << Params[I];
   }
-  FE.emitBehavior(Inst.Behavior);
+  OS << ") {\nentry:\n";
+
+  IRFunctionEmitter E{OS};
+  for (const std::string &P : Params)
+    E.Env[P] = ("%" + P);
+
+  E.emitStmt(Inst.Behavior);
+  if (!E.Terminated)
+    OS << "  ret i64 " << E.LastValue << "\n";
+  OS << "}\n\n";
 }
 
 } // namespace
 
-std::string targetgen2::toLLVMIR(const Description &D) {
-  LLVMContext Ctx;
-  Module M("target_gen2", Ctx);
-
-  for (size_t I = 0; I < D.Imports.size(); ++I)
-    addCStringGlobal(M, ("tg2.import." + std::to_string(I)).c_str(), D.Imports[I]);
-
-  for (const InstructionSetDef &IS : D.InstructionSets) {
-    std::string ISAName = sanitizeName(IS.Name);
-    addCStringGlobal(M, ("tg2.isa.name." + ISAName).c_str(), IS.Name);
-    for (const llvm::targetgen2::Instruction &Inst : IS.ISA.Instructions)
-      emitInstructionBehavior(M,
-                              "tg2.exec.inst." + ISAName + "." + sanitizeName(Inst.Name),
-                              Inst);
-  }
-
-  for (const CoreDef &Core : D.Cores) {
-    std::string CoreName = sanitizeName(Core.Name);
-    addCStringGlobal(M, ("tg2.core.name." + CoreName).c_str(), Core.Name);
-    for (const llvm::targetgen2::Instruction &Inst : Core.ISA.Instructions)
-      emitInstructionBehavior(
-          M, "tg2.exec.core." + CoreName + "." + sanitizeName(Inst.Name), Inst);
-  }
-
-  if (verifyModule(M, &errs()))
-    errs() << "target-gen2: generated invalid LLVM IR\n";
-
+std::string llvm::targetgen2::toLLVMIR(const Description &Desc) {
   std::string Out;
   raw_string_ostream OS(Out);
-  M.print(OS, nullptr);
-  return OS.str();
+  OS << "; ModuleID = 'target-gen2'\n";
+  OS << "source_filename = \"target-gen2\"\n\n";
+
+  for (const InstructionSetDef &IS : Desc.InstructionSets)
+    for (const Instruction &Inst : IS.ISA.Instructions)
+      emitInstructionFunction(OS, "inst." + IS.Name, Inst);
+
+  for (const CoreDef &C : Desc.Cores)
+    for (const Instruction &Inst : C.ISA.Instructions)
+      emitInstructionFunction(OS, "core." + C.Name, Inst);
+
+  return Out;
 }

@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "TargetGen2JSON.h"
 #include "TargetGen2IR.h"
+#include "TargetGen2JSON.h"
 #include "TargetGen2Parser.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
@@ -31,9 +31,8 @@ static cl::opt<std::string>
                    cl::value_desc("filename"), cl::cat(TargetGenCategory));
 
 static cl::opt<std::string>
-    EmitKind("emit", cl::desc("Output format: json | llvm-ir"),
-             cl::init("json"), cl::value_desc("format"),
-             cl::cat(TargetGenCategory));
+    EmitFormat("emit", cl::desc("Output format"), cl::init("json"),
+               cl::value_desc("json|llvm-ir"), cl::cat(TargetGenCategory));
 
 int main(int argc, const char **argv) {
   InitLLVM X(argc, argv);
@@ -63,12 +62,12 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
-  if (EmitKind == "json") {
+  if (EmitFormat == "json") {
     OS << formatv("{0:2}\n", toJSON(*DescOrErr));
-  } else if (EmitKind == "llvm-ir") {
+  } else if (EmitFormat == "llvm-ir") {
     OS << toLLVMIR(*DescOrErr);
   } else {
-    errs() << "target-gen2: unsupported emit format '" << EmitKind
+    errs() << "target-gen2: unsupported --emit value '" << EmitFormat
            << "' (expected json or llvm-ir)\n";
     return 1;
   }
