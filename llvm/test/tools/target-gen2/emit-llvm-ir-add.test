@@ -1,6 +1,6 @@
 // RUN: target-gen2 --emit=llvm-ir %s -o - | FileCheck %s
 
-// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD(i64 %rs1, i64 %rs2)
+// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD(i64 %rd, i64 %rs1, i64 %rs2)
 // CHECK: entry:
 // CHECK: %v0 = add i64 %rs1, %rs2
 // CHECK: ret i64 %v0

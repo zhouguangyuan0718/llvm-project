@@ -251,48 +251,13 @@ struct IRFunctionEmitter {
   }
 };
 
-static void collectIdentifiers(const Expr &E,
-                               std::vector<std::string> &UsedOrder,
-                               std::unordered_set<std::string> &UsedSet,
-                               std::unordered_set<std::string> &Assigned) {
-  if (E.Kind == ExprKind::Identifier && UsedSet.insert(E.Text).second)
-    UsedOrder.push_back(E.Text);
-  if (E.Kind == ExprKind::Assignment && E.Children.size() >= 2 &&
-      E.Children[0].Kind == ExprKind::Identifier)
-    Assigned.insert(E.Children[0].Text);
-  for (const Expr &C : E.Children)
-    collectIdentifiers(C, UsedOrder, UsedSet, Assigned);
-}
-
-static void collectIdentifiers(const Statement &S,
-                               std::vector<std::string> &UsedOrder,
-                               std::unordered_set<std::string> &UsedSet,
-                               std::unordered_set<std::string> &Assigned) {
-  for (const Expr &E : S.Expressions)
-    collectIdentifiers(E, UsedOrder, UsedSet, Assigned);
-  for (const Statement &C : S.Children)
-    collectIdentifiers(C, UsedOrder, UsedSet, Assigned);
-}
-
 static std::vector<std::string> inferParams(const Instruction &Inst) {
-  std::vector<std::string> UsedOrder;
-  std::unordered_set<std::string> UsedSet;
-  std::unordered_set<std::string> Assigned;
-  collectIdentifiers(Inst.Behavior, UsedOrder, UsedSet, Assigned);
-
   std::vector<std::string> Params;
   std::unordered_set<std::string> Seen;
-  for (const std::string &U : UsedOrder) {
-    if (U == "MEM")
-      continue;
-    if (!Assigned.count(U) && Seen.insert(U).second)
-      Params.push_back(U);
-  }
-  if (!Params.empty())
-    return Params;
-
   for (const EncodingField &F : Inst.Encoding) {
     if (F.IsBitValue || F.Name.empty())
+      continue;
+    if (F.Name == "MEM")
       continue;
     if (Seen.insert(F.Name).second)
       Params.push_back(F.Name);
