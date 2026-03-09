@@ -6,12 +6,12 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This tool implements a lightweight compilation frontend for a CoreDSL-inspired
-// language and emits a normalized JSON representation.
+// CoreDSL frontend prototype aligned with Minres/CoreDSL top-level grammar.
+// The tool parses imports, InstructionSet/Core definitions, ISA sections,
+// instruction encodings, assembly forms, and behavior blocks, then emits JSON.
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/CommandLine.h"
@@ -21,7 +21,6 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cctype>
 #include <cstdint>
@@ -43,74 +42,110 @@ struct SourceLocation {
 enum class TokenKind {
   Eof,
   Identifier,
-  Number,
+  Integer,
   String,
+  Other,
 
   LBrace,
   RBrace,
   LParen,
   RParen,
+  LBracket,
+  RBracket,
+  DoubleLBracket,
+  DoubleRBracket,
   Semicolon,
   Comma,
+  Colon,
+  DoubleColon,
   Equal,
 
+  KwImport,
+  KwInstructionSet,
+  KwCombines,
+  KwExtends,
   KwCore,
-  KwRegister,
-  KwInstruction,
-  KwField,
+  KwProvides,
+  KwArchitecturalState,
+  KwFunctions,
+  KwInstructions,
+  KwAlways,
   KwEncoding,
-  KwReset,
-  KwWidth,
+  KwAssembly,
+  KwBehavior,
 };
 
 struct Token {
   TokenKind Kind = TokenKind::Eof;
   StringRef Lexeme;
   SourceLocation Loc;
+  size_t EndOffset = 0;
 };
 
 struct Lexer {
-  explicit Lexer(StringRef Buffer) : Buffer(Buffer) {}
+  explicit Lexer(StringRef Buffer) : Buffer(Buffer) { AtEnd = Buffer.empty(); }
 
   Token next() {
     skipTrivia();
     if (AtEnd)
-      return makeToken(TokenKind::Eof, "");
+      return Token{TokenKind::Eof, "", Loc, Loc.Offset};
 
+    const SourceLocation Start = Loc;
+    const size_t StartIdx = Index;
     char C = peek();
+
     if (isalpha(static_cast<unsigned char>(C)) || C == '_')
       return lexIdentifierOrKeyword();
     if (isdigit(static_cast<unsigned char>(C)))
-      return lexNumber();
+      return lexInteger();
     if (C == '"')
       return lexString();
 
-    SourceLocation Start = Loc;
+    if (C == ':' && peekAhead(1) == ':') {
+      advance();
+      advance();
+      return Token{TokenKind::DoubleColon, Buffer.slice(StartIdx, Index), Start,
+                   Index};
+    }
+    if (C == '[' && peekAhead(1) == '[') {
+      advance();
+      advance();
+      return Token{TokenKind::DoubleLBracket, Buffer.slice(StartIdx, Index),
+                   Start, Index};
+    }
+    if (C == ']' && peekAhead(1) == ']') {
+      advance();
+      advance();
+      return Token{TokenKind::DoubleRBracket, Buffer.slice(StartIdx, Index),
+                   Start, Index};
+    }
+
     advance();
     switch (C) {
     case '{':
-      return Token{TokenKind::LBrace, "{", Start};
+      return Token{TokenKind::LBrace, "{", Start, Index};
     case '}':
-      return Token{TokenKind::RBrace, "}", Start};
+      return Token{TokenKind::RBrace, "}", Start, Index};
     case '(':
-      return Token{TokenKind::LParen, "(", Start};
+      return Token{TokenKind::LParen, "(", Start, Index};
     case ')':
-      return Token{TokenKind::RParen, ")", Start};
+      return Token{TokenKind::RParen, ")", Start, Index};
+    case '[':
+      return Token{TokenKind::LBracket, "[", Start, Index};
+    case ']':
+      return Token{TokenKind::RBracket, "]", Start, Index};
     case ';':
-      return Token{TokenKind::Semicolon, ";", Start};
+      return Token{TokenKind::Semicolon, ";", Start, Index};
     case ',':
-      return Token{TokenKind::Comma, ",", Start};
+      return Token{TokenKind::Comma, ",", Start, Index};
+    case ':':
+      return Token{TokenKind::Colon, ":", Start, Index};
     case '=':
-      return Token{TokenKind::Equal, "=", Start};
+      return Token{TokenKind::Equal, "=", Start, Index};
     default:
-      Diags.push_back(formatv("{0}:{1}: unknown character '{2}'", Start.Line,
-                              Start.Column, C)
-                          .str());
-      return next();
+      return Token{TokenKind::Other, Buffer.slice(StartIdx, Index), Start, Index};
     }
   }
-
-  std::vector<std::string> Diags;
 
 private:
   StringRef Buffer;
@@ -120,26 +155,27 @@ private:
 
   char peek() const { return Buffer[Index]; }
 
+  char peekAhead(size_t N) const {
+    const size_t Pos = Index + N;
+    if (Pos >= Buffer.size())
+      return '\0';
+    return Buffer[Pos];
+  }
+
   void advance() {
     if (Index >= Buffer.size()) {
       AtEnd = true;
       return;
     }
-
     if (Buffer[Index] == '\n') {
       ++Loc.Line;
       Loc.Column = 1;
     } else {
       ++Loc.Column;
     }
-
     ++Index;
     Loc.Offset = Index;
     AtEnd = Index >= Buffer.size();
-  }
-
-  Token makeToken(TokenKind Kind, StringRef Lexeme) const {
-    return Token{Kind, Lexeme, Loc};
   }
 
   void skipTrivia() {
@@ -148,18 +184,24 @@ private:
         advance();
         continue;
       }
-
-      if (peek() == '#') {
+      if (peek() == '/' && peekAhead(1) == '/') {
+        advance();
+        advance();
         while (!AtEnd && peek() != '\n')
           advance();
         continue;
       }
-
-      if (peek() == '/' && Index + 1 < Buffer.size() && Buffer[Index + 1] == '/') {
+      if (peek() == '/' && peekAhead(1) == '*') {
         advance();
         advance();
-        while (!AtEnd && peek() != '\n')
+        while (!AtEnd) {
+          if (peek() == '*' && peekAhead(1) == '/') {
+            advance();
+            advance();
+            break;
+          }
           advance();
+        }
         continue;
       }
       break;
@@ -167,136 +209,170 @@ private:
   }
 
   Token lexIdentifierOrKeyword() {
-    SourceLocation Start = Loc;
-    size_t StartIdx = Index;
+    const SourceLocation Start = Loc;
+    const size_t StartIdx = Index;
     while (!AtEnd &&
            (isalnum(static_cast<unsigned char>(peek())) || peek() == '_'))
       advance();
+
     StringRef Lexeme = Buffer.slice(StartIdx, Index);
+    TokenKind Kind = TokenKind::Identifier;
+    if (Lexeme == "import")
+      Kind = TokenKind::KwImport;
+    else if (Lexeme == "InstructionSet")
+      Kind = TokenKind::KwInstructionSet;
+    else if (Lexeme == "combines")
+      Kind = TokenKind::KwCombines;
+    else if (Lexeme == "extends")
+      Kind = TokenKind::KwExtends;
+    else if (Lexeme == "Core")
+      Kind = TokenKind::KwCore;
+    else if (Lexeme == "provides")
+      Kind = TokenKind::KwProvides;
+    else if (Lexeme == "architectural_state")
+      Kind = TokenKind::KwArchitecturalState;
+    else if (Lexeme == "functions")
+      Kind = TokenKind::KwFunctions;
+    else if (Lexeme == "instructions")
+      Kind = TokenKind::KwInstructions;
+    else if (Lexeme == "always")
+      Kind = TokenKind::KwAlways;
+    else if (Lexeme == "encoding")
+      Kind = TokenKind::KwEncoding;
+    else if (Lexeme == "assembly")
+      Kind = TokenKind::KwAssembly;
+    else if (Lexeme == "behavior")
+      Kind = TokenKind::KwBehavior;
 
-    if (Lexeme == "core")
-      return Token{TokenKind::KwCore, Lexeme, Start};
-    if (Lexeme == "register")
-      return Token{TokenKind::KwRegister, Lexeme, Start};
-    if (Lexeme == "instruction")
-      return Token{TokenKind::KwInstruction, Lexeme, Start};
-    if (Lexeme == "field")
-      return Token{TokenKind::KwField, Lexeme, Start};
-    if (Lexeme == "encoding")
-      return Token{TokenKind::KwEncoding, Lexeme, Start};
-    if (Lexeme == "reset")
-      return Token{TokenKind::KwReset, Lexeme, Start};
-    if (Lexeme == "width")
-      return Token{TokenKind::KwWidth, Lexeme, Start};
-    return Token{TokenKind::Identifier, Lexeme, Start};
-  }
-
-  Token lexNumber() {
-    SourceLocation Start = Loc;
-    size_t StartIdx = Index;
-    if (!AtEnd && peek() == '0' && Index + 1 < Buffer.size() &&
-        (Buffer[Index + 1] == 'x' || Buffer[Index + 1] == 'X')) {
-      advance();
-      advance();
-      while (!AtEnd && isxdigit(static_cast<unsigned char>(peek())))
-        advance();
-    } else {
-      while (!AtEnd && isdigit(static_cast<unsigned char>(peek())))
-        advance();
-    }
-    return Token{TokenKind::Number, Buffer.slice(StartIdx, Index), Start};
+    return Token{Kind, Lexeme, Start, Index};
   }
 
   Token lexString() {
-    SourceLocation Start = Loc;
+    const SourceLocation Start = Loc;
+    const size_t StartIdx = Index;
     advance();
-    size_t StartIdx = Index;
-    while (!AtEnd && peek() != '"')
+    while (!AtEnd) {
+      if (peek() == '\\') {
+        advance();
+        if (!AtEnd)
+          advance();
+        continue;
+      }
+      if (peek() == '"') {
+        advance();
+        break;
+      }
       advance();
-    StringRef Raw = Buffer.slice(StartIdx, Index);
-    if (!AtEnd)
-      advance();
-    else
-      Diags.push_back(
-          formatv("{0}:{1}: unterminated string literal", Start.Line, Start.Column)
-              .str());
+    }
+    return Token{TokenKind::String, Buffer.slice(StartIdx, Index), Start, Index};
+  }
 
-    return Token{TokenKind::String, Raw, Start};
+  Token lexInteger() {
+    const SourceLocation Start = Loc;
+    const size_t StartIdx = Index;
+
+    while (!AtEnd && (isalnum(static_cast<unsigned char>(peek())) || peek() == '\'' ||
+                      peek() == '_'))
+      advance();
+
+    return Token{TokenKind::Integer, Buffer.slice(StartIdx, Index), Start, Index};
   }
 };
 
-struct FieldDecl {
+struct EncodingField {
+  bool IsBitValue = false;
+  std::string Value;
   std::string Name;
-  uint64_t Width = 0;
+  std::string StartBit;
+  std::string EndBit;
 };
 
-struct RegisterDecl {
-  std::string Name;
-  uint64_t Width = 0;
-  uint64_t Reset = 0;
+struct Assembly {
+  bool IsStructured = false;
+  std::string Mnemonic;
+  std::string Template;
 };
 
-struct InstructionDecl {
+struct Instruction {
   std::string Name;
-  std::vector<FieldDecl> Fields;
-  std::string Encoding;
+  std::vector<std::string> Attributes;
+  std::vector<EncodingField> Encoding;
+  std::optional<Assembly> Asm;
+  std::string Behavior;
 };
 
-struct CoreDecl {
+struct AlwaysBlock {
   std::string Name;
-  std::vector<RegisterDecl> Registers;
-  std::vector<InstructionDecl> Instructions;
+  std::vector<std::string> Attributes;
+  std::string Behavior;
+};
+
+struct ISASections {
+  std::optional<std::string> ArchitecturalState;
+  std::optional<std::string> Functions;
+  std::vector<std::string> CommonInstructionAttributes;
+  std::vector<Instruction> Instructions;
+  std::vector<std::string> CommonAlwaysAttributes;
+  std::vector<AlwaysBlock> AlwaysBlocks;
+};
+
+struct InstructionSetDef {
+  std::string Name;
+  std::vector<std::string> Combines;
+  std::optional<std::string> Extends;
+  ISASections ISA;
+};
+
+struct CoreDef {
+  std::string Name;
+  std::vector<std::string> Provides;
+  ISASections ISA;
+};
+
+struct Description {
+  std::vector<std::string> Imports;
+  std::vector<InstructionSetDef> InstructionSets;
+  std::vector<CoreDef> Cores;
 };
 
 class Parser {
 public:
-  explicit Parser(StringRef Buffer) : Lex(Buffer), Cur(Lex.next()) {}
+  explicit Parser(StringRef Buffer) : Buffer(Buffer), Lex(Buffer), Cur(Lex.next()) {}
 
-  Expected<CoreDecl> parseCore() {
-    if (!consume(TokenKind::KwCore, "expected 'core'"))
-      return error();
+  Expected<Description> parseDescription() {
+    Description D;
 
-    auto Name = parseIdentifier("expected core name");
-    if (!Name)
-      return error();
-
-    if (!consume(TokenKind::LBrace, "expected '{' after core name"))
-      return error();
-
-    CoreDecl Core{*Name};
-    while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
-      if (Cur.Kind == TokenKind::KwRegister) {
-        auto R = parseRegister();
-        if (!R)
-          return error();
-        Core.Registers.push_back(std::move(*R));
-        continue;
-      }
-
-      if (Cur.Kind == TokenKind::KwInstruction) {
-        auto I = parseInstruction();
-        if (!I)
-          return error();
-        Core.Instructions.push_back(std::move(*I));
-        continue;
-      }
-
-      addDiag("expected 'register' or 'instruction'");
-      return error();
+    while (Cur.Kind == TokenKind::KwImport) {
+      auto I = parseImport();
+      if (!I)
+        return fail();
+      D.Imports.push_back(std::move(*I));
     }
 
-    if (!consume(TokenKind::RBrace, "expected '}' at end of core"))
-      return error();
-
-    if (Cur.Kind != TokenKind::Eof)
-      addDiag("unexpected tokens after core declaration");
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::KwInstructionSet) {
+        auto S = parseInstructionSet();
+        if (!S)
+          return fail();
+        D.InstructionSets.push_back(std::move(*S));
+      } else if (Cur.Kind == TokenKind::KwCore) {
+        auto C = parseCore();
+        if (!C)
+          return fail();
+        D.Cores.push_back(std::move(*C));
+      } else {
+        addDiag("expected 'InstructionSet' or 'Core'");
+        return fail();
+      }
+    }
 
     if (!Diags.empty())
-      return error();
-    return Core;
+      return fail();
+    return D;
   }
 
 private:
+  StringRef Buffer;
   Lexer Lex;
   Token Cur;
   std::vector<std::string> Diags;
@@ -323,179 +399,574 @@ private:
       addDiag(Err);
       return std::nullopt;
     }
-
-    std::string Value = Cur.Lexeme.str();
+    std::string Text = Cur.Lexeme.str();
     advance();
-    return Value;
+    return Text;
   }
 
-  std::optional<uint64_t> parseNumber(const Twine &Err) {
-    if (Cur.Kind != TokenKind::Number) {
-      addDiag(Err);
+  std::optional<std::string> parseImport() {
+    if (!consume(TokenKind::KwImport, "expected 'import'"))
+      return std::nullopt;
+    if (Cur.Kind != TokenKind::String) {
+      addDiag("expected import string literal");
       return std::nullopt;
     }
-
-    uint64_t Value = 0;
-    if (Cur.Lexeme.getAsInteger(0, Value)) {
-      addDiag("invalid integer literal");
-      return std::nullopt;
-    }
-
+    std::string Text = stripQuotes(Cur.Lexeme);
     advance();
-    return Value;
+    return Text;
   }
 
-  std::optional<RegisterDecl> parseRegister() {
-    if (!consume(TokenKind::KwRegister, "expected 'register'"))
+  std::optional<InstructionSetDef> parseInstructionSet() {
+    if (!consume(TokenKind::KwInstructionSet, "expected 'InstructionSet'"))
       return std::nullopt;
 
-    auto Name = parseIdentifier("expected register name");
+    auto Name = parseIdentifier("expected instruction set name");
     if (!Name)
       return std::nullopt;
 
-    if (!consume(TokenKind::LBrace, "expected '{' in register declaration"))
-      return std::nullopt;
+    InstructionSetDef Set;
+    Set.Name = *Name;
 
-    RegisterDecl Reg;
-    Reg.Name = *Name;
-
-    while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
-      if (Cur.Kind == TokenKind::KwWidth) {
+    if (Cur.Kind == TokenKind::KwCombines) {
+      advance();
+      auto First = parseIdentifier("expected instruction set name after combines");
+      if (!First)
+        return std::nullopt;
+      Set.Combines.push_back(*First);
+      while (Cur.Kind == TokenKind::Comma) {
         advance();
-        if (!consume(TokenKind::Equal, "expected '=' after width"))
+        auto Next = parseIdentifier("expected instruction set name after ','");
+        if (!Next)
           return std::nullopt;
-        auto Value = parseNumber("expected register width");
-        if (!Value)
-          return std::nullopt;
-        Reg.Width = *Value;
-        if (!consume(TokenKind::Semicolon, "expected ';' after width"))
-          return std::nullopt;
-        continue;
+        Set.Combines.push_back(*Next);
       }
-
-      if (Cur.Kind == TokenKind::KwReset) {
-        advance();
-        if (!consume(TokenKind::Equal, "expected '=' after reset"))
-          return std::nullopt;
-        auto Value = parseNumber("expected register reset value");
-        if (!Value)
-          return std::nullopt;
-        Reg.Reset = *Value;
-        if (!consume(TokenKind::Semicolon, "expected ';' after reset"))
-          return std::nullopt;
-        continue;
-      }
-
-      addDiag("expected 'width' or 'reset' in register declaration");
-      return std::nullopt;
+      if (!consume(TokenKind::Semicolon, "expected ';' after combines clause"))
+        return std::nullopt;
+      return Set;
     }
 
-    if (!consume(TokenKind::RBrace, "expected '}' in register declaration"))
+    if (Cur.Kind == TokenKind::KwExtends) {
+      advance();
+      auto Base = parseIdentifier("expected base instruction set name");
+      if (!Base)
+        return std::nullopt;
+      Set.Extends = *Base;
+    }
+
+    if (!consume(TokenKind::LBrace, "expected '{' before ISA body"))
       return std::nullopt;
-    if (!consume(TokenKind::Semicolon, "expected ';' after register declaration"))
+    if (!parseISA(Set.ISA))
+      return std::nullopt;
+    if (!consume(TokenKind::RBrace, "expected '}' after ISA body"))
       return std::nullopt;
 
-    return Reg;
+    return Set;
   }
 
-  std::optional<InstructionDecl> parseInstruction() {
-    if (!consume(TokenKind::KwInstruction, "expected 'instruction'"))
+  std::optional<CoreDef> parseCore() {
+    if (!consume(TokenKind::KwCore, "expected 'Core'"))
       return std::nullopt;
 
+    auto Name = parseIdentifier("expected core name");
+    if (!Name)
+      return std::nullopt;
+
+    CoreDef Core;
+    Core.Name = *Name;
+
+    if (Cur.Kind == TokenKind::KwProvides) {
+      advance();
+      auto First = parseIdentifier("expected instruction set name after provides");
+      if (!First)
+        return std::nullopt;
+      Core.Provides.push_back(*First);
+      while (Cur.Kind == TokenKind::Comma) {
+        advance();
+        auto Next = parseIdentifier("expected instruction set name after ','");
+        if (!Next)
+          return std::nullopt;
+        Core.Provides.push_back(*Next);
+      }
+    }
+
+    if (!consume(TokenKind::LBrace, "expected '{' before ISA body"))
+      return std::nullopt;
+    if (!parseISA(Core.ISA))
+      return std::nullopt;
+    if (!consume(TokenKind::RBrace, "expected '}' after ISA body"))
+      return std::nullopt;
+
+    return Core;
+  }
+
+  bool parseISA(ISASections &Sections) {
+    bool SeenArch = false;
+    bool SeenFunctions = false;
+    bool SeenInstructions = false;
+    bool SeenAlways = false;
+
+    while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::KwArchitecturalState) {
+        if (SeenArch) {
+          addDiag("duplicate 'architectural_state' section");
+          return false;
+        }
+        SeenArch = true;
+        advance();
+        auto Raw = parseRawBracedBlock();
+        if (!Raw)
+          return false;
+        Sections.ArchitecturalState = *Raw;
+        continue;
+      }
+
+      if (Cur.Kind == TokenKind::KwFunctions) {
+        if (SeenFunctions) {
+          addDiag("duplicate 'functions' section");
+          return false;
+        }
+        SeenFunctions = true;
+        advance();
+        auto Raw = parseRawBracedBlock();
+        if (!Raw)
+          return false;
+        Sections.Functions = *Raw;
+        continue;
+      }
+
+      if (Cur.Kind == TokenKind::KwInstructions) {
+        if (SeenInstructions) {
+          addDiag("duplicate 'instructions' section");
+          return false;
+        }
+        SeenInstructions = true;
+
+        advance();
+        Sections.CommonInstructionAttributes = parseAttributes();
+        if (!consume(TokenKind::LBrace, "expected '{' after instructions"))
+          return false;
+
+        while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
+          auto Inst = parseInstruction();
+          if (!Inst)
+            return false;
+          Sections.Instructions.push_back(std::move(*Inst));
+        }
+        if (!consume(TokenKind::RBrace, "expected '}' after instructions section"))
+          return false;
+        continue;
+      }
+
+      if (Cur.Kind == TokenKind::KwAlways) {
+        if (SeenAlways) {
+          addDiag("duplicate 'always' section");
+          return false;
+        }
+        SeenAlways = true;
+
+        advance();
+        Sections.CommonAlwaysAttributes = parseAttributes();
+        if (!consume(TokenKind::LBrace, "expected '{' after always"))
+          return false;
+
+        while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
+          auto B = parseAlwaysBlock();
+          if (!B)
+            return false;
+          Sections.AlwaysBlocks.push_back(std::move(*B));
+        }
+        if (!consume(TokenKind::RBrace, "expected '}' after always section"))
+          return false;
+        continue;
+      }
+
+      addDiag("unexpected token in ISA body");
+      return false;
+    }
+
+    return true;
+  }
+
+  std::vector<std::string> parseAttributes() {
+    std::vector<std::string> Attrs;
+    while (Cur.Kind == TokenKind::DoubleLBracket) {
+      auto A = parseSingleAttribute();
+      if (!A)
+        break;
+      Attrs.push_back(std::move(*A));
+    }
+    return Attrs;
+  }
+
+  std::optional<std::string> parseSingleAttribute() {
+    const size_t Start = Cur.Loc.Offset;
+    int Depth = 0;
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::DoubleLBracket)
+        ++Depth;
+      else if (Cur.Kind == TokenKind::DoubleRBracket)
+        --Depth;
+
+      const size_t End = Cur.EndOffset;
+      advance();
+
+      if (Depth == 0)
+        return Buffer.slice(Start, End).str();
+      if (Depth < 0)
+        break;
+    }
+
+    addDiag("unterminated attribute");
+    return std::nullopt;
+  }
+
+  std::optional<Instruction> parseInstruction() {
     auto Name = parseIdentifier("expected instruction name");
     if (!Name)
       return std::nullopt;
 
-    if (!consume(TokenKind::LBrace, "expected '{' in instruction declaration"))
-      return std::nullopt;
-
-    InstructionDecl Inst;
+    Instruction Inst;
     Inst.Name = *Name;
+    Inst.Attributes = parseAttributes();
 
-    while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
-      if (Cur.Kind == TokenKind::KwField) {
-        advance();
-        auto FieldName = parseIdentifier("expected field name");
-        if (!FieldName)
-          return std::nullopt;
-        if (!consume(TokenKind::LParen, "expected '(' after field name"))
-          return std::nullopt;
-        auto Width = parseNumber("expected field width");
-        if (!Width)
-          return std::nullopt;
-        if (!consume(TokenKind::RParen, "expected ')' after field width"))
-          return std::nullopt;
-        if (!consume(TokenKind::Semicolon, "expected ';' after field declaration"))
-          return std::nullopt;
-        Inst.Fields.push_back(FieldDecl{*FieldName, *Width});
-        continue;
-      }
-
-      if (Cur.Kind == TokenKind::KwEncoding) {
-        advance();
-        if (!consume(TokenKind::Equal, "expected '=' after encoding"))
-          return std::nullopt;
-
-        if (Cur.Kind != TokenKind::String) {
-          addDiag("expected encoding string literal");
-          return std::nullopt;
-        }
-
-        Inst.Encoding = Cur.Lexeme.str();
-        advance();
-        if (!consume(TokenKind::Semicolon, "expected ';' after encoding"))
-          return std::nullopt;
-        continue;
-      }
-
-      addDiag("expected 'field' or 'encoding' in instruction declaration");
+    if (!consume(TokenKind::LBrace, "expected '{' in instruction definition"))
       return std::nullopt;
+
+    if (!consume(TokenKind::KwEncoding, "expected 'encoding' clause"))
+      return std::nullopt;
+    if (!consume(TokenKind::Colon, "expected ':' after encoding"))
+      return std::nullopt;
+
+    auto Enc = parseEncoding();
+    if (!Enc)
+      return std::nullopt;
+    Inst.Encoding = std::move(*Enc);
+
+    if (!consume(TokenKind::Semicolon, "expected ';' after encoding"))
+      return std::nullopt;
+
+    if (Cur.Kind == TokenKind::KwAssembly) {
+      auto Asm = parseAssembly();
+      if (!Asm)
+        return std::nullopt;
+      Inst.Asm = std::move(*Asm);
     }
 
-    if (!consume(TokenKind::RBrace, "expected '}' in instruction declaration"))
+    if (!consume(TokenKind::KwBehavior, "expected 'behavior' clause"))
       return std::nullopt;
-    if (!consume(TokenKind::Semicolon,
-                 "expected ';' after instruction declaration"))
+    if (!consume(TokenKind::Colon, "expected ':' after behavior"))
+      return std::nullopt;
+
+    auto Behavior = parseBehaviorUntilInstructionEnd();
+    if (!Behavior)
+      return std::nullopt;
+    Inst.Behavior = std::move(*Behavior);
+
+    if (!consume(TokenKind::RBrace, "expected '}' after instruction"))
       return std::nullopt;
 
     return Inst;
   }
 
-  Error error() {
-    for (const std::string &Diag : Lex.Diags)
-      Diags.push_back(Diag);
+  std::optional<Assembly> parseAssembly() {
+    if (!consume(TokenKind::KwAssembly, "expected 'assembly'"))
+      return std::nullopt;
+    if (!consume(TokenKind::Colon, "expected ':' after assembly"))
+      return std::nullopt;
 
+    Assembly Asm;
+    if (Cur.Kind == TokenKind::String) {
+      Asm.IsStructured = false;
+      Asm.Template = stripQuotes(Cur.Lexeme);
+      advance();
+    } else if (Cur.Kind == TokenKind::LBrace) {
+      Asm.IsStructured = true;
+      advance();
+      if (Cur.Kind != TokenKind::String) {
+        addDiag("expected mnemonic string in assembly block");
+        return std::nullopt;
+      }
+      Asm.Mnemonic = stripQuotes(Cur.Lexeme);
+      advance();
+      if (!consume(TokenKind::Comma, "expected ',' after mnemonic"))
+        return std::nullopt;
+      if (Cur.Kind != TokenKind::String) {
+        addDiag("expected assembly template string");
+        return std::nullopt;
+      }
+      Asm.Template = stripQuotes(Cur.Lexeme);
+      advance();
+      if (!consume(TokenKind::RBrace, "expected '}' after assembly block"))
+        return std::nullopt;
+    } else {
+      addDiag("expected assembly string or '{...}' form");
+      return std::nullopt;
+    }
+
+    if (!consume(TokenKind::Semicolon, "expected ';' after assembly clause"))
+      return std::nullopt;
+
+    return Asm;
+  }
+
+  std::optional<std::vector<EncodingField>> parseEncoding() {
+    std::vector<EncodingField> Fields;
+
+    while (true) {
+      auto F = parseEncodingField();
+      if (!F)
+        return std::nullopt;
+      Fields.push_back(std::move(*F));
+
+      if (Cur.Kind != TokenKind::DoubleColon)
+        break;
+      advance();
+    }
+
+    return Fields;
+  }
+
+  std::optional<EncodingField> parseEncodingField() {
+    if (Cur.Kind == TokenKind::Integer) {
+      EncodingField F;
+      F.IsBitValue = true;
+      F.Value = Cur.Lexeme.str();
+      advance();
+      return F;
+    }
+
+    auto Name = parseIdentifier("expected encoding field name or literal");
+    if (!Name)
+      return std::nullopt;
+
+    if (!consume(TokenKind::LBracket, "expected '[' after encoding field name"))
+      return std::nullopt;
+
+    if (Cur.Kind != TokenKind::Integer) {
+      addDiag("expected start bit literal");
+      return std::nullopt;
+    }
+    std::string StartBit = Cur.Lexeme.str();
+    advance();
+
+    if (!consume(TokenKind::Colon, "expected ':' in bit range"))
+      return std::nullopt;
+
+    if (Cur.Kind != TokenKind::Integer) {
+      addDiag("expected end bit literal");
+      return std::nullopt;
+    }
+    std::string EndBit = Cur.Lexeme.str();
+    advance();
+
+    if (!consume(TokenKind::RBracket, "expected ']' after bit range"))
+      return std::nullopt;
+
+    EncodingField F;
+    F.IsBitValue = false;
+    F.Name = *Name;
+    F.StartBit = std::move(StartBit);
+    F.EndBit = std::move(EndBit);
+    return F;
+  }
+
+  std::optional<AlwaysBlock> parseAlwaysBlock() {
+    auto Name = parseIdentifier("expected always block name");
+    if (!Name)
+      return std::nullopt;
+
+    AlwaysBlock Block;
+    Block.Name = *Name;
+    Block.Attributes = parseAttributes();
+
+    auto Body = parseRawBracedBlock();
+    if (!Body)
+      return std::nullopt;
+    Block.Behavior = std::move(*Body);
+
+    return Block;
+  }
+
+  std::optional<std::string> parseRawBracedBlock() {
+    if (Cur.Kind != TokenKind::LBrace) {
+      addDiag("expected '{'");
+      return std::nullopt;
+    }
+
+    const size_t InnerStart = Cur.EndOffset;
+    int Depth = 0;
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::LBrace)
+        ++Depth;
+      else if (Cur.Kind == TokenKind::RBrace)
+        --Depth;
+
+      const size_t End = Cur.Loc.Offset;
+      advance();
+
+      if (Depth == 0)
+        return Buffer.slice(InnerStart, End).str();
+    }
+
+    addDiag("unterminated '{...}' block");
+    return std::nullopt;
+  }
+
+  std::optional<std::string> parseBehaviorUntilInstructionEnd() {
+    const size_t Start = Cur.Loc.Offset;
+    int BraceDepth = 0;
+
+    while (Cur.Kind != TokenKind::Eof) {
+      if (Cur.Kind == TokenKind::LBrace)
+        ++BraceDepth;
+      else if (Cur.Kind == TokenKind::RBrace) {
+        if (BraceDepth == 0)
+          return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+        --BraceDepth;
+      }
+      advance();
+    }
+
+    addDiag("unterminated behavior statement");
+    return std::nullopt;
+  }
+
+  static std::string stripQuotes(StringRef S) {
+    if (S.size() >= 2 && S.front() == '"' && S.back() == '"')
+      return S.slice(1, S.size() - 1).str();
+    return S.str();
+  }
+
+  Error fail() {
     std::string Joined;
     raw_string_ostream OS(Joined);
-    for (StringRef Diag : Diags)
-      OS << Diag << '\n';
+    for (StringRef D : Diags)
+      OS << D << '\n';
     return createStringError(inconvertibleErrorCode(), OS.str());
   }
 };
 
-json::Value toJSON(const CoreDecl &Core) {
-  json::Array Registers;
-  for (const RegisterDecl &R : Core.Registers) {
-    Registers.push_back(json::Object{{"name", R.Name},
-                                     {"width", static_cast<int64_t>(R.Width)},
-                                     {"reset", static_cast<int64_t>(R.Reset)}});
-  }
+json::Value toJSON(const EncodingField &Field) {
+  if (Field.IsBitValue)
+    return json::Object{{"kind", "bit_value"}, {"value", Field.Value}};
+  return json::Object{{"kind", "bit_field"},
+                      {"name", Field.Name},
+                      {"start", Field.StartBit},
+                      {"end", Field.EndBit}};
+}
+
+json::Value toJSON(const Assembly &Asm) {
+  if (!Asm.IsStructured)
+    return json::Object{{"kind", "string"}, {"assembly", Asm.Template}};
+  return json::Object{{"kind", "structured"},
+                      {"mnemonic", Asm.Mnemonic},
+                      {"assembly", Asm.Template}};
+}
+
+json::Value toJSON(const Instruction &Inst) {
+  json::Array Attrs;
+  for (const std::string &A : Inst.Attributes)
+    Attrs.push_back(A);
+
+  json::Array Enc;
+  for (const EncodingField &F : Inst.Encoding)
+    Enc.push_back(toJSON(F));
+
+  json::Object Obj{{"name", Inst.Name},
+                   {"attributes", std::move(Attrs)},
+                   {"encoding", std::move(Enc)},
+                   {"behavior", Inst.Behavior}};
+
+  if (Inst.Asm)
+    Obj["assembly"] = toJSON(*Inst.Asm);
+  return Obj;
+}
+
+json::Value toJSON(const AlwaysBlock &Block) {
+  json::Array Attrs;
+  for (const std::string &A : Block.Attributes)
+    Attrs.push_back(A);
+
+  return json::Object{{"name", Block.Name},
+                      {"attributes", std::move(Attrs)},
+                      {"behavior", Block.Behavior}};
+}
+
+json::Value toJSON(const ISASections &ISA) {
+  json::Object Obj;
+
+  if (ISA.ArchitecturalState)
+    Obj["architectural_state"] = *ISA.ArchitecturalState;
+  if (ISA.Functions)
+    Obj["functions"] = *ISA.Functions;
+
+  json::Array InstAttrs;
+  for (const std::string &A : ISA.CommonInstructionAttributes)
+    InstAttrs.push_back(A);
+  if (!InstAttrs.empty())
+    Obj["instructions_attributes"] = std::move(InstAttrs);
 
   json::Array Instructions;
-  for (const InstructionDecl &I : Core.Instructions) {
-    json::Array Fields;
-    for (const FieldDecl &F : I.Fields)
-      Fields.push_back(json::Object{{"name", F.Name},
-                                    {"width", static_cast<int64_t>(F.Width)}});
+  for (const Instruction &I : ISA.Instructions)
+    Instructions.push_back(toJSON(I));
+  if (!Instructions.empty())
+    Obj["instructions"] = std::move(Instructions);
 
-    Instructions.push_back(json::Object{{"name", I.Name},
-                                        {"encoding", I.Encoding},
-                                        {"fields", std::move(Fields)}});
-  }
+  json::Array AlwaysAttrs;
+  for (const std::string &A : ISA.CommonAlwaysAttributes)
+    AlwaysAttrs.push_back(A);
+  if (!AlwaysAttrs.empty())
+    Obj["always_attributes"] = std::move(AlwaysAttrs);
 
-  return json::Object{{"core", Core.Name},
-                      {"registers", std::move(Registers)},
-                      {"instructions", std::move(Instructions)}};
+  json::Array AlwaysBlocks;
+  for (const AlwaysBlock &B : ISA.AlwaysBlocks)
+    AlwaysBlocks.push_back(toJSON(B));
+  if (!AlwaysBlocks.empty())
+    Obj["always_blocks"] = std::move(AlwaysBlocks);
+
+  return Obj;
+}
+
+json::Value toJSON(const InstructionSetDef &Set) {
+  json::Array Combines;
+  for (const std::string &Name : Set.Combines)
+    Combines.push_back(Name);
+
+  json::Object Obj{{"name", Set.Name}, {"isa", toJSON(Set.ISA)}};
+  if (!Combines.empty())
+    Obj["combines"] = std::move(Combines);
+  if (Set.Extends)
+    Obj["extends"] = *Set.Extends;
+  return Obj;
+}
+
+json::Value toJSON(const CoreDef &Core) {
+  json::Array Provides;
+  for (const std::string &Name : Core.Provides)
+    Provides.push_back(Name);
+
+  json::Object Obj{{"name", Core.Name}, {"isa", toJSON(Core.ISA)}};
+  if (!Provides.empty())
+    Obj["provides"] = std::move(Provides);
+  return Obj;
+}
+
+json::Value toJSON(const Description &D) {
+  json::Array Imports;
+  for (const std::string &I : D.Imports)
+    Imports.push_back(I);
+
+  json::Array InstructionSets;
+  for (const InstructionSetDef &S : D.InstructionSets)
+    InstructionSets.push_back(toJSON(S));
+
+  json::Array Cores;
+  for (const CoreDef &C : D.Cores)
+    Cores.push_back(toJSON(C));
+
+  return json::Object{{"imports", std::move(Imports)},
+                      {"instruction_sets", std::move(InstructionSets)},
+                      {"cores", std::move(Cores)}};
 }
 
 } // namespace
@@ -525,10 +996,9 @@ int main(int argc, const char **argv) {
   }
 
   Parser P(BufferOrErr.get()->getBuffer());
-  Expected<CoreDecl> CoreOrErr = P.parseCore();
-  if (!CoreOrErr) {
-    errs() << "target-gen: parse failed:\n"
-           << toString(CoreOrErr.takeError());
+  Expected<Description> DescOrErr = P.parseDescription();
+  if (!DescOrErr) {
+    errs() << "target-gen: parse failed:\n" << toString(DescOrErr.takeError());
     return 1;
   }
 
@@ -540,6 +1010,6 @@ int main(int argc, const char **argv) {
     return 1;
   }
 
-  OS << formatv("{0:2}\n", toJSON(*CoreOrErr));
+  OS << formatv("{0:2}\n", toJSON(*DescOrErr));
   return 0;
 }
