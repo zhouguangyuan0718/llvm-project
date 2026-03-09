@@ -7,38 +7,22 @@
 //===----------------------------------------------------------------------===//
 
 #include "TargetGen2IR.h"
-#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/raw_ostream.h"
-#include <cstdint>
+#include <optional>
 #include <string>
-#include <utility>
-#include <vector>
 
 using namespace llvm;
 using namespace llvm::targetgen2;
 
 namespace {
-
-struct FlattenedExpr {
-  const Expr *E = nullptr;
-  int32_t Parent = -1;
-};
-
-struct FlattenedStmt {
-  const Statement *S = nullptr;
-  int32_t Parent = -1;
-};
-
-static int32_t toInt(ExprKind K) { return static_cast<int32_t>(K); }
-static int32_t toInt(ExprOp O) { return static_cast<int32_t>(O); }
-static int32_t toInt(StatementKind K) { return static_cast<int32_t>(K); }
 
 std::string sanitizeName(StringRef S) {
   std::string Out;
@@ -64,93 +48,273 @@ GlobalVariable *addCStringGlobal(Module &M, StringRef Name, StringRef Value) {
   return GV;
 }
 
-Constant *makeTextPtr(Module &M, StringRef Prefix, uint32_t Index, StringRef Text) {
-  LLVMContext &Ctx = M.getContext();
-  if (Text.empty())
-    return ConstantPointerNull::get(PointerType::get(Ctx, 0));
-
-  std::string Label = (Prefix + ".txt." + std::to_string(Index)).str();
-  GlobalVariable *TextGV = addCStringGlobal(M, Label, Text);
-
-  Constant *Zero = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
-  Constant *Idx[] = {Zero, Zero};
-  return ConstantExpr::getInBoundsGetElementPtr(TextGV->getValueType(), TextGV,
-                                                Idx);
-}
-
-void flattenExpr(const Expr &E, int32_t Parent, std::vector<FlattenedExpr> &Out) {
-  int32_t Self = static_cast<int32_t>(Out.size());
-  Out.push_back({&E, Parent});
-  for (const Expr &Child : E.Children)
-    flattenExpr(Child, Self, Out);
-}
-
-void flattenStmt(const Statement &S, int32_t Parent, std::vector<FlattenedStmt> &Out,
-                 std::vector<FlattenedExpr> &ExprOut) {
-  int32_t Self = static_cast<int32_t>(Out.size());
-  Out.push_back({&S, Parent});
-
-  for (const Expr &E : S.Expressions)
-    flattenExpr(E, Self, ExprOut);
-  for (const Statement &Child : S.Children)
-    flattenStmt(Child, Self, Out, ExprOut);
-}
-
-void addBehaviorGlobals(Module &M, StringRef Prefix, const Statement &Root) {
-  LLVMContext &Ctx = M.getContext();
-
-  std::vector<FlattenedStmt> Stmts;
-  std::vector<FlattenedExpr> Exprs;
-  flattenStmt(Root, -1, Stmts, Exprs);
-
-  Type *I32 = Type::getInt32Ty(Ctx);
-  Type *Ptr = PointerType::get(Ctx, 0);
-  StructType *StmtTy = StructType::get(I32, I32, Ptr);
-  StructType *ExprTy = StructType::get(I32, I32, I32, Ptr);
-
-  std::vector<Constant *> StmtInits;
-  StmtInits.reserve(Stmts.size());
-  for (uint32_t I = 0; I < Stmts.size(); ++I) {
-    const Statement &S = *Stmts[I].S;
-    Constant *Fields[] = {
-        ConstantInt::get(I32, toInt(S.Kind)),
-        ConstantInt::get(I32, static_cast<uint32_t>(Stmts[I].Parent + 1)),
-        makeTextPtr(M, Prefix, I, S.Text),
-    };
-    StmtInits.push_back(ConstantStruct::get(StmtTy, Fields));
+class FunctionEmitter {
+public:
+  FunctionEmitter(Module &M, Function &F)
+      : M(M), Ctx(M.getContext()), Builder(Ctx), F(F), I64(Type::getInt64Ty(Ctx)),
+        Entry(BasicBlock::Create(Ctx, "entry", &F)) {
+    Builder.SetInsertPoint(Entry);
   }
 
-  std::vector<Constant *> ExprInits;
-  ExprInits.reserve(Exprs.size());
-  for (uint32_t I = 0; I < Exprs.size(); ++I) {
-    const Expr &E = *Exprs[I].E;
-    std::string ExprPrefix = (Prefix + ".expr").str();
-    Constant *Fields[] = {
-        ConstantInt::get(I32, toInt(E.Kind)),
-        ConstantInt::get(I32, toInt(E.Op)),
-        ConstantInt::get(I32, static_cast<uint32_t>(Exprs[I].Parent + 1)),
-        makeTextPtr(M, ExprPrefix, I, E.Value.empty() ? E.Text : E.Value),
-    };
-    ExprInits.push_back(ConstantStruct::get(ExprTy, Fields));
+  void emitBehavior(const Statement &S) {
+    emitStmt(S);
+    if (!Builder.GetInsertBlock()->getTerminator())
+      Builder.CreateRet(ConstantInt::get(I64, 0));
   }
 
-  ArrayType *StmtArrTy = ArrayType::get(StmtTy, StmtInits.size());
-  ArrayType *ExprArrTy = ArrayType::get(ExprTy, ExprInits.size());
+private:
+  Module &M;
+  LLVMContext &Ctx;
+  IRBuilder<> Builder;
+  Function &F;
+  Type *I64;
+  BasicBlock *Entry;
+  StringMap<AllocaInst *> Vars;
 
-  auto *StmtGV = new GlobalVariable(
-      M, StmtArrTy, true, GlobalValue::PrivateLinkage,
-      ConstantArray::get(StmtArrTy, StmtInits), (Prefix + ".stmt_nodes").str());
-  StmtGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  AllocaInst *getVar(StringRef N) {
+    std::string Name = N.str();
+    auto It = Vars.find(Name);
+    if (It != Vars.end())
+      return It->second;
 
-  auto *ExprGV = new GlobalVariable(
-      M, ExprArrTy, true, GlobalValue::PrivateLinkage,
-      ConstantArray::get(ExprArrTy, ExprInits), (Prefix + ".expr_nodes").str());
-  ExprGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    IRBuilder<> EntryBuilder(Entry, Entry->begin());
+    auto *A = EntryBuilder.CreateAlloca(I64, nullptr, sanitizeName(Name));
+    Builder.CreateStore(ConstantInt::get(I64, 0), A);
+    Vars[Name] = A;
+    return A;
+  }
 
-  addCStringGlobal(M, (Prefix + ".summary").str(),
-                   ("stmt_count=" + std::to_string(Stmts.size()) +
-                    ",expr_count=" + std::to_string(Exprs.size()))
-                       .c_str());
+  APInt parseInt(StringRef T) {
+    if (T.starts_with("0x")) {
+      APInt V(64, 0);
+      V = APInt(64, T.drop_front(2), 16);
+      return V;
+    }
+    if (T.ends_with("'b"))
+      return APInt(64, 0);
+    APInt V(64, 0);
+    if (!T.getAsInteger(10, V))
+      return V;
+    return APInt(64, 0);
+  }
+
+  Value *toBool(Value *V) {
+    return Builder.CreateICmpNE(V, ConstantInt::get(I64, 0));
+  }
+
+  std::optional<Value *> emitSimpleTextExpr(StringRef T) {
+    auto trim = [](StringRef S) { return S.trim(); };
+    T = trim(T);
+    struct OpInfo {
+      StringRef Op;
+      ExprOp Kind;
+    };
+    static constexpr OpInfo Ops[] = {{"!=", ExprOp::Ne}, {"==", ExprOp::Eq},
+                                     {"<=", ExprOp::Le}, {">=", ExprOp::Ge},
+                                     {"<", ExprOp::Lt},  {">", ExprOp::Gt},
+                                     {"+", ExprOp::Add}, {"-", ExprOp::Sub}};
+    for (const auto &OI : Ops) {
+      size_t Pos = T.find(OI.Op);
+      if (Pos == StringRef::npos)
+        continue;
+      StringRef LHS = trim(T.take_front(Pos));
+      StringRef RHS = trim(T.drop_front(Pos + OI.Op.size()));
+      auto makeVal = [&](StringRef S) -> Value * {
+        APInt Parsed(64, 0);
+        if (!S.getAsInteger(10, Parsed))
+          return ConstantInt::get(I64, Parsed);
+        return Builder.CreateLoad(I64, getVar(S));
+      };
+      Value *L = makeVal(LHS);
+      Value *R = makeVal(RHS);
+      switch (OI.Kind) {
+      case ExprOp::Ne:
+        return Builder.CreateZExt(Builder.CreateICmpNE(L, R), I64);
+      case ExprOp::Eq:
+        return Builder.CreateZExt(Builder.CreateICmpEQ(L, R), I64);
+      case ExprOp::Lt:
+        return Builder.CreateZExt(Builder.CreateICmpSLT(L, R), I64);
+      case ExprOp::Le:
+        return Builder.CreateZExt(Builder.CreateICmpSLE(L, R), I64);
+      case ExprOp::Gt:
+        return Builder.CreateZExt(Builder.CreateICmpSGT(L, R), I64);
+      case ExprOp::Ge:
+        return Builder.CreateZExt(Builder.CreateICmpSGE(L, R), I64);
+      case ExprOp::Add:
+        return Builder.CreateAdd(L, R);
+      case ExprOp::Sub:
+        return Builder.CreateSub(L, R);
+      default:
+        break;
+      }
+    }
+    return std::nullopt;
+  }
+
+  Value *emitExpr(const Expr &E) {
+    switch (E.Kind) {
+    case ExprKind::Literal:
+      return ConstantInt::get(I64, parseInt(E.Value.empty() ? E.Text : E.Value));
+    case ExprKind::Identifier: {
+      AllocaInst *A = getVar(E.Value.empty() ? E.Text : E.Value);
+      return Builder.CreateLoad(I64, A);
+    }
+    case ExprKind::Assignment: {
+      if (E.Children.empty())
+        return ConstantInt::get(I64, 0);
+      if (E.Children.size() < 2)
+        return emitExpr(E.Children.front());
+      const Expr &LHS = E.Children[0];
+      Value *R = emitExpr(E.Children[1]);
+      if (LHS.Kind == ExprKind::Identifier) {
+        AllocaInst *A = getVar(LHS.Value.empty() ? LHS.Text : LHS.Value);
+        Builder.CreateStore(R, A);
+      }
+      return R;
+    }
+    case ExprKind::Binary: {
+      if (E.Children.size() < 2)
+        return ConstantInt::get(I64, 0);
+      Value *L = emitExpr(E.Children[0]);
+      Value *R = emitExpr(E.Children[1]);
+      switch (E.Op) {
+      case ExprOp::Add:
+        return Builder.CreateAdd(L, R);
+      case ExprOp::Sub:
+        return Builder.CreateSub(L, R);
+      case ExprOp::Mul:
+        return Builder.CreateMul(L, R);
+      case ExprOp::Div:
+        return Builder.CreateSDiv(L, R);
+      case ExprOp::Mod:
+        return Builder.CreateSRem(L, R);
+      case ExprOp::Eq:
+        return Builder.CreateZExt(Builder.CreateICmpEQ(L, R), I64);
+      case ExprOp::Ne:
+        return Builder.CreateZExt(Builder.CreateICmpNE(L, R), I64);
+      case ExprOp::Lt:
+        return Builder.CreateZExt(Builder.CreateICmpSLT(L, R), I64);
+      case ExprOp::Le:
+        return Builder.CreateZExt(Builder.CreateICmpSLE(L, R), I64);
+      case ExprOp::Gt:
+        return Builder.CreateZExt(Builder.CreateICmpSGT(L, R), I64);
+      case ExprOp::Ge:
+        return Builder.CreateZExt(Builder.CreateICmpSGE(L, R), I64);
+      case ExprOp::BitAnd:
+        return Builder.CreateAnd(L, R);
+      case ExprOp::BitOr:
+        return Builder.CreateOr(L, R);
+      case ExprOp::BitXor:
+        return Builder.CreateXor(L, R);
+      case ExprOp::Shl:
+        return Builder.CreateShl(L, R);
+      case ExprOp::Shr:
+        return Builder.CreateAShr(L, R);
+      default:
+        return L;
+      }
+    }
+    case ExprKind::Unary: {
+      if (E.Children.empty())
+        return ConstantInt::get(I64, 0);
+      Value *V = emitExpr(E.Children[0]);
+      switch (E.Op) {
+      case ExprOp::UnaryMinus:
+        return Builder.CreateNeg(V);
+      case ExprOp::LogicalNot:
+        return Builder.CreateZExt(Builder.CreateICmpEQ(V, ConstantInt::get(I64, 0)),
+                                  I64);
+      case ExprOp::BitNot:
+        return Builder.CreateNot(V);
+      default:
+        return V;
+      }
+    }
+    case ExprKind::Group:
+    case ExprKind::Cast:
+      if (!E.Children.empty()) {
+        Value *V = emitExpr(E.Children[0]);
+        if (E.Children[0].Kind != ExprKind::Unknown)
+          return V;
+      }
+      if (!E.Value.empty()) {
+        if (auto V = emitSimpleTextExpr(E.Value))
+          return *V;
+      }
+      return ConstantInt::get(I64, 0);
+    default:
+      if (!E.Children.empty())
+        return emitExpr(E.Children.back());
+      return ConstantInt::get(I64, 0);
+    }
+  }
+
+  void emitStmt(const Statement &S) {
+    if (Builder.GetInsertBlock()->getTerminator())
+      return;
+
+    switch (S.Kind) {
+    case StatementKind::Compound:
+      for (const Statement &C : S.Children)
+        emitStmt(C);
+      return;
+    case StatementKind::Expression:
+      for (const Expr &E : S.Expressions)
+        (void)emitExpr(E);
+      return;
+    case StatementKind::If: {
+      Value *CondV = ConstantInt::get(I64, 1);
+      if (!S.Expressions.empty())
+        CondV = emitExpr(S.Expressions.front());
+      Value *Cond = toBool(CondV);
+
+      BasicBlock *ThenBB = BasicBlock::Create(Ctx, "if.then", &F);
+      BasicBlock *ElseBB = BasicBlock::Create(Ctx, "if.else", &F);
+      BasicBlock *MergeBB = BasicBlock::Create(Ctx, "if.end", &F);
+      Builder.CreateCondBr(Cond, ThenBB, ElseBB);
+
+      Builder.SetInsertPoint(ThenBB);
+      if (!S.Children.empty())
+        emitStmt(S.Children[0]);
+      if (!Builder.GetInsertBlock()->getTerminator())
+        Builder.CreateBr(MergeBB);
+
+      Builder.SetInsertPoint(ElseBB);
+      if (S.Children.size() > 1)
+        emitStmt(S.Children[1]);
+      if (!Builder.GetInsertBlock()->getTerminator())
+        Builder.CreateBr(MergeBB);
+
+      Builder.SetInsertPoint(MergeBB);
+      return;
+    }
+    case StatementKind::Return: {
+      Value *Ret = ConstantInt::get(I64, 0);
+      if (!S.Expressions.empty())
+        Ret = emitExpr(S.Expressions.front());
+      Builder.CreateRet(Ret);
+      return;
+    }
+    case StatementKind::Empty:
+      return;
+    default:
+      for (const Expr &E : S.Expressions)
+        (void)emitExpr(E);
+      for (const Statement &C : S.Children)
+        emitStmt(C);
+      return;
+    }
+  }
+};
+
+Function *emitInstructionBehavior(Module &M, StringRef Prefix, const Statement &B) {
+  LLVMContext &Ctx = M.getContext();
+  std::string Name = sanitizeName(Prefix);
+  FunctionType *FTy = FunctionType::get(Type::getInt64Ty(Ctx), false);
+  Function *F = Function::Create(FTy, GlobalValue::ExternalLinkage, Name, M);
+  FunctionEmitter FE(M, *F);
+  FE.emitBehavior(B);
+  return F;
 }
 
 } // namespace
@@ -166,10 +330,8 @@ std::string targetgen2::toLLVMIR(const Description &D) {
     std::string ISAName = sanitizeName(IS.Name);
     addCStringGlobal(M, ("tg2.isa.name." + ISAName).c_str(), IS.Name);
     for (const Instruction &Inst : IS.ISA.Instructions) {
-      std::string InstName = sanitizeName(Inst.Name);
-      std::string Prefix = "tg2.inst." + ISAName + "." + InstName;
-      addCStringGlobal(M, Prefix + ".name", Inst.Name);
-      addBehaviorGlobals(M, Prefix + ".behavior", Inst.Behavior);
+      emitInstructionBehavior(M, "tg2.exec.inst." + ISAName + "." + sanitizeName(Inst.Name),
+                              Inst.Behavior);
     }
   }
 
@@ -177,27 +339,15 @@ std::string targetgen2::toLLVMIR(const Description &D) {
     std::string CoreName = sanitizeName(Core.Name);
     addCStringGlobal(M, ("tg2.core.name." + CoreName).c_str(), Core.Name);
     for (const Instruction &Inst : Core.ISA.Instructions) {
-      std::string InstName = sanitizeName(Inst.Name);
-      std::string Prefix = "tg2.core.inst." + CoreName + "." + InstName;
-      addCStringGlobal(M, Prefix + ".name", Inst.Name);
-      addBehaviorGlobals(M, Prefix + ".behavior", Inst.Behavior);
-    }
-    for (const AlwaysBlock &Always : Core.ISA.AlwaysBlocks) {
-      std::string AlwaysName = sanitizeName(Always.Name);
-      std::string Prefix = "tg2.core.always." + CoreName + "." + AlwaysName;
-      addCStringGlobal(M, Prefix + ".name", Always.Name);
-      addBehaviorGlobals(M, Prefix + ".behavior", Always.Behavior);
+      emitInstructionBehavior(M,
+                              "tg2.exec.core." + CoreName + "." +
+                                  sanitizeName(Inst.Name),
+                              Inst.Behavior);
     }
   }
 
-  FunctionType *FnTy = FunctionType::get(Type::getInt32Ty(Ctx), false);
-  Function *Fn = Function::Create(FnTy, GlobalValue::ExternalLinkage,
-                                  "tg2_emit_metadata", M);
-  BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
-  IRBuilder<> B(Entry);
-  B.CreateRet(ConstantInt::get(
-      Type::getInt32Ty(Ctx),
-      static_cast<uint32_t>(D.Cores.size() + D.InstructionSets.size())));
+  if (verifyModule(M, &errs()))
+    errs() << "target-gen2: generated invalid LLVM IR\n";
 
   std::string Out;
   raw_string_ostream OS(Out);
