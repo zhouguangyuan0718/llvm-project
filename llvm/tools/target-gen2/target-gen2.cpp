@@ -1,4 +1,4 @@
-//===- target-gen.cpp - CoreDSL frontend entry point ------------*- C++ -*-===//
+//===- target-gen2.cpp - CoreDSL frontend entry point ------------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -971,7 +971,7 @@ json::Value toJSON(const Description &D) {
 
 } // namespace
 
-static cl::OptionCategory TargetGenCategory("target-gen options");
+static cl::OptionCategory TargetGenCategory("target-gen2 options");
 
 static cl::opt<std::string> InputFilename(cl::Positional,
                                           cl::desc("<input CoreDSL file>"),
@@ -990,7 +990,7 @@ int main(int argc, const char **argv) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
       MemoryBuffer::getFile(InputFilename);
   if (!BufferOrErr) {
-    errs() << "target-gen: unable to read '" << InputFilename
+    errs() << "target-gen2: unable to read '" << InputFilename
            << "': " << BufferOrErr.getError().message() << '\n';
     return 1;
   }
@@ -998,14 +998,14 @@ int main(int argc, const char **argv) {
   Parser P(BufferOrErr.get()->getBuffer());
   Expected<Description> DescOrErr = P.parseDescription();
   if (!DescOrErr) {
-    errs() << "target-gen: parse failed:\n" << toString(DescOrErr.takeError());
+    errs() << "target-gen2: parse failed:\n" << toString(DescOrErr.takeError());
     return 1;
   }
 
   std::error_code EC;
   raw_fd_ostream OS(OutputFilename, EC, sys::fs::OF_Text);
   if (EC) {
-    errs() << "target-gen: unable to open output '" << OutputFilename
+    errs() << "target-gen2: unable to open output '" << OutputFilename
            << "': " << EC.message() << '\n';
     return 1;
   }

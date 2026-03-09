@@ -148,7 +148,7 @@ set(LLVM_TEST_DEPENDS
   llvm-tblgen
   llvm-readtapi
   llvm-tli-checker
-  target-gen
+  target-gen2
   llvm-undname
   llvm-windres
   llvm-xray

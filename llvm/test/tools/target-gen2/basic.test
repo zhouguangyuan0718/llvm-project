@@ -1,4 +1,4 @@
-// RUN: target-gen %s -o - | FileCheck %s
+// RUN: target-gen2 %s -o - | FileCheck %s
 
 // CHECK: "imports": [
 // CHECK-NEXT:   "base.core_desc"
