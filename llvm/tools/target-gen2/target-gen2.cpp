@@ -293,18 +293,24 @@ struct Assembly {
   std::string Template;
 };
 
+struct Statement {
+  std::string Kind;
+  std::string Text;
+  std::vector<Statement> Children;
+};
+
 struct Instruction {
   std::string Name;
   std::vector<std::string> Attributes;
   std::vector<EncodingField> Encoding;
   std::optional<Assembly> Asm;
-  std::string Behavior;
+  Statement Behavior;
 };
 
 struct AlwaysBlock {
   std::string Name;
   std::vector<std::string> Attributes;
-  std::string Behavior;
+  Statement Behavior;
 };
 
 struct ISASections {
@@ -846,8 +852,12 @@ private:
     return false;
   }
 
-  bool parseSwitchSection() {
+  std::optional<Statement> parseSwitchSection() {
+    const size_t Start = Cur.Loc.Offset;
+    std::string Kind;
+
     if (isIdentifier("case")) {
+      Kind = "case";
       advance();
       int ParenDepth = 0;
       int BracketDepth = 0;
@@ -875,94 +885,121 @@ private:
       }
       if (Cur.Kind == TokenKind::Eof) {
         addDiag("unterminated switch case label");
-        return false;
+        return std::nullopt;
       }
     } else if (isIdentifier("default")) {
+      Kind = "default";
       advance();
       if (!consume(TokenKind::Colon, "expected ':' after default"))
-        return false;
+        return std::nullopt;
     } else {
       addDiag("expected 'case' or 'default' in switch");
-      return false;
+      return std::nullopt;
     }
+
+    std::vector<Statement> Children;
 
     while (Cur.Kind != TokenKind::Eof && Cur.Kind != TokenKind::RBrace &&
            !isIdentifier("case") && !isIdentifier("default")) {
-      if (!parseStatement())
-        return false;
+      auto Stmt = parseStatement();
+      if (!Stmt)
+        return std::nullopt;
+      Children.push_back(std::move(*Stmt));
     }
-    return true;
+
+    return Statement{Kind, Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                     std::move(Children)};
   }
 
-  std::optional<std::string> parseStatement() {
+  std::optional<Statement> parseStatement() {
     const size_t Start = Cur.Loc.Offset;
 
     if (Cur.Kind == TokenKind::Semicolon) {
       advance();
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"empty", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {}};
     }
 
     if (Cur.Kind == TokenKind::LBrace) {
+      std::vector<Statement> Children;
       advance();
       while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
-        if (!parseStatement())
+        auto Stmt = parseStatement();
+        if (!Stmt)
           return std::nullopt;
+        Children.push_back(std::move(*Stmt));
       }
       if (!consume(TokenKind::RBrace, "expected '}' to close compound statement"))
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"compound", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       std::move(Children)};
     }
 
     if (isIdentifier("if")) {
       advance();
       if (!consumeParenthesizedExpression())
         return std::nullopt;
-      if (!parseStatement())
+      auto ThenStmt = parseStatement();
+      if (!ThenStmt)
         return std::nullopt;
+      std::vector<Statement> Children;
+      Children.push_back(std::move(*ThenStmt));
       if (isIdentifier("else")) {
         advance();
-        if (!parseStatement())
+        auto ElseStmt = parseStatement();
+        if (!ElseStmt)
           return std::nullopt;
+        Children.push_back(std::move(*ElseStmt));
       }
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"if", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       std::move(Children)};
     }
 
     if (isIdentifier("switch")) {
+      std::vector<Statement> Children;
       advance();
       if (!consumeParenthesizedExpression())
         return std::nullopt;
       if (!consume(TokenKind::LBrace, "expected '{' after switch condition"))
         return std::nullopt;
       while (Cur.Kind != TokenKind::RBrace && Cur.Kind != TokenKind::Eof) {
-        if (!parseSwitchSection())
+        auto Section = parseSwitchSection();
+        if (!Section)
           return std::nullopt;
+        Children.push_back(std::move(*Section));
       }
       if (!consume(TokenKind::RBrace, "expected '}' to close switch"))
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"switch", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       std::move(Children)};
     }
 
     if (isIdentifier("while")) {
       advance();
       if (!consumeParenthesizedExpression())
         return std::nullopt;
-      if (!parseStatement())
+      auto Body = parseStatement();
+      if (!Body)
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"while", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {*Body}};
     }
 
     if (isIdentifier("for")) {
       advance();
       if (!consumeParenthesizedExpression())
         return std::nullopt;
-      if (!parseStatement())
+      auto Body = parseStatement();
+      if (!Body)
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"for", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {*Body}};
     }
 
     if (isIdentifier("do")) {
       advance();
-      if (!parseStatement())
+      auto Body = parseStatement();
+      if (!Body)
         return std::nullopt;
       if (!isIdentifier("while")) {
         addDiag("expected 'while' after do-body");
@@ -973,37 +1010,45 @@ private:
         return std::nullopt;
       if (!consume(TokenKind::Semicolon, "expected ';' after do-while"))
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"do-while", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {*Body}};
     }
 
     if (isIdentifier("spawn")) {
       advance();
-      if (!parseStatement())
+      auto Body = parseStatement();
+      if (!Body)
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"spawn", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {*Body}};
     }
 
     if (isIdentifier("continue") || isIdentifier("break")) {
+      std::string Kind = Cur.Lexeme.str();
       advance();
       if (!consume(TokenKind::Semicolon, "expected ';' after jump statement"))
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{std::move(Kind), Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {}};
     }
 
     if (isIdentifier("return")) {
       advance();
       if (Cur.Kind == TokenKind::Semicolon) {
         advance();
-        return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+        return Statement{"return", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                         {}};
       }
       if (!consumeUntilSemicolon())
         return std::nullopt;
-      return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+      return Statement{"return", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                       {}};
     }
 
     if (!consumeUntilSemicolon())
       return std::nullopt;
-    return Buffer.slice(Start, Cur.Loc.Offset).trim().str();
+    return Statement{"expression", Buffer.slice(Start, Cur.Loc.Offset).trim().str(),
+                     {}};
   }
 
   std::optional<std::string> parseRawBracedBlock() {
@@ -1063,6 +1108,15 @@ json::Value toJSON(const Assembly &Asm) {
                       {"assembly", Asm.Template}};
 }
 
+json::Value toJSON(const Statement &Stmt) {
+  json::Array Children;
+  for (const Statement &Child : Stmt.Children)
+    Children.push_back(toJSON(Child));
+  return json::Object{{"kind", Stmt.Kind},
+                      {"text", Stmt.Text},
+                      {"children", std::move(Children)}};
+}
+
 json::Value toJSON(const Instruction &Inst) {
   json::Array Attrs;
   for (const std::string &A : Inst.Attributes)
@@ -1075,7 +1129,7 @@ json::Value toJSON(const Instruction &Inst) {
   json::Object Obj{{"name", Inst.Name},
                    {"attributes", std::move(Attrs)},
                    {"encoding", std::move(Enc)},
-                   {"behavior", Inst.Behavior}};
+                   {"behavior", toJSON(Inst.Behavior)}};
 
   if (Inst.Asm)
     Obj["assembly"] = toJSON(*Inst.Asm);
@@ -1089,7 +1143,7 @@ json::Value toJSON(const AlwaysBlock &Block) {
 
   return json::Object{{"name", Block.Name},
                       {"attributes", std::move(Attrs)},
-                      {"behavior", Block.Behavior}};
+                      {"behavior", toJSON(Block.Behavior)}};
 }
 
 json::Value toJSON(const ISASections &ISA) {

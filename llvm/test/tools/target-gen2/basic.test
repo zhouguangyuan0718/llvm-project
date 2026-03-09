@@ -15,7 +15,12 @@
 // CHECK: "assembly": {
 // CHECK: "kind": "structured"
 // CHECK: "mnemonic": "add"
-// CHECK: "behavior": "if (rd != 0) rd = rd;"
+// CHECK: "behavior": {
+// CHECK: "kind": "if"
+// CHECK: "text": "if (rd != 0) rd = rd;"
+// CHECK: "children": [
+// CHECK: "kind": "expression"
+// CHECK: "text": "rd = rd;"
 // CHECK: "cores": [
 // CHECK: "name": "Tiny"
 // CHECK: "provides": [

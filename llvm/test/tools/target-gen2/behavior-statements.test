@@ -1,7 +1,17 @@
 // RUN: target-gen2 %s -o - | FileCheck %s
 
 // CHECK: "name": "CTRL"
-// CHECK: "behavior": "{\n        if (rd != 0) {\n          for (i = 0; i < 4; i = i + 1) {\n            while (i < 3) i = i + 1;\n          }\n        } else {\n          switch (rd) {\n          case 0: break;\n          default: do rd = rd - 1; while (rd > 0);\n          }\n        }\n        return;\n      }"
+// CHECK: "behavior": {
+// CHECK: "kind": "compound"
+// CHECK: "children": [
+// CHECK: "kind": "if"
+// CHECK: "kind": "for"
+// CHECK: "kind": "while"
+// CHECK: "kind": "switch"
+// CHECK: "kind": "case"
+// CHECK: "kind": "default"
+// CHECK: "kind": "do-while"
+// CHECK: "kind": "return"
 
 Core BehavCore {
   instructions {
