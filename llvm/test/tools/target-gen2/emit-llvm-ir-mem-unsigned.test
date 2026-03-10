@@ -1,0 +1,22 @@
+// RUN: target-gen2 --emit=llvm-ir %s -o - | FileCheck %s
+
+// CHECK-DAG: declare i64 @tg2.mem.load(i64)
+// CHECK-DAG: declare void @tg2.mem.store(i64, i64)
+// CHECK: define i64 @tg2.exec.inst.BaseIS.LOADSTORE(i64 %addr, i64 %src)
+// CHECK: %[[L:.*]] = call i64 @tg2.mem.load(i64 %addr)
+// CHECK: %[[M:.*]] = and i64 %[[L]], 4294967295
+// CHECK: call void @tg2.mem.store(i64 %addr, i64 %src)
+// CHECK: ret i64 %[[M]]
+
+InstructionSet BaseIS {
+  instructions {
+    LOADSTORE {
+      encoding: addr[7:0] :: src[15:8] :: 16'h0;
+      behavior: {
+        t = (unsigned XLEN) MEM[addr];
+        MEM[addr] = src;
+        return (unsigned 32) t;
+      }
+    }
+  }
+}

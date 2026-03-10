@@ -1,0 +1,15 @@
+// RUN: target-gen2 --emit=llvm-ir %s -o - | FileCheck %s
+
+// CHECK: define i64 @tg2.exec.inst.BaseIS.ADD(i64 %rd, i64 %rs1, i64 %rs2)
+// CHECK: entry:
+// CHECK: %[[SUM:.*]] = add i64 %rs1, %rs2
+// CHECK: ret i64 %[[SUM]]
+
+InstructionSet BaseIS {
+  instructions {
+    ADD {
+      encoding: rd[4:0] :: rs1[9:5] :: rs2[14:10] :: 7'b0110011;
+      behavior: rd = rs1 + rs2;
+    }
+  }
+}
