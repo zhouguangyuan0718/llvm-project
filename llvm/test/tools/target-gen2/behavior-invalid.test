@@ -1,0 +1,13 @@
+// RUN: not target-gen2 %s -o - 2>&1 | FileCheck %s
+
+// CHECK: target-gen2: parse failed:
+// CHECK: expected ';' to terminate statement
+
+Core Bad {
+  instructions {
+    B {
+      encoding: rd[4:0] :: 7'b0110011;
+      behavior: if (rd != 0) rd = rd
+    }
+  }
+}
