@@ -238,6 +238,12 @@ private:
   bool translateMemFunc(const CallInst &CI, MachineIRBuilder &MIRBuilder,
                         unsigned Opcode);
 
+  /// Translate a memref element-wise intrinsic to its flattened memref
+  /// descriptor form.
+  bool translateMemRefElemwiseIntrinsic(const CallInst &CI,
+                                        Intrinsic::ID FlatIntrinsicID,
+                                        MachineIRBuilder &MIRBuilder);
+
   /// Translate an LLVM trap intrinsic (trap, debugtrap, ubsantrap).
   bool translateTrap(const CallInst &U, MachineIRBuilder &MIRBuilder,
                      unsigned Opcode);

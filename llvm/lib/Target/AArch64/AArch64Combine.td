@@ -342,6 +342,15 @@ def combine_mul_cmlt : GICombineRule<
   (apply [{ applyCombineMulCMLT(*${root}, MRI, B, ${matchinfo}); }])
 >;
 
+def memref_elem_add_mul_fusion_matchdata :
+  GIDefMatchData<"std::tuple<MachineInstr *, unsigned, unsigned>">;
+def memref_elem_add_mul_fusion : GICombineRule<
+  (defs root:$root, memref_elem_add_mul_fusion_matchdata:$matchinfo),
+  (match (wip_match_opcode G_INTRINSIC_W_SIDE_EFFECTS):$root,
+         [{ return matchMemRefElemAddMulFusion(*${root}, MRI, ${matchinfo}); }]),
+  (apply [{ applyMemRefElemAddMulFusion(*${root}, B, ${matchinfo}); }])
+>;
+
 // Post-legalization combines which should happen at all optimization levels.
 // (E.g. ones that facilitate matching for the selector) For example, matching
 // pseudos.
@@ -378,6 +387,7 @@ def AArch64PostLegalizerCombiner
                         push_freeze_to_prevent_poison_from_propagating,
                         combine_mul_cmlt, combine_use_vector_truncate,
                         extmultomull, subaddmulreassoc, truncsat_combines,
+                        memref_elem_add_mul_fusion,
                         lshr_of_trunc_of_lshr,
                         funnel_shift_from_or_shift_constants_are_legal]> {
 }

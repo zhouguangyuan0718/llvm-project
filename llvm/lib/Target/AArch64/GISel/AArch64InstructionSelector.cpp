@@ -2666,6 +2666,15 @@ bool AArch64InstructionSelector::select(MachineInstr &I) {
   case TargetOpcode::G_BRJT:
     return selectBrJT(I, MRI);
 
+  case AArch64::G_MEMREF_ELEM_ADDMUL:
+    I.setDesc(TII.get(AArch64::MEMREF_ELEM_ADDMUL));
+    constrainSelectedInstRegOperands(I, TII, TRI, RBI);
+    return true;
+  case AArch64::G_MEMREF_ELEM_MULADD:
+    I.setDesc(TII.get(AArch64::MEMREF_ELEM_MULADD));
+    constrainSelectedInstRegOperands(I, TII, TRI, RBI);
+    return true;
+
   case AArch64::G_ADD_LOW: {
     // This op may have been separated from it's ADRP companion by the localizer
     // or some other code motion pass. Given that many CPUs will try to

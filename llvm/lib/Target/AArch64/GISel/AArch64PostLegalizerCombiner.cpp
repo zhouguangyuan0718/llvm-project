@@ -38,6 +38,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/Debug.h"
 
 #define GET_GICOMBINER_DEPS
@@ -586,6 +587,404 @@ static void applySubAddMulReassoc(MachineInstr &MI, MachineInstr &Sub,
   MI.getOperand(2).setReg(Mul2);
   Sub.eraseFromParent();
   Observer.changingInstr(MI);
+}
+
+static bool isFlatMemRefAddOrMulIntrinsic(const MachineInstr &MI,
+                                          Intrinsic::ID &ID) {
+  if (MI.getOpcode() != TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS)
+    return false;
+
+  ID = cast<GIntrinsic>(MI).getIntrinsicID();
+  return ID == Intrinsic::memref_flat_elem_add ||
+         ID == Intrinsic::memref_flat_elem_mul;
+}
+
+static bool isFlatMemRefElemIntrinsic(const MachineInstr &MI,
+                                      Intrinsic::ID &ID) {
+  if (MI.getOpcode() != TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS)
+    return false;
+
+  ID = cast<GIntrinsic>(MI).getIntrinsicID();
+  return ID == Intrinsic::memref_flat_elem_add ||
+         ID == Intrinsic::memref_flat_elem_mul ||
+         ID == Intrinsic::memref_flat_elem_sub;
+}
+
+static unsigned getFlatMemRefDescriptorFieldCount(const MachineInstr &MI) {
+  if (MI.getNumExplicitDefs() != 0)
+    return 0;
+
+  // These flat intrinsics have one intrinsic ID operand followed by three
+  // memref descriptors: input, input, output.
+  if (MI.getNumExplicitOperands() <= 1)
+    return 0;
+
+  unsigned NumArgs = MI.getNumExplicitOperands() - 1;
+  if (NumArgs % 3 != 0)
+    return 0;
+  return NumArgs / 3;
+}
+
+static unsigned getFlatMemRefDescriptorStart(unsigned DescriptorNo,
+                                             unsigned NumFields) {
+  constexpr unsigned ArgStart = 1;
+  return ArgStart + DescriptorNo * NumFields;
+}
+
+static bool sameFlatMemRefDescriptor(const MachineInstr &LHS,
+                                     unsigned LHSStart,
+                                     const MachineInstr &RHS,
+                                     unsigned RHSStart,
+                                     unsigned NumFields) {
+  for (unsigned I = 0; I != NumFields; ++I) {
+    const MachineOperand &LHSOp = LHS.getOperand(LHSStart + I);
+    const MachineOperand &RHSOp = RHS.getOperand(RHSStart + I);
+    if (!LHSOp.isReg() || !RHSOp.isReg() ||
+        LHSOp.getReg() != RHSOp.getReg())
+      return false;
+  }
+  return true;
+}
+
+static bool memRefDescriptorMayAlias(const MachineInstr &LHS,
+                                     unsigned LHSStart,
+                                     const MachineInstr &RHS,
+                                     unsigned RHSStart,
+                                     unsigned NumFields) {
+  return sameFlatMemRefDescriptor(LHS, LHSStart, RHS, RHSStart, NumFields);
+}
+
+static void addFlatMemRefDescriptorOperands(MachineInstrBuilder &MIB,
+                                            const MachineInstr &MI,
+                                            unsigned Start,
+                                            unsigned NumFields) {
+  for (unsigned I = 0; I != NumFields; ++I)
+    MIB.addUse(MI.getOperand(Start + I).getReg());
+}
+
+static Register stripPointerCopiesAndOffsets(Register Ptr,
+                                             MachineRegisterInfo &MRI) {
+  while (Ptr.isVirtual()) {
+    MachineInstr *Def = getDefIgnoringCopies(Ptr, MRI);
+    if (!Def || Def->getOpcode() != TargetOpcode::G_PTR_ADD)
+      break;
+    Ptr = Def->getOperand(1).getReg();
+  }
+  return Ptr;
+}
+
+static bool descriptorContainsPointerReg(const MachineInstr &MI,
+                                         unsigned DescriptorStart,
+                                         unsigned NumFields, Register Ptr,
+                                         MachineRegisterInfo &MRI) {
+  Ptr = stripPointerCopiesAndOffsets(Ptr, MRI);
+
+  // MLIR's canonical memref descriptor starts with allocated and aligned
+  // pointers. Treat both as the identity of the memory object.
+  unsigned NumPointerFields = std::min(NumFields, 2u);
+  for (unsigned I = 0; I != NumPointerFields; ++I) {
+    const MachineOperand &MO = MI.getOperand(DescriptorStart + I);
+    if (!MO.isReg())
+      continue;
+    Register DescriptorPtr = stripPointerCopiesAndOffsets(MO.getReg(), MRI);
+    if (DescriptorPtr == Ptr)
+      return true;
+  }
+  return false;
+}
+
+static bool descriptorAddressSpaceDiffersFromPointer(const MachineInstr &MI,
+                                                     unsigned DescriptorStart,
+                                                     unsigned NumFields,
+                                                     Register Ptr,
+                                                     MachineRegisterInfo &MRI) {
+  LLT PtrTy = MRI.getType(Ptr);
+  if (!PtrTy.isPointer())
+    return false;
+
+  unsigned NumPointerFields = std::min(NumFields, 2u);
+  bool SawPointerField = false;
+  for (unsigned I = 0; I != NumPointerFields; ++I) {
+    const MachineOperand &MO = MI.getOperand(DescriptorStart + I);
+    if (!MO.isReg())
+      continue;
+    LLT DescriptorPtrTy = MRI.getType(MO.getReg());
+    if (!DescriptorPtrTy.isPointer())
+      continue;
+    SawPointerField = true;
+    if (DescriptorPtrTy.getAddressSpace() == PtrTy.getAddressSpace())
+      return false;
+  }
+  return SawPointerField;
+}
+
+static bool memRefDescriptorMayAliasPointer(const MachineInstr &MI,
+                                            unsigned DescriptorStart,
+                                            unsigned NumFields, Register Ptr,
+                                            MachineRegisterInfo &MRI) {
+  if (descriptorContainsPointerReg(MI, DescriptorStart, NumFields, Ptr, MRI))
+    return true;
+  if (descriptorAddressSpaceDiffersFromPointer(MI, DescriptorStart, NumFields,
+                                               Ptr, MRI))
+    return false;
+  return true;
+}
+
+static bool instructionMayReadMemRefDescriptor(const MachineInstr &MI,
+                                               const MachineInstr &DescriptorMI,
+                                               unsigned DescriptorStart,
+                                               unsigned NumFields,
+                                               MachineRegisterInfo &MRI) {
+  if (MI.isDebugInstr())
+    return false;
+
+  Intrinsic::ID ID;
+  if (isFlatMemRefElemIntrinsic(MI, ID)) {
+    unsigned MIDescFields = getFlatMemRefDescriptorFieldCount(MI);
+    if (MIDescFields != NumFields)
+      return false;
+    return memRefDescriptorMayAlias(
+               MI, getFlatMemRefDescriptorStart(0, NumFields), DescriptorMI,
+               DescriptorStart, NumFields) ||
+           memRefDescriptorMayAlias(
+               MI, getFlatMemRefDescriptorStart(1, NumFields), DescriptorMI,
+               DescriptorStart, NumFields);
+  }
+
+  if (MI.isCall() || MI.isInlineAsm() || MI.hasUnmodeledSideEffects())
+    return true;
+
+  if (!MI.mayLoad())
+    return false;
+
+  const auto *LS = dyn_cast<GLoadStore>(&MI);
+  if (!LS)
+    return true;
+
+  return memRefDescriptorMayAliasPointer(DescriptorMI, DescriptorStart,
+                                         NumFields, LS->getPointerReg(), MRI);
+}
+
+static bool memOperandsAreInvariantLoads(const MachineInstr &MI) {
+  if (!MI.mayLoad() || MI.mayStore() || MI.hasOrderedMemoryRef() ||
+      MI.memoperands_empty())
+    return false;
+
+  return all_of(MI.memoperands(), [](const MachineMemOperand *MMO) {
+    return MMO->isLoad() && MMO->isInvariant();
+  });
+}
+
+static bool flatMemRefIntrinsicConflictsWithProducer(const MachineInstr &MI,
+                                                     const MachineInstr &Producer,
+                                                     unsigned NumFields) {
+  unsigned MIDescFields = getFlatMemRefDescriptorFieldCount(MI);
+  if (MIDescFields != NumFields)
+    return true;
+
+  unsigned ProducerRead0 = getFlatMemRefDescriptorStart(0, NumFields);
+  unsigned ProducerRead1 = getFlatMemRefDescriptorStart(1, NumFields);
+  unsigned ProducerWrite = getFlatMemRefDescriptorStart(2, NumFields);
+  unsigned MIRead0 = getFlatMemRefDescriptorStart(0, NumFields);
+  unsigned MIRead1 = getFlatMemRefDescriptorStart(1, NumFields);
+  unsigned MIWrite = getFlatMemRefDescriptorStart(2, NumFields);
+
+  // Moving Producer after MI would make Producer observe MI's writes to its
+  // inputs, or make MI miss Producer's write to the temporary output.
+  return memRefDescriptorMayAlias(MI, MIWrite, Producer, ProducerRead0,
+                                  NumFields) ||
+         memRefDescriptorMayAlias(MI, MIWrite, Producer, ProducerRead1,
+                                  NumFields) ||
+         memRefDescriptorMayAlias(MI, MIRead0, Producer, ProducerWrite,
+                                  NumFields) ||
+         memRefDescriptorMayAlias(MI, MIRead1, Producer, ProducerWrite,
+                                  NumFields) ||
+         memRefDescriptorMayAlias(MI, MIWrite, Producer, ProducerWrite,
+                                  NumFields);
+}
+
+static bool memoryInstrConflictsWithProducer(const MachineInstr &MI,
+                                             const MachineInstr &Producer,
+                                             unsigned NumFields,
+                                             MachineRegisterInfo &MRI) {
+  if (memOperandsAreInvariantLoads(MI))
+    return false;
+
+  if (MI.isCall() || MI.isInlineAsm() || MI.hasUnmodeledSideEffects() ||
+      MI.hasOrderedMemoryRef())
+    return true;
+
+  if (!MI.mayLoadOrStore())
+    return false;
+
+  const auto *LS = dyn_cast<GLoadStore>(&MI);
+  if (!LS)
+    return true;
+
+  Register Ptr = LS->getPointerReg();
+  unsigned ProducerRead0 = getFlatMemRefDescriptorStart(0, NumFields);
+  unsigned ProducerRead1 = getFlatMemRefDescriptorStart(1, NumFields);
+  unsigned ProducerWrite = getFlatMemRefDescriptorStart(2, NumFields);
+
+  if (MI.mayStore() &&
+      (memRefDescriptorMayAliasPointer(Producer, ProducerRead0, NumFields, Ptr,
+                                       MRI) ||
+       memRefDescriptorMayAliasPointer(Producer, ProducerRead1, NumFields, Ptr,
+                                       MRI) ||
+       memRefDescriptorMayAliasPointer(Producer, ProducerWrite, NumFields, Ptr,
+                                       MRI)))
+    return true;
+
+  if (MI.mayLoad() &&
+      memRefDescriptorMayAliasPointer(Producer, ProducerWrite, NumFields, Ptr,
+                                      MRI))
+    return true;
+
+  return false;
+}
+
+static bool instructionConflictsWithMemRefProducer(const MachineInstr &MI,
+                                                  const MachineInstr &Producer,
+                                                  unsigned NumFields,
+                                                  MachineRegisterInfo &MRI) {
+  if (MI.isDebugInstr())
+    return false;
+
+  Intrinsic::ID ID;
+  if (isFlatMemRefElemIntrinsic(MI, ID))
+    return flatMemRefIntrinsicConflictsWithProducer(MI, Producer, NumFields);
+
+  return memoryInstrConflictsWithProducer(MI, Producer, NumFields, MRI);
+}
+
+static bool canMoveMemRefProducerBeforeRoot(MachineInstr &Producer,
+                                            MachineInstr &Root,
+                                            unsigned NumFields,
+                                            MachineRegisterInfo &MRI) {
+  for (auto It = std::next(Producer.getIterator()), End = Root.getIterator();
+       It != End; ++It)
+    if (instructionConflictsWithMemRefProducer(*It, Producer, NumFields, MRI))
+      return false;
+  return true;
+}
+
+static bool producerOutputMayBeObservedAfterRoot(MachineInstr &Producer,
+                                                 MachineInstr &Root,
+                                                 unsigned NumFields,
+                                                 MachineRegisterInfo &MRI) {
+  unsigned ProducerOutput = getFlatMemRefDescriptorStart(2, NumFields);
+  unsigned RootOutput = getFlatMemRefDescriptorStart(2, NumFields);
+
+  if (sameFlatMemRefDescriptor(Producer, ProducerOutput, Root, RootOutput,
+                               NumFields))
+    return false;
+
+  MachineBasicBlock &MBB = *Root.getParent();
+  for (auto It = std::next(Root.getIterator()), End = MBB.instr_end(); It != End;
+       ++It)
+    if (instructionMayReadMemRefDescriptor(*It, Producer, ProducerOutput,
+                                           NumFields, MRI))
+      return true;
+
+  return false;
+}
+
+static bool matchMemRefElemAddMulFusion(
+    MachineInstr &Root, MachineRegisterInfo &MRI,
+    std::tuple<MachineInstr *, unsigned, unsigned> &MatchInfo) {
+  Intrinsic::ID RootID;
+  if (!isFlatMemRefAddOrMulIntrinsic(Root, RootID))
+    return false;
+
+  unsigned RootDescFields = getFlatMemRefDescriptorFieldCount(Root);
+  if (RootDescFields == 0)
+    return false;
+
+  unsigned RootInput0Start = getFlatMemRefDescriptorStart(0, RootDescFields);
+  unsigned RootInput1Start = getFlatMemRefDescriptorStart(1, RootDescFields);
+
+  constexpr unsigned MaxMemRefFusionScanInstrs = 64;
+  unsigned NumScanned = 0;
+  MachineBasicBlock &MBB = *Root.getParent();
+  for (auto It = Root.getIterator(); It != MBB.begin() &&
+                                     NumScanned < MaxMemRefFusionScanInstrs;) {
+    --It;
+    MachineInstr &Producer = *It;
+    if (Producer.isDebugInstr())
+      continue;
+    ++NumScanned;
+
+    Intrinsic::ID ProducerID;
+    if (!isFlatMemRefAddOrMulIntrinsic(Producer, ProducerID))
+      continue;
+    if (RootID == ProducerID)
+      continue;
+
+    unsigned ProducerDescFields =
+        getFlatMemRefDescriptorFieldCount(Producer);
+    if (ProducerDescFields != RootDescFields)
+      continue;
+
+    unsigned ProducerOutputStart =
+        getFlatMemRefDescriptorStart(2, RootDescFields);
+    bool ProducerFeedsRootInput0 =
+        sameFlatMemRefDescriptor(Producer, ProducerOutputStart, Root,
+                                 RootInput0Start, RootDescFields);
+    bool ProducerFeedsRootInput1 =
+        sameFlatMemRefDescriptor(Producer, ProducerOutputStart, Root,
+                                 RootInput1Start, RootDescFields);
+    if (ProducerFeedsRootInput0 == ProducerFeedsRootInput1)
+      continue;
+
+    if (!canMoveMemRefProducerBeforeRoot(Producer, Root, RootDescFields, MRI))
+      continue;
+    if (producerOutputMayBeObservedAfterRoot(Producer, Root, RootDescFields,
+                                             MRI))
+      continue;
+
+    unsigned FusedOpc =
+        ProducerID == Intrinsic::memref_flat_elem_add
+            ? AArch64::G_MEMREF_ELEM_ADDMUL
+            : AArch64::G_MEMREF_ELEM_MULADD;
+    unsigned RootOtherInputStart =
+        ProducerFeedsRootInput0 ? RootInput1Start : RootInput0Start;
+
+    std::get<0>(MatchInfo) = &Producer;
+    std::get<1>(MatchInfo) = FusedOpc;
+    std::get<2>(MatchInfo) = RootOtherInputStart;
+    return true;
+  }
+
+  return false;
+}
+
+static void applyMemRefElemAddMulFusion(
+    MachineInstr &Root, MachineIRBuilder &B,
+    std::tuple<MachineInstr *, unsigned, unsigned> &MatchInfo) {
+  MachineInstr *Producer = std::get<0>(MatchInfo);
+  unsigned FusedOpc = std::get<1>(MatchInfo);
+  unsigned RootOtherInputStart = std::get<2>(MatchInfo);
+  unsigned DescFields = getFlatMemRefDescriptorFieldCount(Root);
+  assert(Producer && DescFields != 0 &&
+         "Expected a matched memref element-wise fusion");
+
+  constexpr unsigned ArgStart = 1;
+  unsigned ProducerInput0Start = ArgStart;
+  unsigned ProducerInput1Start = ArgStart + DescFields;
+  unsigned RootOutputStart = ArgStart + 2 * DescFields;
+
+  B.setInstrAndDebugLoc(Root);
+  MachineInstrBuilder Fused = B.buildInstr(FusedOpc);
+  addFlatMemRefDescriptorOperands(Fused, *Producer, ProducerInput0Start,
+                                  DescFields);
+  addFlatMemRefDescriptorOperands(Fused, *Producer, ProducerInput1Start,
+                                  DescFields);
+  addFlatMemRefDescriptorOperands(Fused, Root, RootOtherInputStart,
+                                  DescFields);
+  addFlatMemRefDescriptorOperands(Fused, Root, RootOutputStart, DescFields);
+
+  Root.eraseFromParent();
+  Producer->eraseFromParent();
 }
 
 class AArch64PostLegalizerCombinerImpl : public Combiner {

@@ -2776,6 +2776,41 @@ def int_matrix_column_major_store
                WriteOnly<ArgIndex<1>>, NoCapture<ArgIndex<1>>,
                ImmArg<ArgIndex<3>>, ImmArg<ArgIndex<4>>, ImmArg<ArgIndex<5>>]>;
 
+//===----- MemRef intrinsics ---------------------------------------------===//
+
+// Element-wise addition over MLIR-lowered memref descriptors. The operands are
+// two input memref descriptor structs followed by one output memref descriptor
+// struct, all with the same LLVM type.
+def int_memref_elem_add
+  : Intrinsic<[],
+              [llvm_any_ty, LLVMMatchType<0>, LLVMMatchType<0>]>;
+
+// Element-wise multiplication over MLIR-lowered memref descriptors. The
+// operands follow the same input, input, output convention as
+// llvm.memref.elem.add.
+def int_memref_elem_mul
+  : Intrinsic<[],
+              [llvm_any_ty, LLVMMatchType<0>, LLVMMatchType<0>]>;
+
+// Element-wise subtraction over MLIR-lowered memref descriptors. The operands
+// follow the same input, input, output convention as llvm.memref.elem.add.
+def int_memref_elem_sub
+  : Intrinsic<[],
+              [llvm_any_ty, LLVMMatchType<0>, LLVMMatchType<0>]>;
+
+// GlobalISel-lowered form of llvm.memref.elem.add. The varargs are the
+// flattened fields of the input and output memref descriptor structs.
+def int_memref_flat_elem_add
+  : Intrinsic<[], [llvm_vararg_ty]>;
+
+// GlobalISel-lowered form of llvm.memref.elem.mul.
+def int_memref_flat_elem_mul
+  : Intrinsic<[], [llvm_vararg_ty]>;
+
+// GlobalISel-lowered form of llvm.memref.elem.sub.
+def int_memref_flat_elem_sub
+  : Intrinsic<[], [llvm_vararg_ty]>;
+
 //===---------- Intrinsics to control hardware supported loops ----------===//
 
 // Specify that the value given is the number of iterations that the next loop

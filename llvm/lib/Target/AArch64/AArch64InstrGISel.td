@@ -296,6 +296,24 @@ def G_BSP : AArch64GenericInstruction {
   let hasSideEffects = 0;
 }
 
+// Pre-isel forms of the memref element-wise fused operations. The selected
+// target pseudos use the same variable operand layout.
+def G_MEMREF_ELEM_ADDMUL : AArch64GenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins variable_ops);
+  let mayLoad = 1;
+  let mayStore = 1;
+  let hasSideEffects = 1;
+}
+
+def G_MEMREF_ELEM_MULADD : AArch64GenericInstruction {
+  let OutOperandList = (outs);
+  let InOperandList = (ins variable_ops);
+  let mayLoad = 1;
+  let mayStore = 1;
+  let hasSideEffects = 1;
+}
+
 def : GINodeEquiv<G_REV16, AArch64rev16>;
 def : GINodeEquiv<G_REV32, AArch64rev32>;
 def : GINodeEquiv<G_REV64, AArch64rev64>;

@@ -1820,6 +1820,28 @@ bool IRTranslator::translateMemFunc(const CallInst &CI,
   return true;
 }
 
+bool IRTranslator::translateMemRefElemwiseIntrinsic(
+    const CallInst &CI, Intrinsic::ID FlatIntrinsicID,
+    MachineIRBuilder &MIRBuilder) {
+  assert((CI.getIntrinsicID() == Intrinsic::memref_elem_add ||
+          CI.getIntrinsicID() == Intrinsic::memref_elem_mul ||
+          CI.getIntrinsicID() == Intrinsic::memref_elem_sub) &&
+         "Expected memref element-wise intrinsic");
+  assert(CI.arg_size() == 3 &&
+         "memref element-wise intrinsic expects two inputs and one output");
+
+  SmallVector<Register, 24> FlatArgs;
+  for (const auto &Arg : CI.args())
+    llvm::append_range(FlatArgs, getOrCreateVRegs(*Arg));
+
+  MachineInstrBuilder MIB =
+      MIRBuilder.buildIntrinsic(FlatIntrinsicID, ArrayRef<Register>());
+  for (Register ArgReg : FlatArgs)
+    MIB.addUse(ArgReg);
+
+  return true;
+}
+
 bool IRTranslator::translateTrap(const CallInst &CI,
                                  MachineIRBuilder &MIRBuilder,
                                  unsigned Opcode) {
@@ -2224,6 +2246,15 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
   switch (ID) {
   default:
     break;
+  case Intrinsic::memref_elem_add:
+    return translateMemRefElemwiseIntrinsic(
+        CI, Intrinsic::memref_flat_elem_add, MIRBuilder);
+  case Intrinsic::memref_elem_mul:
+    return translateMemRefElemwiseIntrinsic(
+        CI, Intrinsic::memref_flat_elem_mul, MIRBuilder);
+  case Intrinsic::memref_elem_sub:
+    return translateMemRefElemwiseIntrinsic(
+        CI, Intrinsic::memref_flat_elem_sub, MIRBuilder);
   case Intrinsic::lifetime_start:
   case Intrinsic::lifetime_end: {
     // No stack colouring in O0, discard region information.

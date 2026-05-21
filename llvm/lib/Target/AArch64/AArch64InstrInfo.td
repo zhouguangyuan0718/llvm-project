@@ -11929,6 +11929,16 @@ let Predicates = [HasTEV] in {
   defm TEXIT : TEXIT<"texit">;
 }
 
+// Target pseudos for fused element-wise operations over flattened MLIR memref
+// descriptors. The operands are four flattened descriptors:
+//   lhs0, lhs1, rhs, output
+// where lhs0/lhs1 are consumed by the first operation and rhs is consumed by
+// the second operation.
+let mayLoad = 1, mayStore = 1, hasSideEffects = 1 in {
+def MEMREF_ELEM_ADDMUL : Pseudo<(outs), (ins variable_ops), []>, Sched<[]>;
+def MEMREF_ELEM_MULADD : Pseudo<(outs), (ins variable_ops), []>, Sched<[]>;
+}
+
 include "AArch64InstrAtomics.td"
 include "AArch64SVEInstrInfo.td"
 include "AArch64SMEInstrInfo.td"
