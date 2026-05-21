@@ -410,6 +410,9 @@ bool AArch64CallLowering::lowerReturn(MachineIRBuilder &MIRBuilder,
                                       ArrayRef<Register> VRegs,
                                       FunctionLoweringInfo &FLI,
                                       Register SwiftErrorVReg) const {
+  if (MIRBuilder.getMF().getFunction().getCallingConv() == CallingConv::Go)
+    return false;
+
   auto MIB = MIRBuilder.buildInstrNoInsert(AArch64::RET_ReallyLR);
   assert(((Val && !VRegs.empty()) || (!Val && VRegs.empty())) &&
          "Return value without a vreg");
@@ -581,6 +584,9 @@ bool AArch64CallLowering::fallBackToDAGISel(const MachineFunction &MF) const {
   auto &F = MF.getFunction();
   const auto &TM = static_cast<const AArch64TargetMachine &>(MF.getTarget());
 
+  if (F.getCallingConv() == CallingConv::Go)
+    return true;
+
   const bool GlobalISelFlag =
       getCGPassBuilderOption().EnableGlobalISelOption.value_or(false);
 
@@ -705,6 +711,9 @@ void AArch64CallLowering::saveVarArgRegisters(
 bool AArch64CallLowering::lowerFormalArguments(
     MachineIRBuilder &MIRBuilder, const Function &F,
     ArrayRef<ArrayRef<Register>> VRegs, FunctionLoweringInfo &FLI) const {
+  if (F.getCallingConv() == CallingConv::Go)
+    return false;
+
   MachineFunction &MF = MIRBuilder.getMF();
   MachineBasicBlock &MBB = MIRBuilder.getMBB();
   MachineRegisterInfo &MRI = MF.getRegInfo();
@@ -1325,6 +1334,9 @@ bool AArch64CallLowering::lowerTailCall(
 
 bool AArch64CallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
                                     CallLoweringInfo &Info) const {
+  if (Info.CallConv == CallingConv::Go)
+    return false;
+
   MachineFunction &MF = MIRBuilder.getMF();
   const Function &F = MF.getFunction();
   MachineRegisterInfo &MRI = MF.getRegInfo();
