@@ -20,6 +20,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "AArch64TargetMachine.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/GlobalISel/CSEInfo.h"
 #include "llvm/CodeGen/GlobalISel/CSEMIRBuilder.h"
@@ -885,6 +887,30 @@ static bool producerOutputMayBeObservedAfterRoot(MachineInstr &Producer,
     if (instructionMayReadMemRefDescriptor(*It, Producer, ProducerOutput,
                                            NumFields, MRI))
       return true;
+
+  constexpr unsigned MaxMemRefFusionSuccBlocks = 32;
+  SmallPtrSet<MachineBasicBlock *, 8> Visited;
+  SmallVector<MachineBasicBlock *, 8> Worklist;
+  Visited.insert(&MBB);
+  for (MachineBasicBlock *Succ : MBB.successors())
+    Worklist.push_back(Succ);
+
+  unsigned NumVisitedSuccBlocks = 0;
+  while (!Worklist.empty()) {
+    MachineBasicBlock *Succ = Worklist.pop_back_val();
+    if (!Visited.insert(Succ).second)
+      continue;
+    if (++NumVisitedSuccBlocks > MaxMemRefFusionSuccBlocks)
+      return true;
+
+    for (const MachineInstr &MI : *Succ)
+      if (instructionMayReadMemRefDescriptor(MI, Producer, ProducerOutput,
+                                             NumFields, MRI))
+        return true;
+
+    for (MachineBasicBlock *Next : Succ->successors())
+      Worklist.push_back(Next);
+  }
 
   return false;
 }
