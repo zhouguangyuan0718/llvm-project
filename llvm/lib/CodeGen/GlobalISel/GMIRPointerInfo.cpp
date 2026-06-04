@@ -435,10 +435,6 @@ GMIRPointerInfo GMIRPointerInfo::withAddedConstant(int64_t ExtraOffset) const {
   return withAddedOffset(GMIRLinearOffset::getConstant(ExtraOffset));
 }
 
-GMIRPointerInfo GMIRPointerInfo::withAddedReg(Register Reg, int64_t Scale) const {
-  return withAddedOffset(GMIRLinearOffset::getReg(Reg, Scale));
-}
-
 std::optional<int64_t>
 GMIRPointerInfo::getConstantDifference(const GMIRPointerInfo &Other) const {
   if (!isValid() || !Other.isValid() || BaseReg != Other.BaseReg)
@@ -463,4 +459,12 @@ GMIRPointerInfo GMIRPointerAnalyzer::getPointerInfo(Register Ptr) const {
 GMIRLinearOffset GMIRPointerAnalyzer::getOffsetInfo(Register OffsetReg) const {
   VisitingSet Visiting;
   return getOffsetInfoImpl(OffsetReg, MRI, Visiting, /*Depth=*/0, MaxDepth);
+}
+
+GMIRPointerInfo
+GMIRPointerAnalyzer::withAddedReg(const GMIRPointerInfo &PtrInfo,
+                                  Register OffsetReg, int64_t Scale) const {
+  GMIRLinearOffset ExtraOffset = getOffsetInfo(OffsetReg);
+  ExtraOffset.multiply(Scale);
+  return PtrInfo.withAddedOffset(ExtraOffset);
 }
