@@ -12,6 +12,7 @@ add_llvm_component_library(LLVMGlobalISel
   CombinerHelperVectorOps.cpp
   GIMatchTableExecutor.cpp
   GISelChangeObserver.cpp
+  GMIRPointerInfo.cpp
   IRTranslator.cpp
   InlineAsmLowering.cpp
   InstructionSelect.cpp
