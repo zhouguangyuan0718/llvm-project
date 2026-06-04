@@ -144,9 +144,6 @@ public:
   /// Construct a new pointer description by adding a constant offset.
   GMIRPointerInfo withAddedConstant(int64_t ExtraOffset) const;
 
-  /// Construct a new pointer description by adding Reg * Scale.
-  GMIRPointerInfo withAddedReg(Register Reg, int64_t Scale = 1) const;
-
   /// If both pointers have the same base and the same variable offset terms,
   /// return:
   ///
@@ -173,6 +170,12 @@ public:
 
   /// Analyze an integer register as a linear offset expression.
   GMIRLinearOffset getOffsetInfo(Register OffsetReg) const;
+
+  /// Construct a new pointer description by analyzing OffsetReg as a linear
+  /// offset expression, multiplying it by Scale, and adding it to PtrInfo.
+  GMIRPointerInfo withAddedReg(const GMIRPointerInfo &PtrInfo,
+                               Register OffsetReg,
+                               int64_t Scale = 1) const;
 };
 
 } // namespace GISelAddressing
