@@ -28,6 +28,7 @@ add_llvm_unittest(GlobalISelTests
   KnownBitsVectorTest.cpp
   GISelUtilsTest.cpp
   GISelAliasTest.cpp
+  GMIRPointerInfoTest.cpp
   CallLowering.cpp
   InstructionSelectTest.cpp
   )
