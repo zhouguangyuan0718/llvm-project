@@ -17,25 +17,25 @@ using namespace llvm::GISelAddressing;
 
 namespace {
 
-static constexpr LLT S1 = LLT::scalar(1);
-static constexpr LLT S64 = LLT::scalar(64);
-static constexpr LLT P0 = LLT::pointer(0, 64);
+static const LLT S1 = LLT::scalar(1);
+static const LLT S64 = LLT::scalar(64);
+static const LLT P0 = LLT::pointer(0, 64);
 
 static void expectConstantOffset(const GMIRPointerInfo &Info, Register Base,
                                  int64_t Constant) {
-  EXPECT_EQ(Info.getBase(), Base);
+  EXPECT_EQ(Base, Info.getBase());
   EXPECT_TRUE(Info.getOffset().getTerms().empty());
-  EXPECT_EQ(Info.getOffset().getConstant(), Constant);
+  EXPECT_EQ(Constant, Info.getOffset().getConstant());
 }
 
 static void expectOneTermOffset(const GMIRPointerInfo &Info, Register Base,
                                 Register Reg, int64_t Scale,
                                 int64_t Constant) {
-  EXPECT_EQ(Info.getBase(), Base);
-  ASSERT_EQ(Info.getOffset().getTerms().size(), 1u);
-  EXPECT_EQ(Info.getOffset().getTerms()[0].Reg, Reg);
-  EXPECT_EQ(Info.getOffset().getTerms()[0].Scale, Scale);
-  EXPECT_EQ(Info.getOffset().getConstant(), Constant);
+  EXPECT_EQ(Base, Info.getBase());
+  ASSERT_EQ(1u, Info.getOffset().getTerms().size());
+  EXPECT_EQ(Reg, Info.getOffset().getTerms()[0].Reg);
+  EXPECT_EQ(Scale, Info.getOffset().getTerms()[0].Scale);
+  EXPECT_EQ(Constant, Info.getOffset().getConstant());
 }
 
 TEST_F(AArch64GISelMITest, RecursivePtrAddAndLinearOffset) {
