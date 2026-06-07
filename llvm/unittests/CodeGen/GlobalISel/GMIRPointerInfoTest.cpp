@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "GISelMITest.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/CodeGen/GlobalISel/GMIRPointerInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
@@ -127,6 +128,33 @@ TEST_F(AArch64GISelMITest, PhiWithSameInputs) {
   GMIRPointerInfo Info = Analyzer.getPointerInfo(Phi.getReg(0));
 
   expectConstantOffset(Info, Base, 0);
+}
+
+TEST_F(AArch64GISelMITest, DenseMapInfo) {
+  setUp();
+  if (!TM)
+    GTEST_SKIP();
+
+  Register Base = B.buildUndef(P0).getReg(0);
+  Register Index = B.buildUndef(S64).getReg(0);
+
+  GMIRLinearOffset OffsetA = GMIRLinearOffset::getReg(Index, 4);
+  OffsetA.addConstant(16);
+
+  GMIRLinearOffset OffsetB;
+  OffsetB.addConstant(16);
+  OffsetB.addTerm(Index, 4);
+
+  DenseMap<GMIRLinearOffset, unsigned> OffsetMap;
+  OffsetMap[OffsetA] = 1;
+  EXPECT_EQ(1u, OffsetMap.lookup(OffsetB));
+
+  GMIRPointerInfo PointerA(Base, OffsetA);
+  GMIRPointerInfo PointerB(Base, OffsetB);
+
+  DenseMap<GMIRPointerInfo, unsigned> PointerMap;
+  PointerMap[PointerA] = 2;
+  EXPECT_EQ(2u, PointerMap.lookup(PointerB));
 }
 
 } // namespace
