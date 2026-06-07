@@ -10,6 +10,8 @@
 #define LLVM_CODEGEN_GLOBALISEL_GMIRPOINTERINFO_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMapInfo.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/Register.h"
 #include "llvm/Support/Compiler.h"
@@ -50,6 +52,8 @@ public:
 private:
   SmallVector<Term, 2> Terms;
   int64_t Constant = 0;
+
+  friend struct DenseMapInfo<GMIRLinearOffset>;
 
 public:
   GMIRLinearOffset() = default;
@@ -110,6 +114,8 @@ public:
 class LLVM_ABI GMIRPointerInfo {
   Register BaseReg;
   GMIRLinearOffset Offset;
+
+  friend struct DenseMapInfo<GMIRPointerInfo>;
 
 public:
   GMIRPointerInfo() = default;
@@ -179,6 +185,78 @@ public:
 };
 
 } // namespace GISelAddressing
+
+template <> struct DenseMapInfo<GISelAddressing::GMIRLinearOffset::Term> {
+  using Term = GISelAddressing::GMIRLinearOffset::Term;
+
+  static inline Term getEmptyKey() {
+    return {DenseMapInfo<Register>::getEmptyKey(), 0};
+  }
+
+  static inline Term getTombstoneKey() {
+    return {DenseMapInfo<Register>::getTombstoneKey(), 0};
+  }
+
+  static unsigned getHashValue(const Term &Val) {
+    return static_cast<unsigned>(
+        hash_combine(DenseMapInfo<Register>::getHashValue(Val.Reg),
+                     Val.Scale));
+  }
+
+  static bool isEqual(const Term &LHS, const Term &RHS) { return LHS == RHS; }
+};
+
+template <> struct DenseMapInfo<GISelAddressing::GMIRLinearOffset> {
+  using Offset = GISelAddressing::GMIRLinearOffset;
+  using Term = GISelAddressing::GMIRLinearOffset::Term;
+
+  static inline Offset getEmptyKey() {
+    Offset Key;
+    Key.Terms.push_back(DenseMapInfo<Term>::getEmptyKey());
+    return Key;
+  }
+
+  static inline Offset getTombstoneKey() {
+    Offset Key;
+    Key.Terms.push_back(DenseMapInfo<Term>::getTombstoneKey());
+    return Key;
+  }
+
+  static unsigned getHashValue(const Offset &Val) {
+    hash_code Hash = hash_value(Val.Constant);
+    for (const Term &T : Val.Terms)
+      Hash = hash_combine(Hash, DenseMapInfo<Term>::getHashValue(T));
+    return static_cast<unsigned>(Hash);
+  }
+
+  static bool isEqual(const Offset &LHS, const Offset &RHS) {
+    return LHS == RHS;
+  }
+};
+
+template <> struct DenseMapInfo<GISelAddressing::GMIRPointerInfo> {
+  using PointerInfo = GISelAddressing::GMIRPointerInfo;
+  using Offset = GISelAddressing::GMIRLinearOffset;
+
+  static inline PointerInfo getEmptyKey() {
+    return PointerInfo(DenseMapInfo<Register>::getEmptyKey());
+  }
+
+  static inline PointerInfo getTombstoneKey() {
+    return PointerInfo(DenseMapInfo<Register>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const PointerInfo &Val) {
+    return static_cast<unsigned>(
+        hash_combine(DenseMapInfo<Register>::getHashValue(Val.BaseReg),
+                     DenseMapInfo<Offset>::getHashValue(Val.Offset)));
+  }
+
+  static bool isEqual(const PointerInfo &LHS, const PointerInfo &RHS) {
+    return LHS == RHS;
+  }
+};
+
 } // namespace llvm
 
 #endif // LLVM_CODEGEN_GLOBALISEL_GMIRPOINTERINFO_H
