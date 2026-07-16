@@ -64,7 +64,8 @@ VectorType *getFixedVectorTy(Type *ElemTy, unsigned NumElems);
 
 unsigned getTargetFP16VectorLanes(const TargetTransformInfo &TTI);
 
-bool decodeMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR);
+bool decodeMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR,
+                  bool RequireContiguous = true);
 
 bool decodeCallWithOperandRoles(CallInst *CI, const OperandRoles &Roles,
                                 DecodedCall &DC);
