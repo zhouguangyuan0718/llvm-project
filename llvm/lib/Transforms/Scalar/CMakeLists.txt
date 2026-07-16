@@ -56,6 +56,7 @@ add_llvm_component_library(LLVMScalarOpts
   LowerMatrixIntrinsics.cpp
   LowerMemRefCommon.cpp
   LowerMemRefIntrinsicInfo.cpp
+  LowerMemRefReduceAddToScalar.cpp
   LowerMemRefTile.cpp
   LowerMemRefToVector.cpp
   LowerWidenableCondition.cpp
