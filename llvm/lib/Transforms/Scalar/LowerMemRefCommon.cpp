@@ -50,19 +50,6 @@ static bool isPrefixIndexPath(ArrayRef<unsigned> Prefix,
 }
 
 /// Try to recover an aggregate element from a value built by insertvalue.
-///
-/// Supported forms:
-///
-///   %sizes0 = insertvalue [2 x i64] poison, i64 1, 0
-///   %sizes1 = insertvalue [2 x i64] %sizes0, i64 8, 1
-///   %m3 = insertvalue %memref %m2, [2 x i64] %sizes1, 3
-///
-/// and:
-///
-///   %m3 = insertvalue %memref %m2, i64 1, 3, 0
-///   %m4 = insertvalue %memref %m3, i64 8, 3, 1
-///
-/// This is used only for compile-time decoding of sizes and strides.
 static Value *getInsertedAggregateElement(Value *Agg, ArrayRef<unsigned> Path,
                                           unsigned Depth = 0) {
   if (!Agg || Path.empty() || Depth > 64)
@@ -127,42 +114,29 @@ static ArrayType *getArrayFieldType(StructType *STy, unsigned FieldNo) {
 ///     [rank x index] sizes,
 ///     [rank x index] strides
 ///   }
-///
-/// Only rank-1 and rank-2 descriptors are supported.
 static bool getSupportedMemRefRank(Value *V, unsigned &Rank) {
   auto *STy = dyn_cast<StructType>(V->getType());
-  if (!STy)
+  if (!STy || STy->getNumElements() != 5)
     return false;
 
-  if (STy->getNumElements() != 5)
-    return false;
-
-  if (!STy->getElementType(0)->isPointerTy())
-    return false;
-
-  if (!STy->getElementType(1)->isPointerTy())
-    return false;
-
-  if (!STy->getElementType(2)->isIntegerTy())
+  if (!STy->getElementType(0)->isPointerTy() ||
+      !STy->getElementType(1)->isPointerTy() ||
+      !STy->getElementType(2)->isIntegerTy())
     return false;
 
   ArrayType *SizesTy = getArrayFieldType(STy, 3);
   ArrayType *StridesTy = getArrayFieldType(STy, 4);
-
   if (!SizesTy || !StridesTy)
     return false;
 
   if (SizesTy->getNumElements() != StridesTy->getNumElements())
     return false;
 
-  if (!SizesTy->getElementType()->isIntegerTy())
-    return false;
-
-  if (!StridesTy->getElementType()->isIntegerTy())
+  if (!SizesTy->getElementType()->isIntegerTy() ||
+      !StridesTy->getElementType()->isIntegerTy())
     return false;
 
   uint64_t Rank64 = SizesTy->getNumElements();
-
   if (Rank64 != 1 && Rank64 != 2)
     return false;
 
@@ -170,7 +144,8 @@ static bool getSupportedMemRefRank(Value *V, unsigned &Rank) {
   return true;
 }
 
-static bool decode1DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
+static bool decode1DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR,
+                           bool RequireContiguous) {
   auto Size0 = getConstUIntAggregateElement(V, {3, 0});
   auto Stride0 = getConstUIntAggregateElement(V, {4, 0});
 
@@ -180,27 +155,24 @@ static bool decode1DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
   if (*Size0 == 0 || *Size0 > kMaxVectorElems)
     return false;
 
-  if (*Stride0 != 1)
+  if (RequireContiguous && *Stride0 != 1)
     return false;
 
   MR.MemRefValue = V;
   MR.ArgIndex = ArgIndex;
   MR.Rank = 1;
-
   MR.Size0 = *Size0;
   MR.Size1 = 1;
-
   MR.Stride0 = *Stride0;
   MR.Stride1 = 1;
-
   MR.FlattenDim = 0;
   MR.FlattenStride = *Stride0;
-
   MR.NumElems = static_cast<unsigned>(*Size0);
   return true;
 }
 
-static bool decode2DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
+static bool decode2DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR,
+                           bool RequireContiguous) {
   auto Size0 = getConstUIntAggregateElement(V, {3, 0});
   auto Size1 = getConstUIntAggregateElement(V, {3, 1});
   auto Stride0 = getConstUIntAggregateElement(V, {4, 0});
@@ -220,7 +192,7 @@ static bool decode2DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
   unsigned NumElems = 0;
 
   if (*Size0 == 1) {
-    if (*Stride1 != 1)
+    if (RequireContiguous && *Stride1 != 1)
       return false;
 
     if (*Size1 > kMaxVectorElems)
@@ -230,7 +202,7 @@ static bool decode2DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
     FlattenStride = *Stride1;
     NumElems = static_cast<unsigned>(*Size1);
   } else {
-    if (*Stride0 != 1)
+    if (RequireContiguous && *Stride0 != 1)
       return false;
 
     if (*Size0 > kMaxVectorElems)
@@ -244,32 +216,19 @@ static bool decode2DMemRef(Value *V, unsigned ArgIndex, DecodedMemRef &MR) {
   MR.MemRefValue = V;
   MR.ArgIndex = ArgIndex;
   MR.Rank = 2;
-
   MR.Size0 = *Size0;
   MR.Size1 = *Size1;
-
   MR.Stride0 = *Stride0;
   MR.Stride1 = *Stride1;
-
   MR.FlattenDim = FlattenDim;
   MR.FlattenStride = FlattenStride;
-
   MR.NumElems = NumElems;
   return true;
 }
 
 static bool hasSameLogicalShape(const DecodedMemRef &A,
                                 const DecodedMemRef &B) {
-  if (A.Rank != B.Rank)
-    return false;
-
-  if (A.Size0 != B.Size0)
-    return false;
-
-  if (A.Size1 != B.Size1)
-    return false;
-
-  return true;
+  return A.Rank == B.Rank && A.Size0 == B.Size0 && A.Size1 == B.Size1;
 }
 
 static bool validateSameShapeAndLength(ArrayRef<DecodedMemRef> MemRefs,
@@ -278,15 +237,11 @@ static bool validateSameShapeAndLength(ArrayRef<DecodedMemRef> MemRefs,
     return false;
 
   const DecodedMemRef &First = MemRefs.front();
-
   if (First.NumElems == 0)
     return false;
 
   for (const DecodedMemRef &MR : MemRefs) {
-    if (!hasSameLogicalShape(First, MR))
-      return false;
-
-    if (MR.NumElems != First.NumElems)
+    if (!hasSameLogicalShape(First, MR) || MR.NumElems != First.NumElems)
       return false;
   }
 
@@ -301,17 +256,15 @@ static Value *emitExtractValue(IRBuilder<> &B, Value *Agg,
 
 static Value *emitUpdatedOffset(IRBuilder<> &B, const DecodedMemRef &MR,
                                 unsigned TileStart, const Twine &Name) {
-  Value *OldOffset = emitExtractValue(B, MR.MemRefValue, {2},
-                                      Name + ".old.offset");
+  Value *OldOffset =
+      emitExtractValue(B, MR.MemRefValue, {2}, Name + ".old.offset");
 
   if (TileStart == 0)
     return OldOffset;
 
   auto *OffsetTy = cast<IntegerType>(OldOffset->getType());
-
   uint64_t DeltaElems = static_cast<uint64_t>(TileStart) * MR.FlattenStride;
   Value *Delta = ConstantInt::get(OffsetTy, DeltaElems);
-
   return B.CreateAdd(OldOffset, Delta, Name + ".new.offset");
 }
 
@@ -345,7 +298,6 @@ memref_lowering::getTargetFP16VectorLanes(const TargetTransformInfo &TTI) {
     return 0;
 
   uint64_t Lanes = FixedBits / kFP16Bits;
-
   if (Lanes == 0 || Lanes > kMaxVectorElems)
     return 0;
 
@@ -353,17 +305,17 @@ memref_lowering::getTargetFP16VectorLanes(const TargetTransformInfo &TTI) {
 }
 
 bool memref_lowering::decodeMemRef(Value *V, unsigned ArgIndex,
-                                   DecodedMemRef &MR) {
+                                   DecodedMemRef &MR,
+                                   bool RequireContiguous) {
   unsigned Rank = 0;
-
   if (!getSupportedMemRefRank(V, Rank))
     return false;
 
   if (Rank == 1)
-    return decode1DMemRef(V, ArgIndex, MR);
+    return decode1DMemRef(V, ArgIndex, MR, RequireContiguous);
 
   if (Rank == 2)
-    return decode2DMemRef(V, ArgIndex, MR);
+    return decode2DMemRef(V, ArgIndex, MR, RequireContiguous);
 
   return false;
 }
@@ -371,10 +323,7 @@ bool memref_lowering::decodeMemRef(Value *V, unsigned ArgIndex,
 bool memref_lowering::decodeCallWithOperandRoles(CallInst *CI,
                                                  const OperandRoles &Roles,
                                                  DecodedCall &DC) {
-  if (!CI)
-    return false;
-
-  if (!CI->getType()->isVoidTy())
+  if (!CI || !CI->getType()->isVoidTy())
     return false;
 
   Function *Callee = CI->getCalledFunction();
@@ -382,7 +331,6 @@ bool memref_lowering::decodeCallWithOperandRoles(CallInst *CI,
     return false;
 
   Intrinsic::ID ID = Callee->getIntrinsicID();
-
   if (ID == Intrinsic::not_intrinsic)
     return false;
 
@@ -459,9 +407,6 @@ Value *memref_lowering::buildTiledMemRef(IRBuilder<> &B,
   Tiled = B.CreateInsertValue(Tiled, NewOffset, {2}, Name + ".with.offset");
 
   Value *NewSize = ConstantInt::get(SizeElemTy, TileSize);
-
-  // Only the flattened dimension changes. The other dimension, if present,
-  // remains size 1.
   Tiled = B.CreateInsertValue(Tiled, NewSize, {3, MR.FlattenDim},
                               Name + ".with.size");
 
