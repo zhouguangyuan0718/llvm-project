@@ -18,6 +18,17 @@
 namespace llvm {
 namespace memref_lowering {
 
+static constexpr unsigned InvalidArgIndex = ~0u;
+
+struct ReduceAddOperandRole {
+  unsigned InputArgIndex = InvalidArgIndex;
+  unsigned OutputArgIndex = InvalidArgIndex;
+
+  // If true, OutputArgIndex names a rank-1 memref with one element.
+  // If false, OutputArgIndex names a pointer to a scalar half value.
+  bool OutputIsMemRef = false;
+};
+
 bool getIntrinsicOperandRoles(Intrinsic::ID ID, CallInst *CI,
                               OperandRoles &Roles);
 
@@ -25,6 +36,9 @@ bool emitVectorIntrinsicSemantics(IRBuilder<> &B, Intrinsic::ID ID,
                                   ArrayRef<Value *> InputVecs,
                                   unsigned NumOutputs,
                                   SmallVectorImpl<Value *> &OutputVecs);
+
+bool getReduceAddOperandRole(Intrinsic::ID ID, CallInst *CI,
+                             ReduceAddOperandRole &Role);
 
 } // namespace memref_lowering
 } // namespace llvm
