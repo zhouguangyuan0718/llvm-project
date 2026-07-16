@@ -27,14 +27,73 @@ namespace {
 struct DecodedReduceAddCall {
   CallInst *CI = nullptr;
   DecodedMemRef Input;
-  bool HasOutputArg = false;
-  bool OutputIsMemRef = false;
-  Value *OutputPtr = nullptr;
-  DecodedMemRef OutputMemRef;
+  DecodedMemRef Output;
+  unsigned ReduceDim = 0;
+  uint64_t ReduceLength = 0;
+  uint64_t ReduceStride = 1;
 };
 
+static bool isOneElementOutput(const DecodedMemRef &Output) {
+  if (Output.NumElems != 1)
+    return false;
+
+  if (Output.Rank == 1)
+    return Output.Size0 == 1;
+
+  if (Output.Rank == 2)
+    return Output.Size0 == 1 && Output.Size1 == 1;
+
+  return false;
+}
+
+static bool decodeReductionShape(const DecodedMemRef &Input,
+                                 const DecodedMemRef &Output,
+                                 unsigned ReduceDim,
+                                 uint64_t &ReduceLength,
+                                 uint64_t &ReduceStride) {
+  if (!isOneElementOutput(Output))
+    return false;
+
+  if (Output.Rank > Input.Rank)
+    return false;
+
+  if (Input.Rank - Output.Rank > 1)
+    return false;
+
+  if (Input.Rank == 1) {
+    if (ReduceDim != 0)
+      return false;
+
+    if (Output.Rank != 1)
+      return false;
+
+    ReduceLength = Input.Size0;
+    ReduceStride = Input.Stride0;
+    return true;
+  }
+
+  if (Input.Rank != 2 || ReduceDim > 1)
+    return false;
+
+  if (Output.Rank != 1 && Output.Rank != 2)
+    return false;
+
+  uint64_t ReducedSize = ReduceDim == 0 ? Input.Size0 : Input.Size1;
+  uint64_t RemainingSize = ReduceDim == 0 ? Input.Size1 : Input.Size0;
+
+  // The output contains one element, so the non-reduced dimension must have
+  // size one. This also rejects reducing the unit dimension of [1, N] or
+  // [N, 1], except for the [1, 1] case.
+  if (RemainingSize != 1)
+    return false;
+
+  ReduceLength = ReducedSize;
+  ReduceStride = ReduceDim == 0 ? Input.Stride0 : Input.Stride1;
+  return true;
+}
+
 static bool decodeReduceAddCandidate(CallInst *CI, DecodedReduceAddCall &DC) {
-  if (!CI)
+  if (!CI || !CI->getType()->isVoidTy())
     return false;
 
   Function *Callee = CI->getCalledFunction();
@@ -42,76 +101,62 @@ static bool decodeReduceAddCandidate(CallInst *CI, DecodedReduceAddCall &DC) {
     return false;
 
   Intrinsic::ID ID = Callee->getIntrinsicID();
-  if (ID == Intrinsic::not_intrinsic)
+  if (!isMemRefReduceAddIntrinsic(ID))
     return false;
 
-  ReduceAddOperandRole Role;
-  if (!getReduceAddOperandRole(ID, CI, Role))
+  // Fixed intrinsic ABI:
+  //   arg0: input memref
+  //   arg1: output memref
+  //   arg2: reduced dimension
+  if (CI->arg_size() != 3)
     return false;
 
-  if (Role.InputArgIndex == InvalidArgIndex ||
-      Role.InputArgIndex >= CI->arg_size())
+  DecodedMemRef Input;
+  if (!decodeMemRef(CI->getArgOperand(0), 0, Input))
     return false;
 
-  DecodedMemRef InputMR;
-  if (!decodeMemRef(CI->getArgOperand(Role.InputArgIndex),
-                    Role.InputArgIndex, InputMR))
+  DecodedMemRef Output;
+  if (!decodeMemRef(CI->getArgOperand(1), 1, Output))
     return false;
 
-  Type *HalfTy = Type::getHalfTy(CI->getContext());
+  auto *DimCI = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+  if (!DimCI)
+    return false;
+
+  uint64_t DimValue = DimCI->getZExtValue();
+  if (DimValue > 1)
+    return false;
+
+  uint64_t ReduceLength = 0;
+  uint64_t ReduceStride = 1;
+  if (!decodeReductionShape(Input, Output, static_cast<unsigned>(DimValue),
+                            ReduceLength, ReduceStride))
+    return false;
+
+  if (ReduceLength == 0)
+    return false;
 
   DC.CI = CI;
-  DC.Input = InputMR;
-
-  if (Role.OutputArgIndex == InvalidArgIndex) {
-    if (CI->getType() != HalfTy)
-      return false;
-    DC.HasOutputArg = false;
-    return true;
-  }
-
-  if (Role.OutputArgIndex >= CI->arg_size())
-    return false;
-
-  if (!CI->getType()->isVoidTy())
-    return false;
-
-  DC.HasOutputArg = true;
-  DC.OutputIsMemRef = Role.OutputIsMemRef;
-
-  Value *OutputArg = CI->getArgOperand(Role.OutputArgIndex);
-
-  if (Role.OutputIsMemRef) {
-    DecodedMemRef OutputMR;
-    if (!decodeMemRef(OutputArg, Role.OutputArgIndex, OutputMR))
-      return false;
-    if (OutputMR.NumElems != 1)
-      return false;
-    DC.OutputMemRef = OutputMR;
-    return true;
-  }
-
-  if (!OutputArg->getType()->isPointerTy())
-    return false;
-
-  DC.OutputPtr = OutputArg;
+  DC.Input = Input;
+  DC.Output = Output;
+  DC.ReduceDim = static_cast<unsigned>(DimValue);
+  DC.ReduceLength = ReduceLength;
+  DC.ReduceStride = ReduceStride;
   return true;
 }
 
 static Value *emitInputElementPtr(IRBuilder<> &B, Type *ElemTy,
-                                  const DecodedMemRef &MR, Value *Index) {
-  Value *AlignedPtr = emitAlignedPtr(B, MR, "reduce.in.aligned");
-  Value *BaseOffset = emitOffset(B, MR, "reduce.in.offset");
+                                  Value *AlignedPtr, Value *BaseOffset,
+                                  Value *Index, uint64_t ReduceStride) {
+  Value *Delta = Index;
 
-  Value *ElemOffset = nullptr;
-  if (MR.FlattenStride == 1) {
-    ElemOffset = B.CreateAdd(BaseOffset, Index, "reduce.elem.offset");
-  } else {
-    Value *Stride = ConstantInt::get(Index->getType(), MR.FlattenStride);
-    Value *Delta = B.CreateMul(Index, Stride, "reduce.elem.delta");
-    ElemOffset = B.CreateAdd(BaseOffset, Delta, "reduce.elem.offset");
+  if (ReduceStride != 1) {
+    Value *Stride = ConstantInt::get(Index->getType(), ReduceStride);
+    Delta = B.CreateMul(Index, Stride, "reduce.elem.delta");
   }
 
+  Value *ElemOffset =
+      B.CreateAdd(BaseOffset, Delta, "reduce.elem.offset");
   return B.CreateGEP(ElemTy, AlignedPtr, ElemOffset, "reduce.elem.ptr");
 }
 
@@ -125,29 +170,28 @@ static bool lowerOneCall(CallInst *CI) {
   Type *HalfTy = Type::getHalfTy(Ctx);
 
   BasicBlock *PreheaderBB = CI->getParent();
-  BasicBlock *AfterBB = PreheaderBB->splitBasicBlock(CI, "memref.reduce.after");
-  BasicBlock *LoopBB = BasicBlock::Create(Ctx, "memref.reduce.loop", F,
-                                          AfterBB);
-  BasicBlock *ExitBB = BasicBlock::Create(Ctx, "memref.reduce.exit", F,
-                                          AfterBB);
+  BasicBlock *AfterBB =
+      PreheaderBB->splitBasicBlock(CI, "memref.reduce.after");
+  BasicBlock *LoopBB =
+      BasicBlock::Create(Ctx, "memref.reduce.loop", F, AfterBB);
+  BasicBlock *ExitBB =
+      BasicBlock::Create(Ctx, "memref.reduce.exit", F, AfterBB);
 
   PreheaderBB->getTerminator()->eraseFromParent();
 
   IRBuilder<> PreB(PreheaderBB);
-  Value *InputBaseOffset = emitOffset(PreB, DC.Input, "reduce.input.offset");
-  Type *IndexTy = InputBaseOffset->getType();
-  Value *ZeroIndex = ConstantInt::get(IndexTy, 0);
-  Value *EndIndex = ConstantInt::get(IndexTy, DC.Input.NumElems);
-  Value *InitialAcc = ConstantFP::get(HalfTy, 0.0);
+  Value *InputAligned =
+      emitAlignedPtr(PreB, DC.Input, "reduce.input.aligned");
+  Value *InputBaseOffset =
+      emitOffset(PreB, DC.Input, "reduce.input.offset");
+  Value *OutputPtr =
+      emitBaseOffsetPtr(PreB, HalfTy, DC.Output, "reduce.output");
 
-  Value *OutputPtr = nullptr;
-  if (DC.HasOutputArg) {
-    if (DC.OutputIsMemRef)
-      OutputPtr = emitBaseOffsetPtr(PreB, HalfTy, DC.OutputMemRef,
-                                    "reduce.out");
-    else
-      OutputPtr = DC.OutputPtr;
-  }
+  auto *IndexTy = cast<IntegerType>(InputBaseOffset->getType());
+  Value *ZeroIndex = ConstantInt::get(IndexTy, 0);
+  Value *OneIndex = ConstantInt::get(IndexTy, 1);
+  Value *EndIndex = ConstantInt::get(IndexTy, DC.ReduceLength);
+  Value *InitialAcc = ConstantFP::get(HalfTy, 0.0);
 
   PreB.CreateBr(LoopBB);
 
@@ -158,11 +202,12 @@ static bool lowerOneCall(CallInst *CI) {
   IndexPhi->addIncoming(ZeroIndex, PreheaderBB);
   AccPhi->addIncoming(InitialAcc, PreheaderBB);
 
-  Value *ElemPtr = emitInputElementPtr(LoopB, HalfTy, DC.Input, IndexPhi);
+  Value *ElemPtr =
+      emitInputElementPtr(LoopB, HalfTy, InputAligned, InputBaseOffset,
+                          IndexPhi, DC.ReduceStride);
   LoadInst *Elem = LoopB.CreateLoad(HalfTy, ElemPtr, "reduce.elem");
   Value *NextAcc = LoopB.CreateFAdd(AccPhi, Elem, "reduce.next.acc");
-  Value *One = ConstantInt::get(IndexTy, 1);
-  Value *NextIndex = LoopB.CreateAdd(IndexPhi, One, "reduce.next.iv");
+  Value *NextIndex = LoopB.CreateAdd(IndexPhi, OneIndex, "reduce.next.iv");
   Value *Done = LoopB.CreateICmpEQ(NextIndex, EndIndex, "reduce.done");
   LoopB.CreateCondBr(Done, ExitBB, LoopBB);
 
@@ -170,12 +215,9 @@ static bool lowerOneCall(CallInst *CI) {
   AccPhi->addIncoming(NextAcc, LoopBB);
 
   IRBuilder<> ExitB(ExitBB);
-  if (DC.HasOutputArg)
-    ExitB.CreateStore(NextAcc, OutputPtr);
+  ExitB.CreateStore(NextAcc, OutputPtr);
   ExitB.CreateBr(AfterBB);
 
-  if (!DC.HasOutputArg)
-    CI->replaceAllUsesWith(NextAcc);
   CI->eraseFromParent();
   return true;
 }
@@ -184,18 +226,21 @@ static bool lowerOneCall(CallInst *CI) {
 
 PreservedAnalyses llvm::LowerMemRefReduceAddToScalarPass::run(
     Function &F, FunctionAnalysisManager &AM) {
+  (void)AM;
+
   SmallVector<CallInst *, 16> Worklist;
 
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI)
       continue;
+
     Function *Callee = CI->getCalledFunction();
     if (!Callee)
       continue;
-    if (Callee->getIntrinsicID() == Intrinsic::not_intrinsic)
-      continue;
-    Worklist.push_back(CI);
+
+    if (isMemRefReduceAddIntrinsic(Callee->getIntrinsicID()))
+      Worklist.push_back(CI);
   }
 
   bool Changed = false;
