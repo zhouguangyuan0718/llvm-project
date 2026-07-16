@@ -62,29 +62,14 @@ bool memref_lowering::emitVectorIntrinsicSemantics(
 
 bool memref_lowering::getMemRefReductionKind(Intrinsic::ID ID,
                                               MemRefReductionKind &Kind) {
-  (void)ID;
-  (void)Kind;
-
-  // Map the real reduction intrinsic IDs here.
-  //
-  // Example:
-  //
-  // switch (ID) {
-  // case Intrinsic::your_memref_reduce_add:
-  //   Kind = MemRefReductionKind::Add;
-  //   return true;
-  // case Intrinsic::your_memref_reduce_mul:
-  //   Kind = MemRefReductionKind::Mul;
-  //   return true;
-  // case Intrinsic::your_memref_reduce_max:
-  //   Kind = MemRefReductionKind::Maximum;
-  //   return true;
-  // case Intrinsic::your_memref_reduce_min:
-  //   Kind = MemRefReductionKind::Minimum;
-  //   return true;
-  // default:
-  //   return false;
-  // }
-
-  return false;
+  switch (ID) {
+  case Intrinsic::memref_reduce_add:
+    Kind = MemRefReductionKind::Add;
+    return true;
+  case Intrinsic::memref_reduce_max:
+    Kind = MemRefReductionKind::Maximum;
+    return true;
+  default:
+    return false;
+  }
 }
