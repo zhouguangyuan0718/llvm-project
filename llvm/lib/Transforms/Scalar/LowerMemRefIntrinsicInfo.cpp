@@ -80,3 +80,55 @@ bool memref_lowering::emitVectorIntrinsicSemantics(
 
   return false;
 }
+
+bool memref_lowering::getReduceAddOperandRole(Intrinsic::ID ID, CallInst *CI,
+                                              ReduceAddOperandRole &Role) {
+  (void)ID;
+  (void)CI;
+  (void)Role;
+
+  // Fill this in for the real reduce-add intrinsic.
+  //
+  // Supported output forms:
+  //   1. OutputArgIndex == InvalidArgIndex and the intrinsic returns half.
+  //   2. OutputArgIndex names a ptr to a scalar half value.
+  //   3. OutputArgIndex names a one-element memref if OutputIsMemRef is true.
+  //
+  // Example, returning scalar:
+  //
+  // switch (ID) {
+  // case Intrinsic::your_memref_reduce_add:
+  //   Role.InputArgIndex = 0;
+  //   Role.OutputArgIndex = InvalidArgIndex;
+  //   Role.OutputIsMemRef = false;
+  //   return true;
+  // default:
+  //   return false;
+  // }
+  //
+  // Example, storing scalar through ptr:
+  //
+  // switch (ID) {
+  // case Intrinsic::your_memref_reduce_add:
+  //   Role.InputArgIndex = 0;
+  //   Role.OutputArgIndex = 1;
+  //   Role.OutputIsMemRef = false;
+  //   return true;
+  // default:
+  //   return false;
+  // }
+  //
+  // Example, storing scalar through one-element memref:
+  //
+  // switch (ID) {
+  // case Intrinsic::your_memref_reduce_add:
+  //   Role.InputArgIndex = 0;
+  //   Role.OutputArgIndex = 1;
+  //   Role.OutputIsMemRef = true;
+  //   return true;
+  // default:
+  //   return false;
+  // }
+
+  return false;
+}
