@@ -18,6 +18,13 @@
 namespace llvm {
 namespace memref_lowering {
 
+enum class MemRefReductionKind {
+  Add,
+  Mul,
+  Maximum,
+  Minimum,
+};
+
 bool getIntrinsicOperandRoles(Intrinsic::ID ID, CallInst *CI,
                               OperandRoles &Roles);
 
@@ -26,7 +33,7 @@ bool emitVectorIntrinsicSemantics(IRBuilder<> &B, Intrinsic::ID ID,
                                   unsigned NumOutputs,
                                   SmallVectorImpl<Value *> &OutputVecs);
 
-bool isMemRefReduceAddIntrinsic(Intrinsic::ID ID);
+bool getMemRefReductionKind(Intrinsic::ID ID, MemRefReductionKind &Kind);
 
 } // namespace memref_lowering
 } // namespace llvm
