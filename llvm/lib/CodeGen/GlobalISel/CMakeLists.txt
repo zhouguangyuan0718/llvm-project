@@ -1,3 +1,7 @@
+# PatternGen's public pass interface carries the CoreDSL instruction
+# description used by the standalone tool.
+include_directories(${LLVM_MAIN_SRC_DIR})
+
 add_llvm_component_library(LLVMGlobalISel
   CSEInfo.cpp
   GISelValueTracking.cpp
@@ -15,6 +19,7 @@ add_llvm_component_library(LLVMGlobalISel
   IRTranslator.cpp
   InlineAsmLowering.cpp
   InstructionSelect.cpp
+  PatternGen.cpp
   InstructionSelector.cpp
   LegalityPredicates.cpp
   LegalizeMutations.cpp
