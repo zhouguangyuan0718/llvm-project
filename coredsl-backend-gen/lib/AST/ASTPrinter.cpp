@@ -57,7 +57,41 @@ void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
     OS << ')';
     return;
   }
+  case Expr::Kind::Slice: {
+    const auto &Slice = static_cast<const SliceExpr &>(Expression);
+    OS << "(slice ";
+    printExpr(*Slice.Base, OS);
+    OS << ' ';
+    printExpr(*Slice.Begin, OS);
+    OS << ' ';
+    printExpr(*Slice.End, OS);
+    OS << ')';
+    return;
   }
+  case Expr::Kind::Cast: {
+    const auto &Cast = static_cast<const CastExpr &>(Expression);
+    OS << "(cast ";
+    OS << Cast.Type.Name;
+    if (Cast.Type.Width) {
+      OS << '<';
+      printExpr(*Cast.Type.Width, OS);
+      OS << '>';
+    }
+    OS << ' ';
+    printExpr(*Cast.Operand, OS);
+    OS << ')';
+    return;
+  }
+  }
+}
+
+void printType(const TypeRef &Type, llvm::raw_ostream &OS) {
+  OS << Type.Name;
+  if (!Type.Width)
+    return;
+  OS << '<';
+  printExpr(*Type.Width, OS);
+  OS << '>';
 }
 
 void printStmt(const Stmt &Statement, llvm::raw_ostream &OS, unsigned Depth) {
@@ -89,6 +123,18 @@ void printStmt(const Stmt &Statement, llvm::raw_ostream &OS, unsigned Depth) {
     }
     return;
   }
+  case Stmt::Kind::Decl: {
+    const auto &Decl = static_cast<const DeclStmt &>(Statement);
+    OS << "decl ";
+    printType(Decl.Type, OS);
+    OS << ' ' << Decl.Name;
+    if (Decl.Initializer) {
+      OS << " = ";
+      printExpr(*Decl.Initializer, OS);
+    }
+    OS << '\n';
+    return;
+  }
   case Stmt::Kind::Empty:
     OS << "empty\n";
     return;
@@ -115,15 +161,33 @@ void printAST(const InstructionSetDecl &Decl, llvm::raw_ostream &OS) {
   for (const InstructionDecl &Instruction : Decl.Instructions) {
     indent(OS, 2);
     OS << "instruction " << Instruction.Name << '\n';
+    for (const OperandDecl &Operand : Instruction.Operands) {
+      indent(OS, 3);
+      OS << "operand ";
+      printType(Operand.Type, OS);
+      OS << ' ' << Operand.Name << '\n';
+    }
     if (Instruction.Encoding) {
       indent(OS, 3);
       OS << "encoding ";
       printTokenSequence(*Instruction.Encoding, OS);
       OS << '\n';
     }
-    if (Instruction.HasAssembly) {
+    if (!Instruction.Assembly.empty()) {
       indent(OS, 3);
-      OS << "assembly " << Instruction.Assembly << '\n';
+      OS << "assembly ";
+      if (Instruction.Assembly.size() == 1) {
+        OS << Instruction.Assembly.front();
+      } else {
+        OS << '{';
+        for (size_t I = 0; I < Instruction.Assembly.size(); ++I) {
+          if (I != 0)
+            OS << ", ";
+          OS << Instruction.Assembly[I];
+        }
+        OS << '}';
+      }
+      OS << '\n';
     }
     if (Instruction.Behavior) {
       indent(OS, 3);

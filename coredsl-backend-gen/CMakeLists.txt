@@ -60,4 +60,10 @@ if(BUILD_TESTING)
       -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/unsupported-member.core_desc
       -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/unsupported-member.err
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  foreach(Example IN ITEMS ExampleRV32 ExampleRV32K ExampleRV64)
+    add_test(
+      NAME coredsl-parser-${Example}
+      COMMAND coredsl-backend-gen
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/${Example}.core_desc)
+  endforeach()
 endif()

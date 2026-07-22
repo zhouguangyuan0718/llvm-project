@@ -19,7 +19,9 @@ public:
     Unary,
     Binary,
     Conditional,
-    Index
+    Index,
+    Slice,
+    Cast
   };
 
   explicit Expr(Kind K, SourceRange Range) : K(K), Range(std::move(Range)) {}
@@ -92,9 +94,35 @@ public:
   std::unique_ptr<Expr> Index;
 };
 
+class SliceExpr final : public Expr {
+public:
+  SliceExpr(SourceRange Range, std::unique_ptr<Expr> Base,
+            std::unique_ptr<Expr> Begin, std::unique_ptr<Expr> End)
+      : Expr(Kind::Slice, std::move(Range)), Base(std::move(Base)),
+        Begin(std::move(Begin)), End(std::move(End)) {}
+  std::unique_ptr<Expr> Base;
+  std::unique_ptr<Expr> Begin;
+  std::unique_ptr<Expr> End;
+};
+
+struct TypeRef {
+  SourceRange Range;
+  std::string Name;
+  std::unique_ptr<Expr> Width;
+};
+
+class CastExpr final : public Expr {
+public:
+  CastExpr(SourceRange Range, TypeRef Type, std::unique_ptr<Expr> Operand)
+      : Expr(Kind::Cast, std::move(Range)), Type(std::move(Type)),
+        Operand(std::move(Operand)) {}
+  TypeRef Type;
+  std::unique_ptr<Expr> Operand;
+};
+
 class Stmt {
 public:
-  enum class Kind { Compound, Expr, If, Empty };
+  enum class Kind { Compound, Expr, If, Decl, Empty };
 
   explicit Stmt(Kind K, SourceRange Range) : K(K), Range(std::move(Range)) {}
   virtual ~Stmt() = default;
@@ -133,6 +161,17 @@ public:
   std::unique_ptr<Stmt> Else;
 };
 
+class DeclStmt final : public Stmt {
+public:
+  DeclStmt(SourceRange Range, TypeRef Type, std::string Name,
+           std::unique_ptr<Expr> Initializer)
+      : Stmt(Kind::Decl, std::move(Range)), Type(std::move(Type)),
+        Name(std::move(Name)), Initializer(std::move(Initializer)) {}
+  TypeRef Type;
+  std::string Name;
+  std::unique_ptr<Expr> Initializer;
+};
+
 class EmptyStmt final : public Stmt {
 public:
   explicit EmptyStmt(SourceRange Range) : Stmt(Kind::Empty, std::move(Range)) {}
@@ -143,12 +182,18 @@ struct TokenSequence {
   std::vector<Token> Tokens;
 };
 
+struct OperandDecl {
+  SourceRange Range;
+  TypeRef Type;
+  std::string Name;
+};
+
 struct InstructionDecl {
   SourceRange Range;
   std::string Name;
+  std::vector<OperandDecl> Operands;
   std::unique_ptr<TokenSequence> Encoding;
-  std::string Assembly;
-  bool HasAssembly = false;
+  std::vector<std::string> Assembly;
   std::unique_ptr<Stmt> Behavior;
 };
 
