@@ -29,11 +29,15 @@ private:
   void synchronizeStatement();
 
   std::unique_ptr<InstructionDecl> parseInstruction();
+  std::vector<OperandDecl> parseOperands();
+  bool parseAssembly(InstructionDecl &Instruction);
   TokenSequence parseRawMemberValue();
   std::unique_ptr<Stmt> parseStatement();
   std::unique_ptr<CompoundStmt> parseCompoundStatement();
   std::unique_ptr<Stmt> parseIfStatement();
+  std::unique_ptr<Stmt> parseDeclarationStatement();
 
+  TypeRef parseTypeRef();
   std::unique_ptr<Expr> parseExpression();
   std::unique_ptr<Expr> parseAssignmentExpression();
   std::unique_ptr<Expr> parseConditionalExpression();
@@ -41,6 +45,8 @@ private:
   std::unique_ptr<Expr> parseUnaryExpression();
   std::unique_ptr<Expr> parsePostfixExpression();
   std::unique_ptr<Expr> parsePrimaryExpression();
+  bool looksLikeCast() const;
+  bool looksLikeTypeRef() const;
   int binaryPrecedence(TokenKind Kind) const;
   bool isAssignmentOperator(TokenKind Kind) const;
   SourceRange rangeFrom(const SourceLocation &Begin) const;

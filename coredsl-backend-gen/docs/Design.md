@@ -85,9 +85,10 @@ contents of generated files.
 The first usable implementation accepts the current CoreDSL constructs:
 
 - `InstructionSet` and `instructions`;
-- per-instruction `encoding`, `assembly`, and `behavior`;
+- per-instruction `operands`, `encoding`, `assembly`, and `behavior`;
 - expressions, assignments, conditionals, and the current architectural state
-  access notation such as `X[rd]`.
+  access notation such as `X[rd]`, including typed declarations, casts, and
+  bit slices used by the reference examples.
 
 Current CoreDSL does not specify the complete physical-register and ABI model.
 For this phase, those facts are explicitly supplied by command-line options:
@@ -401,7 +402,9 @@ coredsl-backend-gen/
     Emit/LLVM23/
   templates/llvm23/
   tools/coredsl-backend-gen/Main.cpp
-  examples/Tiny32.core_desc
+  examples/ExampleRV32.core_desc
+  examples/ExampleRV32K.core_desc
+  examples/ExampleRV64.core_desc
   test/Parser/ test/Sema/ test/Model/ test/TableGen/ test/GlobalISel/ test/Golden/
 ```
 

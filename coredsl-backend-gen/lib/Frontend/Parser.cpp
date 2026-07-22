@@ -153,16 +153,16 @@ std::unique_ptr<InstructionDecl> Parser::parseInstruction() {
       Result->Encoding = std::make_unique<TokenSequence>(parseRawMemberValue());
       continue;
     }
+    if (Member == "operands") {
+      if (!Result->Operands.empty())
+        Diags.error(previous().Range.Begin, "duplicate 'operands' member");
+      Result->Operands = parseOperands();
+      continue;
+    }
     if (Member == "assembly") {
-      if (!at(TokenKind::String)) {
-        Diags.error(current().Range.Begin,
-                    "expected string literal after 'assembly'");
-        synchronizeStatement();
-        continue;
-      }
-      Result->Assembly = consume().Text;
-      Result->HasAssembly = true;
-      expect(TokenKind::Semicolon, "';' after assembly string");
+      if (!Result->Assembly.empty())
+        Diags.error(previous().Range.Begin, "duplicate 'assembly' member");
+      parseAssembly(*Result);
       continue;
     }
     if (Member == "behavior") {
@@ -180,6 +180,65 @@ std::unique_ptr<InstructionDecl> Parser::parseInstruction() {
     return nullptr;
   Result->Range = rangeFrom(Begin);
   return Result;
+}
+
+std::vector<OperandDecl> Parser::parseOperands() {
+  std::vector<OperandDecl> Result;
+  if (!expect(TokenKind::LBrace, "'{' after 'operands'"))
+    return Result;
+
+  while (!at(TokenKind::RBrace) && !at(TokenKind::Eof)) {
+    const SourceLocation Begin = current().Range.Begin;
+    if (!looksLikeTypeRef()) {
+      Diags.error(current().Range.Begin, "expected typed operand declaration");
+      synchronizeStatement();
+      continue;
+    }
+    TypeRef Type = parseTypeRef();
+    std::string Name;
+    if (!expectIdentifier(Name, "operand name")) {
+      synchronizeStatement();
+      continue;
+    }
+    if (!expect(TokenKind::Semicolon, "';' after operand declaration")) {
+      synchronizeStatement();
+      continue;
+    }
+    Result.push_back({rangeFrom(Begin), std::move(Type), std::move(Name)});
+  }
+  expect(TokenKind::RBrace, "'}' after operands block");
+  consumeIf(TokenKind::Semicolon);
+  return Result;
+}
+
+bool Parser::parseAssembly(InstructionDecl &Instruction) {
+  if (at(TokenKind::String)) {
+    Instruction.Assembly.push_back(consume().Text);
+    return expect(TokenKind::Semicolon, "';' after assembly string");
+  }
+  if (!consumeIf(TokenKind::LBrace)) {
+    Diags.error(current().Range.Begin,
+                "expected string or '{' after 'assembly'");
+    synchronizeStatement();
+    return false;
+  }
+  if (!at(TokenKind::String)) {
+    Diags.error(current().Range.Begin,
+                "expected string literal in assembly declaration");
+    synchronizeStatement();
+    return false;
+  }
+  do {
+    if (!at(TokenKind::String)) {
+      Diags.error(current().Range.Begin,
+                  "expected string literal in assembly declaration");
+      return false;
+    }
+    Instruction.Assembly.push_back(consume().Text);
+  } while (consumeIf(TokenKind::Comma));
+  if (!expect(TokenKind::RBrace, "'}' after assembly declaration"))
+    return false;
+  return expect(TokenKind::Semicolon, "';' after assembly declaration");
 }
 
 TokenSequence Parser::parseRawMemberValue() {
@@ -232,6 +291,8 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
     return parseCompoundStatement();
   if (atIdentifier("if"))
     return parseIfStatement();
+  if (looksLikeTypeRef())
+    return parseDeclarationStatement();
   if (at(TokenKind::Semicolon)) {
     const SourceLocation Begin = consume().Range.Begin;
     return std::make_unique<EmptyStmt>(rangeFrom(Begin));
@@ -244,6 +305,38 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
   if (!expect(TokenKind::Semicolon, "';' after expression"))
     return nullptr;
   return std::make_unique<ExprStmt>(rangeFrom(Begin), std::move(Expression));
+}
+
+std::unique_ptr<Stmt> Parser::parseDeclarationStatement() {
+  const SourceLocation Begin = current().Range.Begin;
+  TypeRef Type = parseTypeRef();
+  std::string Name;
+  if (!expectIdentifier(Name, "declaration name"))
+    return nullptr;
+
+  std::unique_ptr<Expr> Initializer;
+  if (consumeIf(TokenKind::Equal)) {
+    Initializer = parseExpression();
+    if (!Initializer)
+      return nullptr;
+  }
+  if (!expect(TokenKind::Semicolon, "';' after declaration"))
+    return nullptr;
+  return std::make_unique<DeclStmt>(rangeFrom(Begin), std::move(Type),
+                                    std::move(Name), std::move(Initializer));
+}
+
+TypeRef Parser::parseTypeRef() {
+  TypeRef Result;
+  Result.Range.Begin = current().Range.Begin;
+  expectIdentifier(Result.Name, "type name");
+  if (consumeIf(TokenKind::Less)) {
+    Result.Width = parsePrimaryExpression();
+    if (!Result.Width || !expect(TokenKind::Greater, "'>' after type width"))
+      return Result;
+  }
+  Result.Range.End = previous().Range.End;
+  return Result;
 }
 
 std::unique_ptr<CompoundStmt> Parser::parseCompoundStatement() {
@@ -332,6 +425,17 @@ std::unique_ptr<Expr> Parser::parseBinaryExpression(unsigned MinPrecedence) {
 }
 
 std::unique_ptr<Expr> Parser::parseUnaryExpression() {
+  if (looksLikeCast()) {
+    const SourceLocation Begin = consume().Range.Begin;
+    TypeRef Type = parseTypeRef();
+    if (!expect(TokenKind::RParen, "')' after cast type"))
+      return nullptr;
+    std::unique_ptr<Expr> Operand = parseUnaryExpression();
+    if (!Operand)
+      return nullptr;
+    return std::make_unique<CastExpr>(rangeFrom(Begin), std::move(Type),
+                                      std::move(Operand));
+  }
   switch (current().Kind) {
   case TokenKind::Plus:
   case TokenKind::Minus:
@@ -359,7 +463,18 @@ std::unique_ptr<Expr> Parser::parsePostfixExpression() {
     const SourceLocation Begin = Result->range().Begin;
     if (consumeIf(TokenKind::LBracket)) {
       std::unique_ptr<Expr> Index = parseExpression();
-      if (!Index || !expect(TokenKind::RBracket, "']' after index expression"))
+      if (!Index)
+        return nullptr;
+      if (consumeIf(TokenKind::Colon)) {
+        std::unique_ptr<Expr> End = parseExpression();
+        if (!End || !expect(TokenKind::RBracket, "']' after slice expression"))
+          return nullptr;
+        Result =
+            std::make_unique<SliceExpr>(rangeFrom(Begin), std::move(Result),
+                                        std::move(Index), std::move(End));
+        continue;
+      }
+      if (!expect(TokenKind::RBracket, "']' after index expression"))
         return nullptr;
       Result = std::make_unique<IndexExpr>(rangeFrom(Begin), std::move(Result),
                                            std::move(Index));
@@ -373,6 +488,38 @@ std::unique_ptr<Expr> Parser::parsePostfixExpression() {
     }
     return Result;
   }
+}
+
+bool Parser::looksLikeCast() const {
+  if (!at(TokenKind::LParen) || Position + 2 >= Tokens.size() ||
+      Tokens[Position + 1].Kind != TokenKind::Identifier)
+    return false;
+  if (Tokens[Position + 2].Kind == TokenKind::RParen)
+    return Tokens[Position + 1].Text == "signed" ||
+           Tokens[Position + 1].Text == "unsigned";
+  if (Tokens[Position + 2].Kind != TokenKind::Less)
+    return false;
+
+  size_t Cursor = Position + 3;
+  unsigned Depth = 1;
+  while (Cursor < Tokens.size()) {
+    if (Tokens[Cursor].Kind == TokenKind::Less)
+      ++Depth;
+    else if (Tokens[Cursor].Kind == TokenKind::Greater && --Depth == 0)
+      return Cursor + 1 < Tokens.size() &&
+             Tokens[Cursor + 1].Kind == TokenKind::RParen;
+    ++Cursor;
+  }
+  return false;
+}
+
+bool Parser::looksLikeTypeRef() const {
+  if (!at(TokenKind::Identifier) || Position + 1 >= Tokens.size())
+    return false;
+  if (Tokens[Position + 1].Kind == TokenKind::Less)
+    return true;
+  return (current().Text == "signed" || current().Text == "unsigned") &&
+         Tokens[Position + 1].Kind == TokenKind::Identifier;
 }
 
 std::unique_ptr<Expr> Parser::parsePrimaryExpression() {
