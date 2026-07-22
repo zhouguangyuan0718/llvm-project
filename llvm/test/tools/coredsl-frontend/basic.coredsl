@@ -1,0 +1,30 @@
+// RUN: coredsl-frontend %s | FileCheck %s
+
+InstructionSet TinyISA {
+  instructions {
+    ADD {
+      operands: {
+        unsigned<5> rd [[inout]];
+        unsigned<5> rs1 [[in]];
+        unsigned<5> rs2 [[in]];
+      }
+      encoding: 7'b0000000 :: rs2[4:0] :: rs1[4:0] :: 3'b000 :: rd[4:0] :: 7'b0110011;
+      assembly: "add {name(rd)}, {name(rs1)}, {name(rs2)}";
+      behavior: {
+        unsigned<XLEN> sum = X[rs1] + X[rs2];
+        if (rd != 0)
+          X[rd] = sum;
+      }
+    }
+  }
+}
+
+// CHECK: coredsl.module @TinyISA {
+// CHECK: coredsl.instruction @ADD {
+// CHECK: operand @rd : unsigned<5> attributes [inout]
+// CHECK: operand @rs1 : unsigned<5> attributes [in]
+// CHECK: encoding width 32 [const 7'b0000000, field rs2[4:0], field rs1[4:0], const 3'b000, field rd[4:0], const 7'b0110011]
+// CHECK: assembly "add {name(rd)}, {name(rs1)}, {name(rs2)}"
+// CHECK: let @sum : unsigned<XLEN> = binary "+"(subscript(symbol @X, symbol @rs1), subscript(symbol @X, symbol @rs2))
+// CHECK: if binary "!="(symbol @rd, const 0) {
+// CHECK: expr binary "="(subscript(symbol @X, symbol @rd), symbol @sum)

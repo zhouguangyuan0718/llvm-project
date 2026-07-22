@@ -1,0 +1,10 @@
+// RUN: not coredsl-frontend %s 2>&1 | FileCheck %s
+
+BAD {
+  encoding: rd[4:0] :: 27'b0;
+  behavior: {
+    X[rd] = missing_value;
+  }
+}
+
+// CHECK: error: use of undefined symbol 'missing_value'
