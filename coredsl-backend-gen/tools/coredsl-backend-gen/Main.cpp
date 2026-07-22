@@ -2,14 +2,16 @@
 #include "coredsl/Diagnostics.h"
 #include "coredsl/Parser.h"
 
-#include <fstream>
-#include <iostream>
-#include <sstream>
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <string>
+#include <utility>
 
 namespace {
 
-void printUsage(std::ostream &OS) {
+void printUsage(llvm::raw_ostream &OS) {
   OS << "usage: coredsl-backend-gen [--dump-ast] <input.core_desc>\n";
 }
 
@@ -25,39 +27,41 @@ int main(int argc, char **argv) {
       continue;
     }
     if (Argument == "--help" || Argument == "-h") {
-      printUsage(std::cout);
+      printUsage(llvm::outs());
       return 0;
     }
     if (!InputPath.empty()) {
-      std::cerr << "error: expected exactly one input file\n";
-      printUsage(std::cerr);
+      llvm::errs() << "error: expected exactly one input file\n";
+      printUsage(llvm::errs());
       return 1;
     }
     InputPath = Argument;
   }
 
   if (InputPath.empty()) {
-    printUsage(std::cerr);
+    printUsage(llvm::errs());
     return 1;
   }
 
-  std::ifstream Input(InputPath);
-  if (!Input) {
-    std::cerr << "error: cannot open '" << InputPath << "'\n";
+  auto BufferOrError = llvm::MemoryBuffer::getFileOrSTDIN(InputPath);
+  if (!BufferOrError) {
+    llvm::errs() << "error: cannot open '" << InputPath
+                 << "': " << BufferOrError.getError().message() << '\n';
     return 1;
   }
-  std::stringstream Buffer;
-  Buffer << Input.rdbuf();
 
-  coredsl::DiagnosticEngine Diags;
-  coredsl::Parser Parser(InputPath, Buffer.str(), Diags);
+  llvm::SourceMgr Sources;
+  const unsigned MainBuffer =
+      Sources.AddNewSourceBuffer(std::move(*BufferOrError), llvm::SMLoc());
+  coredsl::DiagnosticEngine Diags(Sources);
+  coredsl::Parser Parser(Sources.getMemoryBuffer(MainBuffer)->getBuffer(),
+                         Diags);
   std::unique_ptr<coredsl::InstructionSetDecl> Decl =
       Parser.parseInstructionSet();
-  Diags.print(std::cerr);
   if (!Decl || Diags.hasError())
     return 1;
 
   if (DumpAST)
-    coredsl::printAST(*Decl, std::cout);
+    coredsl::printAST(*Decl, llvm::outs());
   return 0;
 }

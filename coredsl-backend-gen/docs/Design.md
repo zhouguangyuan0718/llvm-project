@@ -19,7 +19,8 @@ class, and one register bank.
 
 ## Goals
 
-- Parse current CoreDSL independently of LLVM libraries and passes.
+- Parse current CoreDSL without LLVM IR, target, CodeGen, or pass-pipeline
+  dependencies; LLVM Support is available for frontend infrastructure.
 - Preserve source locations and emit deterministic diagnostics.
 - Produce a typed, target-neutral IR (`TargetModel` and `SemanticGraph`) that
   is stable across LLVM versions.
@@ -49,8 +50,10 @@ class, and one register bank.
    reparses CoreDSL or maintains its own inferred view of the target.
 3. **Explicit uncertainty.** A fact is either declared, mechanically derived,
    supplied by a documented MVP default, or rejected.  It is never guessed.
-4. **LLVM isolation.** The frontend, semantic analysis, and IR do not include
-   or link LLVM.  LLVM 23 details live only under `Emit/LLVM23`.
+4. **LLVM isolation.** The frontend may use LLVM Support facilities such as
+   `MemoryBuffer`, `SourceMgr`, `SMLoc`, `raw_ostream`, and command-line/file
+   utilities.  It must not use LLVM IR, TargetMachine, CodeGen, or pass
+   infrastructure.  LLVM 23 backend details live only under `Emit/LLVM23`.
 5. **Structured generation.** TD files are emitted from typed objects, not by
    concatenating text in the parser.  Fixed C++ boilerplate may use templates.
 6. **Determinism.** Diagnostics, model dumps, and generated files have stable
@@ -200,7 +203,8 @@ AST/      Decl, Stmt, Expr
 Sema/     RegisterSema, EncodingSema, BehaviorSema, TargetVerifier
 ```
 
-It has no LLVM dependency.  Its AST retains source locations; semantic analysis
+It links only `LLVMSupport` for source buffers, source locations, diagnostics,
+and output.  Its AST retains `SMLoc`-based source ranges; semantic analysis
 converts it to the canonical IR and performs the following checks:
 
 - every field referenced by assembly or behavior exists;
@@ -408,8 +412,9 @@ CoreDSL.  The acceptance command is:
 coredsl-backend-gen example.core_desc --dump-ast
 ```
 
-No LLVM linkage, passes, TD output, or source-tree integration is allowed in
-this milestone.
+No LLVM IR/Target/CodeGen linkage, passes, TD output, or source-tree backend
+integration is allowed in this milestone.  `LLVMSupport` is intentionally used
+for frontend infrastructure.
 
 ### Milestone 2: instruction and target model
 

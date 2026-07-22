@@ -123,8 +123,8 @@ const char *tokenKindName(TokenKind Kind) {
   return "unknown token";
 }
 
-Lexer::Lexer(std::string FileName, std::string Input, DiagnosticEngine &Diags)
-    : FileName(std::move(FileName)), Input(std::move(Input)), Diags(Diags) {}
+Lexer::Lexer(llvm::StringRef Input, DiagnosticEngine &Diags)
+    : Input(Input), Diags(Diags), Cursor(Input.begin()), End(Input.end()) {}
 
 std::vector<Token> Lexer::lex() {
   std::vector<Token> Tokens;
@@ -149,25 +149,18 @@ std::vector<Token> Lexer::lex() {
   return Tokens;
 }
 
-bool Lexer::atEnd() const { return Offset == Input.size(); }
+bool Lexer::atEnd() const { return Cursor == End; }
 
 char Lexer::peek(unsigned OffsetFromCurrent) const {
-  const size_t Index = Offset + OffsetFromCurrent;
-  return Index < Input.size() ? Input[Index] : '\0';
+  const char *Location = Cursor + OffsetFromCurrent;
+  return Location < End ? *Location : '\0';
 }
 
-char Lexer::consume() {
-  const char C = Input[Offset++];
-  if (C == '\n') {
-    ++Line;
-    Column = 1;
-  } else {
-    ++Column;
-  }
-  return C;
-}
+char Lexer::consume() { return *Cursor++; }
 
-SourceLocation Lexer::location() const { return {FileName, Line, Column}; }
+SourceLocation Lexer::location() const {
+  return llvm::SMLoc::getFromPointer(Cursor);
+}
 
 void Lexer::skipWhitespaceAndComments() {
   while (!atEnd()) {
@@ -217,6 +210,14 @@ Token Lexer::lexInteger() {
   }
   while (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_')
     Text.push_back(consume());
+  if (peek() == '\'') {
+    Text.push_back(consume());
+    if (std::isalpha(static_cast<unsigned char>(peek())))
+      Text.push_back(consume());
+    while (std::isalnum(static_cast<unsigned char>(peek())) || peek() == '_' ||
+           peek() == '?')
+      Text.push_back(consume());
+  }
   return makeToken(TokenKind::Integer, std::move(Text), Begin);
 }
 

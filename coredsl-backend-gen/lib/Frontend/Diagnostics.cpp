@@ -1,35 +1,25 @@
 #include "coredsl/Diagnostics.h"
 
-#include <ostream>
-#include <utility>
+#include "llvm/Support/raw_ostream.h"
 
 namespace coredsl {
 
-void DiagnosticEngine::error(const SourceLocation &Location,
-                             std::string Message) {
-  report(DiagnosticLevel::Error, Location, std::move(Message));
+void DiagnosticEngine::error(SourceLocation Location,
+                             const llvm::Twine &Message) {
+  report(llvm::SourceMgr::DK_Error, Location, Message);
 }
 
-void DiagnosticEngine::warning(const SourceLocation &Location,
-                               std::string Message) {
-  report(DiagnosticLevel::Warning, Location, std::move(Message));
+void DiagnosticEngine::warning(SourceLocation Location,
+                               const llvm::Twine &Message) {
+  report(llvm::SourceMgr::DK_Warning, Location, Message);
 }
 
-void DiagnosticEngine::print(std::ostream &OS) const {
-  for (const Diagnostic &Diagnostic : Diagnostics) {
-    OS << Diagnostic.Location.File << ':' << Diagnostic.Location.Line << ':'
-       << Diagnostic.Location.Column << ": "
-       << (Diagnostic.Level == DiagnosticLevel::Error ? "error" : "warning")
-       << ": " << Diagnostic.Message << '\n';
-  }
-}
-
-void DiagnosticEngine::report(DiagnosticLevel Level,
-                              const SourceLocation &Location,
-                              std::string Message) {
-  if (Level == DiagnosticLevel::Error)
+void DiagnosticEngine::report(llvm::SourceMgr::DiagKind Kind,
+                              SourceLocation Location,
+                              const llvm::Twine &Message) {
+  if (Kind == llvm::SourceMgr::DK_Error)
     ++ErrorCount;
-  Diagnostics.push_back({Level, Location, std::move(Message)});
+  Sources.PrintMessage(llvm::errs(), Location, Kind, Message, {}, {}, false);
 }
 
 } // namespace coredsl

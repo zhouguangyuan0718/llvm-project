@@ -1,32 +1,26 @@
-// Phase-1 parser fixture: current CoreDSL core syntax only.
-InstructionSet Tiny32 extends GenericBase {
+// Syntax follows mathis-s/CoreDSL2LLVM/core_descs/Example.core_desc.
+InstructionSet XExample extends RISCVBase {
   instructions {
-    ADD {
-      encoding {
-        bits[31:26] = 0b000000;
-        bits[25:21] = rs2;
-        bits[20:16] = rs1;
-        bits[15:11] = rd;
-        bits[10:0] = 0b00000000001;
-      }
-      assembly: "add {rd}, {rs1}, {rs2}";
+    CV_SUBINCACC {
+      encoding: 7'b0101000 :: rs2[4:0] :: rs1[4:0] :: 3'b011 :: rd[4:0] :: 7'b0101011;
+      assembly: "{name(rd)}, {name(rs1)}, {name(rs2)}";
       behavior {
-        X[rd] = X[rs1] + X[rs2];
+        if (rd != 0) {
+          X[rd] += X[rs1] - X[rs2] + 1;
+        }
       }
     }
 
-    SELECT {
-      encoding: opcode :: rd :: rs1 :: rs2;
-      assembly: "select {rd}, {rs1}, {rs2}";
+    CV_MAXU {
+      encoding: 7'b0101110 :: rs2[4:0] :: rs1[4:0] :: 3'b011 :: rd[4:0] :: 7'b0101011;
+      assembly: "{name(rd)}, {name(rs1)}, {name(rs2)}";
       behavior: {
         if (X[rs1] == 0) {
-          X[rd] = X[rs2];
+          X[rd] = X[rs1] > X[rs2] ? X[rs1] : X[rs2];
         } else {
-          let value = X[rs1] + X[rs2];
-          X[rd] = value;
+          X[rd] = ~(X[rs1] & X[rs2]);
         }
       }
-      properties: commutable;
     }
   }
 }

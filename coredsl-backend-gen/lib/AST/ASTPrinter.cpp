@@ -1,18 +1,17 @@
 #include "coredsl/ASTPrinter.h"
 
-#include <ostream>
 #include <string>
 
 namespace coredsl {
 
 namespace {
 
-void indent(std::ostream &OS, unsigned Depth) {
+void indent(llvm::raw_ostream &OS, unsigned Depth) {
   for (unsigned I = 0; I < Depth; ++I)
     OS << "  ";
 }
 
-void printExpr(const Expr &Expression, std::ostream &OS) {
+void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
   switch (Expression.kind()) {
   case Expr::Kind::Identifier:
     OS << static_cast<const IdentifierExpr &>(Expression).Name;
@@ -49,17 +48,6 @@ void printExpr(const Expr &Expression, std::ostream &OS) {
     OS << ')';
     return;
   }
-  case Expr::Kind::Call: {
-    const auto &Call = static_cast<const CallExpr &>(Expression);
-    OS << "(call ";
-    printExpr(*Call.Callee, OS);
-    for (const auto &Argument : Call.Arguments) {
-      OS << ' ';
-      printExpr(*Argument, OS);
-    }
-    OS << ')';
-    return;
-  }
   case Expr::Kind::Index: {
     const auto &Index = static_cast<const IndexExpr &>(Expression);
     OS << "(index ";
@@ -69,17 +57,10 @@ void printExpr(const Expr &Expression, std::ostream &OS) {
     OS << ')';
     return;
   }
-  case Expr::Kind::Member: {
-    const auto &Member = static_cast<const MemberExpr &>(Expression);
-    OS << "(member ";
-    printExpr(*Member.Base, OS);
-    OS << ' ' << Member.Member << ')';
-    return;
-  }
   }
 }
 
-void printStmt(const Stmt &Statement, std::ostream &OS, unsigned Depth) {
+void printStmt(const Stmt &Statement, llvm::raw_ostream &OS, unsigned Depth) {
   indent(OS, Depth);
   switch (Statement.kind()) {
   case Stmt::Kind::Compound: {
@@ -92,16 +73,6 @@ void printStmt(const Stmt &Statement, std::ostream &OS, unsigned Depth) {
   case Stmt::Kind::Expr: {
     OS << "expr ";
     printExpr(*static_cast<const ExprStmt &>(Statement).Expression, OS);
-    OS << '\n';
-    return;
-  }
-  case Stmt::Kind::Decl: {
-    const auto &Decl = static_cast<const DeclStmt &>(Statement);
-    OS << "decl " << Decl.TypeName << ' ' << Decl.Name;
-    if (Decl.Initializer) {
-      OS << " = ";
-      printExpr(*Decl.Initializer, OS);
-    }
     OS << '\n';
     return;
   }
@@ -118,41 +89,13 @@ void printStmt(const Stmt &Statement, std::ostream &OS, unsigned Depth) {
     }
     return;
   }
-  case Stmt::Kind::While: {
-    const auto &While = static_cast<const WhileStmt &>(Statement);
-    OS << "while ";
-    printExpr(*While.Condition, OS);
-    OS << '\n';
-    printStmt(*While.Body, OS, Depth + 1);
-    return;
-  }
-  case Stmt::Kind::For: {
-    const auto &For = static_cast<const ForStmt &>(Statement);
-    OS << "for\n";
-    if (For.Init)
-      printStmt(*For.Init, OS, Depth + 1);
-    if (For.Condition) {
-      indent(OS, Depth + 1);
-      OS << "condition ";
-      printExpr(*For.Condition, OS);
-      OS << '\n';
-    }
-    if (For.Increment) {
-      indent(OS, Depth + 1);
-      OS << "increment ";
-      printExpr(*For.Increment, OS);
-      OS << '\n';
-    }
-    printStmt(*For.Body, OS, Depth + 1);
-    return;
-  }
   case Stmt::Kind::Empty:
     OS << "empty\n";
     return;
   }
 }
 
-void printTokenSequence(const TokenSequence &Sequence, std::ostream &OS) {
+void printTokenSequence(const TokenSequence &Sequence, llvm::raw_ostream &OS) {
   for (size_t I = 0; I < Sequence.Tokens.size(); ++I) {
     if (I != 0)
       OS << ' ';
@@ -162,7 +105,7 @@ void printTokenSequence(const TokenSequence &Sequence, std::ostream &OS) {
 
 } // namespace
 
-void printAST(const InstructionSetDecl &Decl, std::ostream &OS) {
+void printAST(const InstructionSetDecl &Decl, llvm::raw_ostream &OS) {
   OS << "InstructionSet " << Decl.Name;
   if (!Decl.BaseName.empty())
     OS << " extends " << Decl.BaseName;
@@ -186,12 +129,6 @@ void printAST(const InstructionSetDecl &Decl, std::ostream &OS) {
       indent(OS, 3);
       OS << "behavior\n";
       printStmt(*Instruction.Behavior, OS, 4);
-    }
-    for (const auto &Other : Instruction.OtherMembers) {
-      indent(OS, 3);
-      OS << "member " << Other.first << ' ';
-      printTokenSequence(Other.second, OS);
-      OS << '\n';
     }
   }
 }

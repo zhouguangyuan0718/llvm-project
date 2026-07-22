@@ -2,6 +2,7 @@
 #define COREDSl_PARSER_H
 
 #include "coredsl/AST.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <memory>
 #include <string>
@@ -11,7 +12,7 @@ namespace coredsl {
 
 class Parser {
 public:
-  Parser(std::string FileName, std::string Input, DiagnosticEngine &Diags);
+  Parser(llvm::StringRef Input, DiagnosticEngine &Diags);
 
   std::unique_ptr<InstructionSetDecl> parseInstructionSet();
 
@@ -32,10 +33,6 @@ private:
   std::unique_ptr<Stmt> parseStatement();
   std::unique_ptr<CompoundStmt> parseCompoundStatement();
   std::unique_ptr<Stmt> parseIfStatement();
-  std::unique_ptr<Stmt> parseWhileStatement();
-  std::unique_ptr<Stmt> parseForStatement();
-  std::unique_ptr<Stmt> parseDeclStatement(bool ConsumeSemicolon = true);
-  bool startsDeclaration() const;
 
   std::unique_ptr<Expr> parseExpression();
   std::unique_ptr<Expr> parseAssignmentExpression();
