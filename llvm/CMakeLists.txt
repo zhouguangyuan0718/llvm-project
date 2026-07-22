@@ -141,7 +141,7 @@ set(LLVM_ALL_PROJECTS "bolt;clang;clang-tools-extra;cross-project-tests;lld;lldb
 # it is preferred to use LLVM_ENABLE_RUNTIMES for them instead.
 #
 # The flang project is not yet part of "all" projects (see C++ requirements).
-set(LLVM_EXTRA_PROJECTS "flang" "libc" "compiler-rt")
+set(LLVM_EXTRA_PROJECTS "flang" "libc" "compiler-rt" "coredsl-backend-gen")
 # List of all known projects in the mono repo
 set(LLVM_KNOWN_PROJECTS "${LLVM_ALL_PROJECTS};${LLVM_EXTRA_PROJECTS}")
 set(LLVM_ENABLE_PROJECTS "" CACHE STRING

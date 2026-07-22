@@ -374,6 +374,17 @@ coredsl-backend-gen Tiny32.core_desc \
 Validation invokes TableGen after emission.  It never supplies semantic facts
 or changes generated text.
 
+For an in-tree LLVM 23 build, enable the project directly through LLVM's
+standard project switch:
+
+```text
+cmake -S llvm -B build -DLLVM_ENABLE_PROJECTS=coredsl-backend-gen
+cmake --build build --target coredsl-backend-gen
+```
+
+This integrates the tool's build target only.  It does not change the
+generator's no-pipeline contract.
+
 ## Source layout
 
 ```text
