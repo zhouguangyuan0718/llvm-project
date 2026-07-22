@@ -1,0 +1,10 @@
+InstructionSet Broken {
+  instructions {
+    ADD {
+      assembly: "add {rd}, {rs1}, {rs2}";
+      behavior {
+        X[rd] = X[rs1] + ;
+      }
+    }
+  }
+}

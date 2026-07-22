@@ -1,0 +1,16 @@
+InstructionSet Control
+  instructions
+    instruction ACCUMULATE
+      behavior
+        compound
+          decl let i = 0
+          while (< i 4)
+            compound
+              expr (+= (index X rd) (index X rs1))
+              expr (post ++ i)
+          for
+            decl let j = 0
+            condition (< j 2)
+            increment (+= j 1)
+            compound
+              expr (= (index X rd) (^ (index X rd) (index X rs2)))
