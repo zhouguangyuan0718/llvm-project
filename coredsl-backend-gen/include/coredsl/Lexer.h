@@ -2,6 +2,7 @@
 #define COREDSl_LEXER_H
 
 #include "coredsl/Diagnostics.h"
+#include "llvm/ADT/StringRef.h"
 
 #include <string>
 #include <vector>
@@ -71,7 +72,7 @@ const char *tokenKindName(TokenKind Kind);
 
 class Lexer {
 public:
-  Lexer(std::string FileName, std::string Input, DiagnosticEngine &Diags);
+  Lexer(llvm::StringRef Input, DiagnosticEngine &Diags);
 
   std::vector<Token> lex();
 
@@ -87,12 +88,10 @@ private:
   Token lexPunctuation();
   Token makeToken(TokenKind Kind, std::string Text, SourceLocation Begin) const;
 
-  std::string FileName;
-  std::string Input;
+  llvm::StringRef Input;
   DiagnosticEngine &Diags;
-  size_t Offset = 0;
-  unsigned Line = 1;
-  unsigned Column = 1;
+  const char *Cursor;
+  const char *End;
 };
 
 } // namespace coredsl

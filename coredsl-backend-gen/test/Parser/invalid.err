@@ -1,1 +1,3 @@
-<input>:6:26: error: expected expression
+<input>:8:38: error: expected expression
+          X[rd] += X[rs1] - X[rs2] + ;
+                                     ^

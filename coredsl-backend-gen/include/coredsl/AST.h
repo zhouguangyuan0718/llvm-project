@@ -19,9 +19,7 @@ public:
     Unary,
     Binary,
     Conditional,
-    Call,
-    Index,
-    Member
+    Index
   };
 
   explicit Expr(Kind K, SourceRange Range) : K(K), Range(std::move(Range)) {}
@@ -84,16 +82,6 @@ public:
   std::unique_ptr<Expr> FalseExpr;
 };
 
-class CallExpr final : public Expr {
-public:
-  CallExpr(SourceRange Range, std::unique_ptr<Expr> Callee,
-           std::vector<std::unique_ptr<Expr>> Arguments)
-      : Expr(Kind::Call, std::move(Range)), Callee(std::move(Callee)),
-        Arguments(std::move(Arguments)) {}
-  std::unique_ptr<Expr> Callee;
-  std::vector<std::unique_ptr<Expr>> Arguments;
-};
-
 class IndexExpr final : public Expr {
 public:
   IndexExpr(SourceRange Range, std::unique_ptr<Expr> Base,
@@ -104,18 +92,9 @@ public:
   std::unique_ptr<Expr> Index;
 };
 
-class MemberExpr final : public Expr {
-public:
-  MemberExpr(SourceRange Range, std::unique_ptr<Expr> Base, std::string Member)
-      : Expr(Kind::Member, std::move(Range)), Base(std::move(Base)),
-        Member(std::move(Member)) {}
-  std::unique_ptr<Expr> Base;
-  std::string Member;
-};
-
 class Stmt {
 public:
-  enum class Kind { Compound, Expr, If, While, For, Decl, Empty };
+  enum class Kind { Compound, Expr, If, Empty };
 
   explicit Stmt(Kind K, SourceRange Range) : K(K), Range(std::move(Range)) {}
   virtual ~Stmt() = default;
@@ -154,41 +133,6 @@ public:
   std::unique_ptr<Stmt> Else;
 };
 
-class WhileStmt final : public Stmt {
-public:
-  WhileStmt(SourceRange Range, std::unique_ptr<Expr> Condition,
-            std::unique_ptr<Stmt> Body)
-      : Stmt(Kind::While, std::move(Range)), Condition(std::move(Condition)),
-        Body(std::move(Body)) {}
-  std::unique_ptr<Expr> Condition;
-  std::unique_ptr<Stmt> Body;
-};
-
-class ForStmt final : public Stmt {
-public:
-  ForStmt(SourceRange Range, std::unique_ptr<Stmt> Init,
-          std::unique_ptr<Expr> Condition, std::unique_ptr<Expr> Increment,
-          std::unique_ptr<Stmt> Body)
-      : Stmt(Kind::For, std::move(Range)), Init(std::move(Init)),
-        Condition(std::move(Condition)), Increment(std::move(Increment)),
-        Body(std::move(Body)) {}
-  std::unique_ptr<Stmt> Init;
-  std::unique_ptr<Expr> Condition;
-  std::unique_ptr<Expr> Increment;
-  std::unique_ptr<Stmt> Body;
-};
-
-class DeclStmt final : public Stmt {
-public:
-  DeclStmt(SourceRange Range, std::string TypeName, std::string Name,
-           std::unique_ptr<Expr> Initializer)
-      : Stmt(Kind::Decl, std::move(Range)), TypeName(std::move(TypeName)),
-        Name(std::move(Name)), Initializer(std::move(Initializer)) {}
-  std::string TypeName;
-  std::string Name;
-  std::unique_ptr<Expr> Initializer;
-};
-
 class EmptyStmt final : public Stmt {
 public:
   explicit EmptyStmt(SourceRange Range) : Stmt(Kind::Empty, std::move(Range)) {}
@@ -206,7 +150,6 @@ struct InstructionDecl {
   std::string Assembly;
   bool HasAssembly = false;
   std::unique_ptr<Stmt> Behavior;
-  std::vector<std::pair<std::string, TokenSequence>> OtherMembers;
 };
 
 struct InstructionSetDecl {

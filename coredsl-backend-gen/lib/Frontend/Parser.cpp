@@ -6,9 +6,8 @@
 
 namespace coredsl {
 
-Parser::Parser(std::string FileName, std::string Input, DiagnosticEngine &Diags)
-    : Diags(Diags),
-      Tokens(Lexer(std::move(FileName), std::move(Input), Diags).lex()) {}
+Parser::Parser(llvm::StringRef Input, DiagnosticEngine &Diags)
+    : Diags(Diags), Tokens(Lexer(Input, Diags).lex()) {}
 
 std::unique_ptr<InstructionSetDecl> Parser::parseInstructionSet() {
   if (!atIdentifier("InstructionSet")) {
@@ -59,8 +58,7 @@ std::unique_ptr<InstructionSetDecl> Parser::parseInstructionSet() {
   }
 
   if (!SawInstructions)
-    Diags.error({Begin.File, Begin.Line, Begin.Column},
-                "instruction set has no 'instructions' block");
+    Diags.error(Begin, "instruction set has no 'instructions' block");
   if (!expect(TokenKind::RBrace, "'}' after instruction set"))
     return nullptr;
   Result->Range = rangeFrom(Begin);
@@ -174,7 +172,9 @@ std::unique_ptr<InstructionDecl> Parser::parseInstruction() {
       continue;
     }
 
-    Result->OtherMembers.emplace_back(Member, parseRawMemberValue());
+    Diags.error(previous().Range.Begin,
+                "unsupported instruction member '" + Member + "'");
+    parseRawMemberValue();
   }
   if (!expect(TokenKind::RBrace, "'}' after instruction"))
     return nullptr;
@@ -232,12 +232,6 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
     return parseCompoundStatement();
   if (atIdentifier("if"))
     return parseIfStatement();
-  if (atIdentifier("while"))
-    return parseWhileStatement();
-  if (atIdentifier("for"))
-    return parseForStatement();
-  if (startsDeclaration())
-    return parseDeclStatement();
   if (at(TokenKind::Semicolon)) {
     const SourceLocation Begin = consume().Range.Begin;
     return std::make_unique<EmptyStmt>(rangeFrom(Begin));
@@ -283,84 +277,6 @@ std::unique_ptr<Stmt> Parser::parseIfStatement() {
     Else = parseStatement();
   return std::make_unique<IfStmt>(rangeFrom(Begin), std::move(Condition),
                                   std::move(Then), std::move(Else));
-}
-
-std::unique_ptr<Stmt> Parser::parseWhileStatement() {
-  const SourceLocation Begin = consume().Range.Begin;
-  if (!expect(TokenKind::LParen, "'(' after 'while'"))
-    return nullptr;
-  std::unique_ptr<Expr> Condition = parseExpression();
-  if (!Condition || !expect(TokenKind::RParen, "')' after while condition"))
-    return nullptr;
-  std::unique_ptr<Stmt> Body = parseStatement();
-  return std::make_unique<WhileStmt>(rangeFrom(Begin), std::move(Condition),
-                                     std::move(Body));
-}
-
-std::unique_ptr<Stmt> Parser::parseForStatement() {
-  const SourceLocation Begin = consume().Range.Begin;
-  if (!expect(TokenKind::LParen, "'(' after 'for'"))
-    return nullptr;
-
-  std::unique_ptr<Stmt> Init;
-  if (at(TokenKind::Semicolon)) {
-    consume();
-  } else if (startsDeclaration()) {
-    Init = parseDeclStatement();
-  } else {
-    const SourceLocation InitBegin = current().Range.Begin;
-    std::unique_ptr<Expr> Expression = parseExpression();
-    if (!Expression ||
-        !expect(TokenKind::Semicolon, "';' after for initializer"))
-      return nullptr;
-    Init =
-        std::make_unique<ExprStmt>(rangeFrom(InitBegin), std::move(Expression));
-  }
-
-  std::unique_ptr<Expr> Condition;
-  if (!at(TokenKind::Semicolon))
-    Condition = parseExpression();
-  if (!expect(TokenKind::Semicolon, "';' after for condition"))
-    return nullptr;
-
-  std::unique_ptr<Expr> Increment;
-  if (!at(TokenKind::RParen))
-    Increment = parseExpression();
-  if (!expect(TokenKind::RParen, "')' after for increment"))
-    return nullptr;
-  std::unique_ptr<Stmt> Body = parseStatement();
-  return std::make_unique<ForStmt>(rangeFrom(Begin), std::move(Init),
-                                   std::move(Condition), std::move(Increment),
-                                   std::move(Body));
-}
-
-std::unique_ptr<Stmt> Parser::parseDeclStatement(bool ConsumeSemicolon) {
-  const SourceLocation Begin = current().Range.Begin;
-  std::string TypeName;
-  if (atIdentifier("let") || atIdentifier("var")) {
-    TypeName = consume().Text;
-  } else if (!expectIdentifier(TypeName, "declaration type")) {
-    return nullptr;
-  }
-
-  std::string Name;
-  if (!expectIdentifier(Name, "declaration name"))
-    return nullptr;
-  std::unique_ptr<Expr> Initializer;
-  if (consumeIf(TokenKind::Equal))
-    Initializer = parseExpression();
-  if (ConsumeSemicolon &&
-      !expect(TokenKind::Semicolon, "';' after declaration"))
-    return nullptr;
-  return std::make_unique<DeclStmt>(rangeFrom(Begin), std::move(TypeName),
-                                    std::move(Name), std::move(Initializer));
-}
-
-bool Parser::startsDeclaration() const {
-  if (atIdentifier("let") || atIdentifier("var"))
-    return true;
-  return at(TokenKind::Identifier) && Position + 1 < Tokens.size() &&
-         Tokens[Position + 1].Kind == TokenKind::Identifier;
 }
 
 std::unique_ptr<Expr> Parser::parseExpression() {
@@ -441,36 +357,12 @@ std::unique_ptr<Expr> Parser::parsePostfixExpression() {
     return nullptr;
   while (true) {
     const SourceLocation Begin = Result->range().Begin;
-    if (consumeIf(TokenKind::LParen)) {
-      std::vector<std::unique_ptr<Expr>> Arguments;
-      if (!at(TokenKind::RParen)) {
-        do {
-          std::unique_ptr<Expr> Argument = parseExpression();
-          if (!Argument)
-            return nullptr;
-          Arguments.push_back(std::move(Argument));
-        } while (consumeIf(TokenKind::Comma));
-      }
-      if (!expect(TokenKind::RParen, "')' after call arguments"))
-        return nullptr;
-      Result = std::make_unique<CallExpr>(rangeFrom(Begin), std::move(Result),
-                                          std::move(Arguments));
-      continue;
-    }
     if (consumeIf(TokenKind::LBracket)) {
       std::unique_ptr<Expr> Index = parseExpression();
       if (!Index || !expect(TokenKind::RBracket, "']' after index expression"))
         return nullptr;
       Result = std::make_unique<IndexExpr>(rangeFrom(Begin), std::move(Result),
                                            std::move(Index));
-      continue;
-    }
-    if (consumeIf(TokenKind::Dot)) {
-      std::string Member;
-      if (!expectIdentifier(Member, "member name after '.'"))
-        return nullptr;
-      Result = std::make_unique<MemberExpr>(rangeFrom(Begin), std::move(Result),
-                                            std::move(Member));
       continue;
     }
     if (at(TokenKind::PlusPlus) || at(TokenKind::MinusMinus)) {
@@ -489,9 +381,6 @@ std::unique_ptr<Expr> Parser::parsePrimaryExpression() {
     return std::make_unique<IdentifierExpr>(Token.Range, Token.Text);
   if (consumeIf(TokenKind::Integer))
     return std::make_unique<LiteralExpr>(Expr::Kind::Integer, Token.Range,
-                                         Token.Text);
-  if (consumeIf(TokenKind::String))
-    return std::make_unique<LiteralExpr>(Expr::Kind::String, Token.Range,
                                          Token.Text);
   if (consumeIf(TokenKind::LParen)) {
     std::unique_ptr<Expr> Expression = parseExpression();

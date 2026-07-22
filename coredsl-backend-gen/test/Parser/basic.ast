@@ -1,21 +1,21 @@
-InstructionSet Tiny32 extends GenericBase
+InstructionSet XExample extends RISCVBase
   instructions
-    instruction ADD
-      encoding { bits [ 31 : 26 ] = 0b000000 ; bits [ 25 : 21 ] = rs2 ; bits [ 20 : 16 ] = rs1 ; bits [ 15 : 11 ] = rd ; bits [ 10 : 0 ] = 0b00000000001 ; }
-      assembly "add {rd}, {rs1}, {rs2}"
+    instruction CV_SUBINCACC
+      encoding 7'b0101000 :: rs2 [ 4 : 0 ] :: rs1 [ 4 : 0 ] :: 3'b011 :: rd [ 4 : 0 ] :: 7'b0101011
+      assembly "{name(rd)}, {name(rs1)}, {name(rs2)}"
       behavior
         compound
-          expr (= (index X rd) (+ (index X rs1) (index X rs2)))
-    instruction SELECT
-      encoding opcode :: rd :: rs1 :: rs2
-      assembly "select {rd}, {rs1}, {rs2}"
+          if (!= rd 0)
+            compound
+              expr (+= (index X rd) (+ (- (index X rs1) (index X rs2)) 1))
+    instruction CV_MAXU
+      encoding 7'b0101110 :: rs2 [ 4 : 0 ] :: rs1 [ 4 : 0 ] :: 3'b011 :: rd [ 4 : 0 ] :: 7'b0101011
+      assembly "{name(rd)}, {name(rs1)}, {name(rs2)}"
       behavior
         compound
           if (== (index X rs1) 0)
             compound
-              expr (= (index X rd) (index X rs2))
+              expr (= (index X rd) (?: (> (index X rs1) (index X rs2)) (index X rs1) (index X rs2)))
           else
             compound
-              decl let value = (+ (index X rs1) (index X rs2))
-              expr (= (index X rd) value)
-      member properties commutable
+              expr (= (index X rd) (unary ~ (& (index X rs1) (index X rs2))))

@@ -1,19 +1,15 @@
 #ifndef COREDSl_SOURCE_H
 #define COREDSl_SOURCE_H
 
-#include <string>
+#include "llvm/Support/SMLoc.h"
 
 namespace coredsl {
 
-struct SourceLocation {
-  std::string File;
-  unsigned Line = 1;
-  unsigned Column = 1;
-};
+using SourceLocation = llvm::SMLoc;
 
 struct SourceRange {
-  SourceLocation Begin;
-  SourceLocation End;
+  llvm::SMLoc Begin;
+  llvm::SMLoc End;
 };
 
 } // namespace coredsl
