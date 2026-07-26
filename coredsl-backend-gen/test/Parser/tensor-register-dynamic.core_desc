@@ -1,0 +1,9 @@
+InstructionSet XTensor {
+  instructions {
+    BAD {
+      operands: {
+        register tensor<fp16, ?> value;
+      }
+    }
+  }
+}

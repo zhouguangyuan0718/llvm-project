@@ -16,6 +16,7 @@ public:
     Identifier,
     Integer,
     String,
+    Dynamic,
     Unary,
     Binary,
     Conditional,
@@ -47,6 +48,12 @@ public:
   LiteralExpr(Kind K, SourceRange Range, std::string Value)
       : Expr(K, std::move(Range)), Value(std::move(Value)) {}
   std::string Value;
+};
+
+class DynamicExpr final : public Expr {
+public:
+  explicit DynamicExpr(SourceRange Range)
+      : Expr(Kind::Dynamic, std::move(Range)) {}
 };
 
 class UnaryExpr final : public Expr {
@@ -106,9 +113,19 @@ public:
 };
 
 struct TypeRef {
+  enum class Kind { Scalar, Tensor };
+  enum class TensorStorage { Unspecified, Register, Memory };
+
   SourceRange Range;
+  Kind K = Kind::Scalar;
   std::string Name;
   std::unique_ptr<Expr> Width;
+  TensorStorage Storage = TensorStorage::Unspecified;
+  std::unique_ptr<TypeRef> ElementType;
+  std::vector<std::unique_ptr<Expr>> Shape;
+
+  bool isScalar() const { return K == Kind::Scalar; }
+  bool isTensor() const { return K == Kind::Tensor; }
 };
 
 class CastExpr final : public Expr {

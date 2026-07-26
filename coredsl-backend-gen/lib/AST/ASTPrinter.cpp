@@ -20,6 +20,9 @@ void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
   case Expr::Kind::String:
     OS << static_cast<const LiteralExpr &>(Expression).Value;
     return;
+  case Expr::Kind::Dynamic:
+    OS << '?';
+    return;
   case Expr::Kind::Unary: {
     const auto &Unary = static_cast<const UnaryExpr &>(Expression);
     OS << '(' << (Unary.IsPostfix ? "post" : "unary") << ' ' << Unary.Operator
@@ -86,6 +89,29 @@ void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
 }
 
 void printType(const TypeRef &Type, llvm::raw_ostream &OS) {
+  if (Type.isTensor()) {
+    switch (Type.Storage) {
+    case TypeRef::TensorStorage::Register:
+      OS << "register ";
+      break;
+    case TypeRef::TensorStorage::Memory:
+      OS << "memory ";
+      break;
+    case TypeRef::TensorStorage::Unspecified:
+      OS << "unspecified ";
+      break;
+    }
+    OS << "tensor<";
+    if (Type.ElementType)
+      printType(*Type.ElementType, OS);
+    for (const auto &Dimension : Type.Shape) {
+      OS << ", ";
+      printExpr(*Dimension, OS);
+    }
+    OS << '>';
+    return;
+  }
+
   OS << Type.Name;
   if (!Type.Width)
     return;

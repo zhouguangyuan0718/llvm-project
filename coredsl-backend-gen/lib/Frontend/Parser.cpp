@@ -327,16 +327,98 @@ std::unique_ptr<Stmt> Parser::parseDeclarationStatement() {
 }
 
 TypeRef Parser::parseTypeRef() {
+  if (atIdentifier("register") || atIdentifier("memory")) {
+    const Token Qualifier = consume();
+    const TypeRef::TensorStorage Storage =
+        Qualifier.Text == "register" ? TypeRef::TensorStorage::Register
+                                     : TypeRef::TensorStorage::Memory;
+    if (!consumeIdentifierIf("tensor")) {
+      Diags.error(current().Range.Begin,
+                  "expected 'tensor' after storage qualifier");
+      TypeRef Result;
+      Result.Range = Qualifier.Range;
+      return Result;
+    }
+    return parseTensorTypeRef(Storage, Qualifier.Range.Begin);
+  }
+
+  if (atIdentifier("tensor")) {
+    const SourceLocation Begin = consume().Range.Begin;
+    Diags.error(Begin, "tensor type requires 'register' or 'memory' qualifier");
+    return parseTensorTypeRef(TypeRef::TensorStorage::Unspecified, Begin);
+  }
+
+  return parseScalarTypeRef();
+}
+
+TypeRef Parser::parseScalarTypeRef() {
   TypeRef Result;
   Result.Range.Begin = current().Range.Begin;
+  Result.K = TypeRef::Kind::Scalar;
   expectIdentifier(Result.Name, "type name");
   if (consumeIf(TokenKind::Less)) {
-    Result.Width = parsePrimaryExpression();
+    Result.Width = parseTypeParameter("scalar type width");
     if (!Result.Width || !expect(TokenKind::Greater, "'>' after type width"))
       return Result;
   }
   Result.Range.End = previous().Range.End;
   return Result;
+}
+
+TypeRef Parser::parseTensorTypeRef(TypeRef::TensorStorage Storage,
+                                   SourceLocation Begin) {
+  TypeRef Result;
+  Result.Range.Begin = Begin;
+  Result.K = TypeRef::Kind::Tensor;
+  Result.Storage = Storage;
+
+  if (!expect(TokenKind::Less, "'<' after 'tensor'"))
+    return Result;
+
+  TypeRef ElementType = parseTypeRef();
+  if (ElementType.isTensor())
+    Diags.error(ElementType.Range.Begin,
+                "tensor element type must be a scalar type");
+  Result.ElementType = std::make_unique<TypeRef>(std::move(ElementType));
+
+  if (!expect(TokenKind::Comma, "',' after tensor element type"))
+    return Result;
+
+  do {
+    std::unique_ptr<Expr> Dimension =
+        parseTypeParameter("tensor dimension", true);
+    if (!Dimension)
+      return Result;
+    Result.Shape.push_back(std::move(Dimension));
+  } while (consumeIf(TokenKind::Comma));
+
+  if (!expect(TokenKind::Greater, "'>' after tensor type"))
+    return Result;
+
+  Result.Range.End = previous().Range.End;
+  if (Result.Storage == TypeRef::TensorStorage::Register &&
+      Result.Shape.size() != 1)
+    Diags.error(Begin, "register tensor type must have exactly one dimension");
+  if (Result.Storage == TypeRef::TensorStorage::Register &&
+      Result.Shape.size() == 1 &&
+      Result.Shape.front()->kind() == Expr::Kind::Dynamic)
+    Diags.error(Result.Shape.front()->range().Begin,
+                "dynamic dimension is only supported by memory tensor type");
+  return Result;
+}
+
+std::unique_ptr<Expr> Parser::parseTypeParameter(const char *What,
+                                                 bool AllowDynamic) {
+  const Token Token = current();
+  if (consumeIf(TokenKind::Identifier))
+    return std::make_unique<IdentifierExpr>(Token.Range, Token.Text);
+  if (consumeIf(TokenKind::Integer))
+    return std::make_unique<LiteralExpr>(Expr::Kind::Integer, Token.Range,
+                                         Token.Text);
+  if (AllowDynamic && consumeIf(TokenKind::Question))
+    return std::make_unique<DynamicExpr>(Token.Range);
+  Diags.error(current().Range.Begin, std::string("expected ") + What);
+  return nullptr;
 }
 
 std::unique_ptr<CompoundStmt> Parser::parseCompoundStatement() {
@@ -516,6 +598,9 @@ bool Parser::looksLikeCast() const {
 bool Parser::looksLikeTypeRef() const {
   if (!at(TokenKind::Identifier) || Position + 1 >= Tokens.size())
     return false;
+  if (current().Text == "register" || current().Text == "memory" ||
+      current().Text == "tensor")
+    return true;
   if (Tokens[Position + 1].Kind == TokenKind::Less)
     return true;
   return (current().Text == "signed" || current().Text == "unsigned") &&

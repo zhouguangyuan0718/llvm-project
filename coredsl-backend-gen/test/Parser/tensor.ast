@@ -1,0 +1,17 @@
+InstructionSet XTensor
+  instructions
+    instruction TADD
+      operand register tensor<signed<16>, 64> dst
+      operand register tensor<signed<16>, 64> lhs
+      operand register tensor<signed<16>, 64> rhs
+      behavior
+        compound
+          decl register tensor<signed<16>, 64> tmp = (+ lhs rhs)
+          expr (= dst tmp)
+    instruction MATMUL
+      operand memory tensor<fp16, ?, K> lhs
+      operand memory tensor<fp16, K, N> rhs
+      operand memory tensor<fp32, ?, N> output
+      behavior
+        compound
+          expr (= output (* lhs rhs))

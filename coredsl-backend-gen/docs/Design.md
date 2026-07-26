@@ -89,6 +89,10 @@ The first usable implementation accepts the current CoreDSL constructs:
 - expressions, assignments, conditionals, and the current architectural state
   access notation such as `X[rd]`, including typed declarations, casts, and
   bit slices used by the reference examples.
+- first-class `register tensor` and `memory tensor` types with a shared element
+  type and shape representation. Register tensors are one-dimensional, while
+  memory tensors may have any positive rank and MLIR-style `?` dynamic
+  dimensions.
 
 Current CoreDSL does not specify the complete physical-register and ABI model.
 For this phase, those facts are explicitly supplied by command-line options:
