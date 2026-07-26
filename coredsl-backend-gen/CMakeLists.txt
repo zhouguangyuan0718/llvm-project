@@ -60,6 +60,27 @@ if(BUILD_TESTING)
       -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/unsupported-member.core_desc
       -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/unsupported-member.err
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  add_test(
+    NAME coredsl-parser-tensor
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor.ast
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckAST.cmake)
+  add_test(
+    NAME coredsl-parser-tensor-register-rank
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-rank.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-rank.err
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  add_test(
+    NAME coredsl-parser-tensor-register-dynamic
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-dynamic.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-dynamic.err
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
   foreach(Example IN ITEMS ExampleRV32 ExampleRV32K ExampleRV64)
     add_test(
       NAME coredsl-parser-${Example}

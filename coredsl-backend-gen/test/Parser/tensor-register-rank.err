@@ -1,0 +1,3 @@
+<input>:5:9: error: register tensor type must have exactly one dimension
+        register tensor<fp16, 8, 8> value;
+        ^

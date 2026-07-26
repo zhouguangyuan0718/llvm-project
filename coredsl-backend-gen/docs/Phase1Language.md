@@ -17,7 +17,14 @@ instruction-member
                  | "assembly" [":" | "="] assembly-value ";"
                  | "behavior" [":"] statement
 operand         := type identifier ";"
-type            := identifier ["<" (identifier | integer) ">"]
+type            := scalar-type | tensor-type
+scalar-type     := identifier ["<" type-parameter ">"]
+tensor-type     := tensor-storage "tensor" "<" scalar-type
+                   "," dimension ("," dimension)* ">"
+tensor-storage  := "register" | "memory"
+type-parameter  := identifier | integer
+dimension       := identifier | integer
+                 | "?"
 assembly-value  := string | "{" string ("," string)* "}"
 ```
 
@@ -37,6 +44,15 @@ compound-assignment operators.  This covers the reference
 `core_descs/ExampleRV32.core_desc`, `ExampleRV32K.core_desc`, and
 `ExampleRV64.core_desc`; loops, target properties, and new instruction members
 remain intentionally outside the Phase-1 contract.
+
+Tensor types are first-class operand and local-declaration types.  A tensor
+type records its scalar element type, source-ordered shape dimensions, and an
+explicit storage qualifier.  `register tensor` requires exactly one dimension;
+`memory tensor` accepts any positive rank and may use `?` for a dimension whose
+extent is only known at runtime, following MLIR tensor shape notation.
+`register tensor` does not accept dynamic dimensions.  Both forms use the same
+expression nodes; storage-specific ABI lowering and tensor operation type
+checking belong to later semantic-model milestones.
 
 The parser accepts `//` and `/* ... */` comments.  Every AST node carries a
 source range, raw encoding tokens retain their locations, and diagnostics use

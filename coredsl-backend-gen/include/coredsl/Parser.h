@@ -38,6 +38,11 @@ private:
   std::unique_ptr<Stmt> parseDeclarationStatement();
 
   TypeRef parseTypeRef();
+  TypeRef parseScalarTypeRef();
+  TypeRef parseTensorTypeRef(TypeRef::TensorStorage Storage,
+                             SourceLocation Begin);
+  std::unique_ptr<Expr> parseTypeParameter(const char *What,
+                                           bool AllowDynamic = false);
   std::unique_ptr<Expr> parseExpression();
   std::unique_ptr<Expr> parseAssignmentExpression();
   std::unique_ptr<Expr> parseConditionalExpression();

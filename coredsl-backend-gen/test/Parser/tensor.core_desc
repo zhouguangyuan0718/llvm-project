@@ -1,0 +1,26 @@
+InstructionSet XTensor {
+  instructions {
+    TADD {
+      operands: {
+        register tensor<signed<16>, 64> dst;
+        register tensor<signed<16>, 64> lhs;
+        register tensor<signed<16>, 64> rhs;
+      }
+      behavior: {
+        register tensor<signed<16>, 64> tmp = lhs + rhs;
+        dst = tmp;
+      }
+    }
+
+    MATMUL {
+      operands: {
+        memory tensor<fp16, ?, K> lhs;
+        memory tensor<fp16, K, N> rhs;
+        memory tensor<fp32, ?, N> output;
+      }
+      behavior: {
+        output = lhs * rhs;
+      }
+    }
+  }
+}
