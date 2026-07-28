@@ -29,6 +29,8 @@ private:
   void synchronizeStatement();
 
   std::unique_ptr<InstructionDecl> parseInstruction();
+  std::unique_ptr<TargetDecl> parseTarget();
+  std::unique_ptr<Expr> parseTargetPropertyValue();
   std::vector<OperandDecl> parseOperands();
   bool parseAssembly(InstructionDecl &Instruction);
   TokenSequence parseRawMemberValue();
@@ -39,8 +41,8 @@ private:
 
   TypeRef parseTypeRef();
   TypeRef parseScalarTypeRef();
-  TypeRef parseTensorTypeRef(TypeRef::TensorStorage Storage,
-                             SourceLocation Begin);
+  TypeRef parseTensorTypeRef(SourceLocation Begin);
+  bool parseTensorStorageQualifier(TypeRef &Type);
   std::unique_ptr<Expr> parseTypeParameter(const char *What,
                                            bool AllowDynamic = false);
   std::unique_ptr<Expr> parseExpression();

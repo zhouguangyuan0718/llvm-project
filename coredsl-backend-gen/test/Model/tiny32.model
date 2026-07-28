@@ -1,0 +1,15 @@
+target tiny32 namespace Tiny32
+  registers GPR bank GPRBank width 32 count 8 prefix r
+  instruction ADD
+    operand dst i32
+    operand lhs i32
+    operand rhs i32
+    select G_ADD dst <- lhs, rhs
+  instruction SUB
+    operand dst i32
+    operand lhs i32
+    operand rhs i32
+    select G_SUB dst <- lhs, rhs
+  instruction UNSUPPORTED
+    operand dst i32
+    select unavailable

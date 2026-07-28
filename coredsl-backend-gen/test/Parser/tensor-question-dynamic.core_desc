@@ -1,0 +1,9 @@
+InstructionSet InvalidTensor {
+  instructions {
+    BAD {
+      operands: {
+        tensor<fp16, ?> value[memory];
+      }
+    }
+  }
+}

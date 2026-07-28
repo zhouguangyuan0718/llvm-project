@@ -2,7 +2,7 @@ InstructionSet XTensor {
   instructions {
     BAD {
       operands: {
-        tensor<fp16, 8, 8> value[register];
+        tensor<fp16, 8> value;
       }
     }
   }
