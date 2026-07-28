@@ -34,7 +34,15 @@ std::unique_ptr<InstructionSetDecl> Parser::parseInstructionSet() {
   Result->BaseName = std::move(BaseName);
 
   bool SawInstructions = false;
+  bool SawTarget = false;
   while (!at(TokenKind::RBrace) && !at(TokenKind::Eof)) {
+    if (consumeIdentifierIf("target")) {
+      if (SawTarget)
+        Diags.error(previous().Range.Begin, "duplicate 'target' block");
+      SawTarget = true;
+      Result->Target = parseTarget();
+      continue;
+    }
     if (!consumeIdentifierIf("instructions")) {
       Diags.error(current().Range.Begin,
                   "expected 'instructions' block in instruction set");
@@ -65,6 +73,56 @@ std::unique_ptr<InstructionSetDecl> Parser::parseInstructionSet() {
   if (Diags.hasError())
     return nullptr;
   return Result;
+}
+
+std::unique_ptr<TargetDecl> Parser::parseTarget() {
+  const SourceLocation Begin = previous().Range.Begin;
+  if (!expect(TokenKind::LBrace, "'{' after 'target'"))
+    return nullptr;
+
+  auto Result = std::make_unique<TargetDecl>();
+  while (!at(TokenKind::RBrace) && !at(TokenKind::Eof)) {
+    const SourceLocation PropertyBegin = current().Range.Begin;
+    std::string Name;
+    if (!expectIdentifier(Name, "target property name")) {
+      synchronizeStatement();
+      continue;
+    }
+    if (!expect(TokenKind::Colon, "':' after target property name")) {
+      synchronizeStatement();
+      continue;
+    }
+    std::unique_ptr<Expr> Value = parseTargetPropertyValue();
+    if (!Value) {
+      synchronizeStatement();
+      continue;
+    }
+    if (!expect(TokenKind::Semicolon, "';' after target property")) {
+      synchronizeStatement();
+      continue;
+    }
+    Result->Properties.push_back(
+        {rangeFrom(PropertyBegin), std::move(Name), std::move(Value)});
+  }
+  if (!expect(TokenKind::RBrace, "'}' after target block"))
+    return nullptr;
+  Result->Range = rangeFrom(Begin);
+  return Result;
+}
+
+std::unique_ptr<Expr> Parser::parseTargetPropertyValue() {
+  const Token Token = current();
+  if (consumeIf(TokenKind::Identifier))
+    return std::make_unique<IdentifierExpr>(Token.Range, Token.Text);
+  if (consumeIf(TokenKind::Integer))
+    return std::make_unique<LiteralExpr>(Expr::Kind::Integer, Token.Range,
+                                         Token.Text);
+  if (consumeIf(TokenKind::String))
+    return std::make_unique<LiteralExpr>(Expr::Kind::String, Token.Range,
+                                         Token.Text);
+  Diags.error(current().Range.Begin,
+              "expected identifier, integer, or string target property value");
+  return nullptr;
 }
 
 const Token &Parser::current() const { return Tokens[Position]; }
@@ -200,6 +258,7 @@ std::vector<OperandDecl> Parser::parseOperands() {
       synchronizeStatement();
       continue;
     }
+    parseTensorStorageQualifier(Type);
     if (!expect(TokenKind::Semicolon, "';' after operand declaration")) {
       synchronizeStatement();
       continue;
@@ -313,6 +372,7 @@ std::unique_ptr<Stmt> Parser::parseDeclarationStatement() {
   std::string Name;
   if (!expectIdentifier(Name, "declaration name"))
     return nullptr;
+  parseTensorStorageQualifier(Type);
 
   std::unique_ptr<Expr> Initializer;
   if (consumeIf(TokenKind::Equal)) {
@@ -327,25 +387,9 @@ std::unique_ptr<Stmt> Parser::parseDeclarationStatement() {
 }
 
 TypeRef Parser::parseTypeRef() {
-  if (atIdentifier("register") || atIdentifier("memory")) {
-    const Token Qualifier = consume();
-    const TypeRef::TensorStorage Storage =
-        Qualifier.Text == "register" ? TypeRef::TensorStorage::Register
-                                     : TypeRef::TensorStorage::Memory;
-    if (!consumeIdentifierIf("tensor")) {
-      Diags.error(current().Range.Begin,
-                  "expected 'tensor' after storage qualifier");
-      TypeRef Result;
-      Result.Range = Qualifier.Range;
-      return Result;
-    }
-    return parseTensorTypeRef(Storage, Qualifier.Range.Begin);
-  }
-
   if (atIdentifier("tensor")) {
     const SourceLocation Begin = consume().Range.Begin;
-    Diags.error(Begin, "tensor type requires 'register' or 'memory' qualifier");
-    return parseTensorTypeRef(TypeRef::TensorStorage::Unspecified, Begin);
+    return parseTensorTypeRef(Begin);
   }
 
   return parseScalarTypeRef();
@@ -365,12 +409,10 @@ TypeRef Parser::parseScalarTypeRef() {
   return Result;
 }
 
-TypeRef Parser::parseTensorTypeRef(TypeRef::TensorStorage Storage,
-                                   SourceLocation Begin) {
+TypeRef Parser::parseTensorTypeRef(SourceLocation Begin) {
   TypeRef Result;
   Result.Range.Begin = Begin;
   Result.K = TypeRef::Kind::Tensor;
-  Result.Storage = Storage;
 
   if (!expect(TokenKind::Less, "'<' after 'tensor'"))
     return Result;
@@ -396,15 +438,40 @@ TypeRef Parser::parseTensorTypeRef(TypeRef::TensorStorage Storage,
     return Result;
 
   Result.Range.End = previous().Range.End;
-  if (Result.Storage == TypeRef::TensorStorage::Register &&
-      Result.Shape.size() != 1)
-    Diags.error(Begin, "register tensor type must have exactly one dimension");
-  if (Result.Storage == TypeRef::TensorStorage::Register &&
-      Result.Shape.size() == 1 &&
-      Result.Shape.front()->kind() == Expr::Kind::Dynamic)
-    Diags.error(Result.Shape.front()->range().Begin,
-                "dynamic dimension is only supported by memory tensor type");
   return Result;
+}
+
+bool Parser::parseTensorStorageQualifier(TypeRef &Type) {
+  if (!Type.isTensor())
+    return true;
+  if (!consumeIf(TokenKind::LBracket)) {
+    Diags.error(current().Range.Begin,
+                "tensor declarator requires '[register]' or '[memory]'");
+    return false;
+  }
+
+  if (consumeIdentifierIf("register"))
+    Type.Storage = TypeRef::TensorStorage::Register;
+  else if (consumeIdentifierIf("memory"))
+    Type.Storage = TypeRef::TensorStorage::Memory;
+  else {
+    Diags.error(current().Range.Begin,
+                "expected 'register' or 'memory' tensor storage qualifier");
+    return false;
+  }
+  if (!expect(TokenKind::RBracket, "']' after tensor storage qualifier"))
+    return false;
+
+  if (Type.Storage == TypeRef::TensorStorage::Register &&
+      Type.Shape.size() != 1)
+    Diags.error(Type.Range.Begin,
+                "register tensor type must have exactly one dimension");
+  if (Type.Storage == TypeRef::TensorStorage::Register &&
+      Type.Shape.size() == 1 &&
+      Type.Shape.front()->kind() == Expr::Kind::Dynamic)
+    Diags.error(Type.Shape.front()->range().Begin,
+                "dynamic dimension is only supported by memory tensor type");
+  return true;
 }
 
 std::unique_ptr<Expr> Parser::parseTypeParameter(const char *What,
@@ -415,7 +482,7 @@ std::unique_ptr<Expr> Parser::parseTypeParameter(const char *What,
   if (consumeIf(TokenKind::Integer))
     return std::make_unique<LiteralExpr>(Expr::Kind::Integer, Token.Range,
                                          Token.Text);
-  if (AllowDynamic && consumeIf(TokenKind::Question))
+  if (AllowDynamic && consumeIf(TokenKind::Star))
     return std::make_unique<DynamicExpr>(Token.Range);
   Diags.error(current().Range.Begin, std::string("expected ") + What);
   return nullptr;
@@ -598,8 +665,7 @@ bool Parser::looksLikeCast() const {
 bool Parser::looksLikeTypeRef() const {
   if (!at(TokenKind::Identifier) || Position + 1 >= Tokens.size())
     return false;
-  if (current().Text == "register" || current().Text == "memory" ||
-      current().Text == "tensor")
+  if (current().Text == "tensor")
     return true;
   if (Tokens[Position + 1].Kind == TokenKind::Less)
     return true;

@@ -21,7 +21,7 @@ void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
     OS << static_cast<const LiteralExpr &>(Expression).Value;
     return;
   case Expr::Kind::Dynamic:
-    OS << '?';
+    OS << '*';
     return;
   case Expr::Kind::Unary: {
     const auto &Unary = static_cast<const UnaryExpr &>(Expression);
@@ -90,17 +90,6 @@ void printExpr(const Expr &Expression, llvm::raw_ostream &OS) {
 
 void printType(const TypeRef &Type, llvm::raw_ostream &OS) {
   if (Type.isTensor()) {
-    switch (Type.Storage) {
-    case TypeRef::TensorStorage::Register:
-      OS << "register ";
-      break;
-    case TypeRef::TensorStorage::Memory:
-      OS << "memory ";
-      break;
-    case TypeRef::TensorStorage::Unspecified:
-      OS << "unspecified ";
-      break;
-    }
     OS << "tensor<";
     if (Type.ElementType)
       printType(*Type.ElementType, OS);
@@ -118,6 +107,22 @@ void printType(const TypeRef &Type, llvm::raw_ostream &OS) {
   OS << '<';
   printExpr(*Type.Width, OS);
   OS << '>';
+}
+
+void printTensorStorage(const TypeRef &Type, llvm::raw_ostream &OS) {
+  if (!Type.isTensor())
+    return;
+  switch (Type.Storage) {
+  case TypeRef::TensorStorage::Register:
+    OS << "[register]";
+    return;
+  case TypeRef::TensorStorage::Memory:
+    OS << "[memory]";
+    return;
+  case TypeRef::TensorStorage::Unspecified:
+    OS << "[unspecified]";
+    return;
+  }
 }
 
 void printStmt(const Stmt &Statement, llvm::raw_ostream &OS, unsigned Depth) {
@@ -154,6 +159,7 @@ void printStmt(const Stmt &Statement, llvm::raw_ostream &OS, unsigned Depth) {
     OS << "decl ";
     printType(Decl.Type, OS);
     OS << ' ' << Decl.Name;
+    printTensorStorage(Decl.Type, OS);
     if (Decl.Initializer) {
       OS << " = ";
       printExpr(*Decl.Initializer, OS);
@@ -182,6 +188,16 @@ void printAST(const InstructionSetDecl &Decl, llvm::raw_ostream &OS) {
   if (!Decl.BaseName.empty())
     OS << " extends " << Decl.BaseName;
   OS << '\n';
+  if (Decl.Target) {
+    indent(OS, 1);
+    OS << "target\n";
+    for (const TargetPropertyDecl &Property : Decl.Target->Properties) {
+      indent(OS, 2);
+      OS << Property.Name << ": ";
+      printExpr(*Property.Value, OS);
+      OS << '\n';
+    }
+  }
   indent(OS, 1);
   OS << "instructions\n";
   for (const InstructionDecl &Instruction : Decl.Instructions) {
@@ -191,7 +207,9 @@ void printAST(const InstructionSetDecl &Decl, llvm::raw_ostream &OS) {
       indent(OS, 3);
       OS << "operand ";
       printType(Operand.Type, OS);
-      OS << ' ' << Operand.Name << '\n';
+      OS << ' ' << Operand.Name;
+      printTensorStorage(Operand.Type, OS);
+      OS << '\n';
     }
     if (Instruction.Encoding) {
       indent(OS, 3);

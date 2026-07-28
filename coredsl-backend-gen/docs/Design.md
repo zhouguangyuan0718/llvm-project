@@ -89,10 +89,10 @@ The first usable implementation accepts the current CoreDSL constructs:
 - expressions, assignments, conditionals, and the current architectural state
   access notation such as `X[rd]`, including typed declarations, casts, and
   bit slices used by the reference examples.
-- first-class `register tensor` and `memory tensor` types with a shared element
-  type and shape representation. Register tensors are one-dimensional, while
-  memory tensors may have any positive rank and MLIR-style `?` dynamic
-  dimensions.
+- first-class tensor types with a shared element type and shape representation,
+  using declarator qualifiers such as `value[register]` and `value[memory]`.
+  Register tensors are one-dimensional, while memory tensors may have any
+  positive rank and `*` dynamic dimensions.
 
 Current CoreDSL does not specify the complete physical-register and ABI model.
 For this phase, those facts are explicitly supplied by command-line options:
@@ -116,46 +116,31 @@ they are not presented as CoreDSL-derived facts.
 
 ### Phase-2 language extensions
 
-Once the Phase-1 model is stable, move the target configuration into CoreDSL+.
-The extended language must be additive and preserve existing instruction
-descriptions where possible.
+The first CoreDSL+ extension moves the minimal target configuration into the
+same input file. It is additive and preserves existing instruction descriptions
+where possible. The implemented form intentionally stays flat until register
+aliases, subregisters, calling conventions, and memory ABI need nested
+declarations:
 
 ```text
-architecture Tiny32 {
-  backend llvm {
+InstructionSet Tiny32 {
+  target {
+    llvm_name: "tiny32";
     namespace: Tiny32;
-    target_name: "tiny32";
-    triple: "unknown-unknown-none";
-    endian: little;
-    pointer_width: 32;
-    instruction_alignment: 4;
+    register_prefix: "r";
+    register_count: 16;
+    register_width: 32;
+    register_class: GPR;
+    register_bank: GPRBank;
   }
-
-  register_file GPR {
-    width: 32;
-    count: 16;
-    registers {
-      r0  { encoding: 0; constant: 0; reserved: true; }
-      r14 { encoding: 14; role: sp; reserved: true; }
-      r15 { encoding: 15; role: ra; reserved: true; }
-    }
-    class GPR32 {
-      members: [r0-r15];
-      allocatable: [r1-r13];
-      types: [i32, p0];
-      spill_size: 4;
-      spill_alignment: 4;
-    }
-    bank GPRBank { classes: [GPR32]; }
-  }
-
-  operand simm12 { kind: immediate; width: 12; signed: true; }
+  instructions { /* existing CoreDSL instruction declarations */ }
 }
 ```
 
-Further extensions introduce explicit instruction operands, legalization,
-selection rules, ABI, memory, and calling-convention declarations.  Explicit
-declarations override inference.
+Registers are initially named by `register_prefix` plus zero-based encoding.
+Further extensions introduce explicit physical registers, aliases,
+subregisters, legalization, ABI, memory, and calling-convention declarations.
+Explicit declarations override these minimal derived defaults.
 
 ## Canonical target-neutral IR
 
@@ -278,6 +263,9 @@ The initial operation mapping covers integer arithmetic and shifts:
 ```
 
 ## LLVM 23 emitter contract
+
+The first executable `def`/`Pat` probe and the target facts it showed to be
+missing are recorded in [TableGenSpike.md](TableGenSpike.md).
 
 The LLVM-facing layer is versioned as `Emit/LLVM23`.  It owns TableGen spelling,
 LLVM 23 class names, generated-include conventions, and C++ interface details.
@@ -470,16 +458,24 @@ instructions:
 G_ADD, G_SUB, G_AND, G_OR, G_XOR, G_SHL, G_LSHR, G_ASHR
 ```
 
-The initial test command is conceptually:
+The concrete initial test command is:
 
 ```text
-llc -march=tiny32 -mtriple=unknown-unknown-none -global-isel \
-  -stop-after=instruction-select test.mir
+llc -march=tiny32 -mtriple=unknown-unknown-none \
+  -run-pass=instruction-select test/GlobalISel/tiny32-add.mir -o -
 ```
 
-Only after MIR instruction selection is stable should the project add LLVM IR
-translation, return lowering, memory, control flow, ABI, stack frames, and MC
-support.
+The emitted target contains only the MC descriptors and target-lowering
+objects that LLVM needs to parse MIR and run this pass. The current
+implementation additionally has a deliberately narrow LLVM IR bring-up path:
+register-width scalar arguments are copied from physical argument registers,
+zero or one scalar result is returned in register zero, and the normal
+IRTranslator, Legalizer, RegBankSelect, and InstructionSelect passes run.
+It still does not register an assembler, code emitter, object writer, complete
+calling convention, or register-allocation pipeline.
+
+The complete generation, build, and `.ll` validation commands are recorded in
+[LLVM23BackendBringUp.md](LLVM23BackendBringUp.md).
 
 ### Milestone 6: CoreDSL+
 
@@ -501,6 +497,21 @@ target options produce:
 - TableGen accepted by LLVM 23 validation tools; and
 - a generated LLVM 23 backend that selects the covered Generic MIR operations
   before instruction selection stops.
+
+For the current implementation, the backend directory is produced without an
+LLVM build by:
+
+```text
+coredsl-backend-gen --emit-llvm23-backend=llvm/lib/Target/Tiny32 \
+  test/Model/tiny32.core_desc
+```
+
+It is then enabled as an LLVM experimental target and built normally:
+
+```text
+cmake -S llvm -B build -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=Tiny32
+cmake --build build --target llc
+```
 
 The project deliberately does **not** claim ABI, stack, object-file, assembler,
 or complex-control-flow completeness at this point.

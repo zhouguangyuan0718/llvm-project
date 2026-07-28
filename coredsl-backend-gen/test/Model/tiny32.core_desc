@@ -1,0 +1,44 @@
+InstructionSet Tiny32 {
+  target {
+    llvm_name: "tiny32";
+    namespace: Tiny32;
+    register_prefix: "r";
+    register_count: 8;
+    register_width: 32;
+    register_class: GPR;
+    register_bank: GPRBank;
+  }
+
+  instructions {
+    ADD {
+      operands: {
+        signed<32> dst;
+        signed<32> lhs;
+        signed<32> rhs;
+      }
+      behavior: {
+        dst = lhs + rhs;
+      }
+    }
+
+    SUB {
+      operands: {
+        signed<32> dst;
+        signed<32> lhs;
+        signed<32> rhs;
+      }
+      behavior: {
+        dst = lhs - rhs;
+      }
+    }
+
+    UNSUPPORTED {
+      operands: {
+        signed<32> dst;
+      }
+      behavior: {
+        dst = 0;
+      }
+    }
+  }
+}

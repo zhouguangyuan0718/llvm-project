@@ -214,10 +214,27 @@ struct InstructionDecl {
   std::unique_ptr<Stmt> Behavior;
 };
 
+/// A deliberately small target-description property.  The frontend retains
+/// the spelling as an expression so semantic analysis can issue diagnostics at
+/// the original value rather than at a synthesized command-line default.
+struct TargetPropertyDecl {
+  SourceRange Range;
+  std::string Name;
+  std::unique_ptr<Expr> Value;
+};
+
+/// Target facts required before LLVM backend generation can begin.  This is
+/// syntax-only data; TargetModel owns the validated, target-neutral form.
+struct TargetDecl {
+  SourceRange Range;
+  std::vector<TargetPropertyDecl> Properties;
+};
+
 struct InstructionSetDecl {
   SourceRange Range;
   std::string Name;
   std::string BaseName;
+  std::unique_ptr<TargetDecl> Target;
   std::vector<InstructionDecl> Instructions;
 };
 

@@ -1,3 +1,3 @@
-<input>:5:31: error: dynamic dimension is only supported by memory tensor type
-        register tensor<fp16, ?> value;
-                              ^
+<input>:5:22: error: dynamic dimension is only supported by memory tensor type
+        tensor<fp16, *> value[register];
+                     ^

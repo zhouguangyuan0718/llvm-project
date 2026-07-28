@@ -21,9 +21,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(coredsl_frontend
   lib/AST/ASTPrinter.cpp
+  lib/Emit/LLVM23/TableGenEmitter.cpp
+  lib/Emit/LLVM23/LLVM23Emitter.cpp
   lib/Frontend/Diagnostics.cpp
   lib/Frontend/Lexer.cpp
   lib/Frontend/Parser.cpp
+  lib/Sema/TargetModel.cpp
 )
 target_include_directories(coredsl_frontend PUBLIC include)
 target_include_directories(coredsl_frontend SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
@@ -68,6 +71,27 @@ if(BUILD_TESTING)
       -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor.ast
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckAST.cmake)
   add_test(
+    NAME coredsl-model-tiny32
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Model/tiny32.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Model/tiny32.model
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckModel.cmake)
+  add_test(
+    NAME coredsl-llvm23-td-tiny32
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Model/tiny32.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/LLVM23/tiny32.td
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckLLVM23TD.cmake)
+  add_test(
+    NAME coredsl-llvm23-backend-tiny32
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Model/tiny32.core_desc
+      -DOUTPUT_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/generated-backend-tiny32
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckLLVM23Backend.cmake)
+  add_test(
     NAME coredsl-parser-tensor-register-rank
     COMMAND ${CMAKE_COMMAND}
       -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
@@ -81,6 +105,27 @@ if(BUILD_TESTING)
       -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-dynamic.core_desc
       -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-register-dynamic.err
       -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  add_test(
+    NAME coredsl-parser-tensor-question-dynamic
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-question-dynamic.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-question-dynamic.err
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  add_test(
+    NAME coredsl-parser-tensor-storage-missing
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-storage-missing.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor-storage-missing.err
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckFailure.cmake)
+  add_test(
+    NAME coredsl-tablegen-tensor-spike
+    COMMAND ${CMAKE_COMMAND}
+      -DTOOL=$<TARGET_FILE:coredsl-backend-gen>
+      -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/test/Parser/tensor.core_desc
+      -DEXPECTED=${CMAKE_CURRENT_SOURCE_DIR}/test/TableGen/tensor-spike.td
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckTableGenSpike.cmake)
   foreach(Example IN ITEMS ExampleRV32 ExampleRV32K ExampleRV64)
     add_test(
       NAME coredsl-parser-${Example}

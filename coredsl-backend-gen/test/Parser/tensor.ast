@@ -1,17 +1,17 @@
 InstructionSet XTensor
   instructions
     instruction TADD
-      operand register tensor<signed<16>, 64> dst
-      operand register tensor<signed<16>, 64> lhs
-      operand register tensor<signed<16>, 64> rhs
+      operand tensor<signed<16>, 64> dst[register]
+      operand tensor<signed<16>, 64> lhs[register]
+      operand tensor<signed<16>, 64> rhs[register]
       behavior
         compound
-          decl register tensor<signed<16>, 64> tmp = (+ lhs rhs)
+          decl tensor<signed<16>, 64> tmp[register] = (+ lhs rhs)
           expr (= dst tmp)
     instruction MATMUL
-      operand memory tensor<fp16, ?, K> lhs
-      operand memory tensor<fp16, K, N> rhs
-      operand memory tensor<fp32, ?, N> output
+      operand tensor<fp16, *, K> lhs[memory]
+      operand tensor<fp16, K, N> rhs[memory]
+      operand tensor<fp32, *, N> output[memory]
       behavior
         compound
           expr (= output (* lhs rhs))

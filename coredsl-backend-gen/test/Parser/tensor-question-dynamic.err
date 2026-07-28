@@ -1,0 +1,6 @@
+<input>:5:22: error: expected tensor dimension
+        tensor<fp16, ?> value[memory];
+                     ^
+<input>:5:22: error: expected operand name, got ?
+        tensor<fp16, ?> value[memory];
+                     ^
