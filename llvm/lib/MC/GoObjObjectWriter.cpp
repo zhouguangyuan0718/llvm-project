@@ -302,6 +302,12 @@ struct GoObjGCFrameLayout {
 
 GoObjGCFrameLayout getGoObjGCFrameLayout(const Triple &TT, uint32_t StackSize,
                                          uint32_t PointerSize) {
+  if (TT.getArch() == Triple::x86_64) {
+    // CALL leaves the return address at entry SP. It is not part of Go's
+    // argument bitmap, so both entry and ordinary argument slots begin one
+    // pointer above the corresponding machine stack boundary.
+    return {StackSize, 0, StackSize, PointerSize};
+  }
   if (TT.getArch() != Triple::aarch64)
     return {StackSize, 0, StackSize, 0};
   if (StackSize == 0)
@@ -415,8 +421,11 @@ GoObjStatepointStackMaps makeStatepointStackMaps(
                     PointerSize !=
                 0)
           report_fatal_error(
-              "GoObj stack-growth statepoint contains an invalid argument "
-              "pointer slot");
+              Twine("GoObj stack-growth statepoint in ") + Function.Name +
+              " contains an invalid argument pointer slot: offset " +
+              Twine(Loc.Offset) + ", entry args start " +
+              Twine(FrameLayout.EntryArgsStart) + ", argument size " +
+              Twine(ArgSize));
         uint32_t Bit =
             (static_cast<uint32_t>(Loc.Offset) - FrameLayout.EntryArgsStart) /
             PointerSize;
@@ -846,8 +855,7 @@ uint64_t GoObjObjectWriter::writeObject() {
         }
       }
       if (std::optional<uint64_t> ExactSize =
-              Asm->getContext().getGoObjSymbolSize(
-                  SectionSymbols[I].Symbol)) {
+              Asm->getContext().getGoObjSymbolSize(SectionSymbols[I].Symbol)) {
         if (*ExactSize > SectionSize - Begin ||
             Begin + *ExactSize > End)
           report_fatal_error(

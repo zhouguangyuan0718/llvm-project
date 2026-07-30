@@ -183,10 +183,11 @@ emitGoRegSpills(MachineFunction &MF, MachineBasicBlock &MBB,
   const DebugLoc DL;
   const X86InstrInfo &TII = *MF.getSubtarget<X86Subtarget>().getInstrInfo();
   MachineFrameInfo &MFI = MF.getFrameInfo();
+  int64_t ReturnAddressSize = MF.getDataLayout().getPointerSize();
   for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
     assert(MFI.isFixedObjectIndex(Spill.FrameIndex) &&
            "Go register argument spill slot must be a fixed object");
-    int64_t Offset = MFI.getObjectOffset(Spill.FrameIndex);
+    int64_t Offset = ReturnAddressSize + MFI.getObjectOffset(Spill.FrameIndex);
     if (Spill.IsFP) {
       unsigned Opc =
           Reload ? (Spill.Size == 4 ? X86::MOVSSrm_alt : X86::MOVSDrm_alt)
@@ -240,12 +241,36 @@ static MachineInstrBuilder buildGoStackGrowthStatepoint(MachineFunction &MF,
   auto AddConstant = [&](uint64_t Value) {
     Statepoint.addImm(StackMaps::ConstantOp).addImm(Value);
   };
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  ArrayRef<X86MachineFunctionInfo::GoArgPointerSlot> PointerSlots =
+      MF.getInfo<X86MachineFunctionInfo>()->getGoArgPointerSlots();
+  uint64_t PointerSize = MF.getDataLayout().getPointerSize();
   AddConstant(MF.getFunction().getCallingConv());
-  AddConstant(0); // Statepoint flags.
-  AddConstant(0); // Deopt arguments.
-  AddConstant(0); // GC pointers.
-  AddConstant(0); // GC allocas.
-  AddConstant(0); // GC base/derived map entries.
+  AddConstant(0);                   // Statepoint flags.
+  AddConstant(0);                   // Deopt arguments.
+  AddConstant(PointerSlots.size()); // GC pointers.
+  for (const X86MachineFunctionInfo::GoArgPointerSlot &Slot : PointerSlots) {
+    if (!MFI.isFixedObjectIndex(Slot.FrameIndex))
+      report_fatal_error(
+          "X86 Go entry argument pointer slot is not a fixed object");
+    int64_t LogicalOffset = MFI.getObjectOffset(Slot.FrameIndex) +
+                            static_cast<int64_t>(Slot.OffsetWithinObject);
+    int64_t ExpectedLogicalOffset =
+        static_cast<int64_t>(Slot.ArgWord) * PointerSize;
+    int64_t Offset = static_cast<int64_t>(PointerSize) + LogicalOffset;
+    if (PointerSize == 0 || LogicalOffset != ExpectedLogicalOffset ||
+        !isInt<32>(Offset))
+      report_fatal_error(
+          "X86 Go entry argument pointer slot has invalid SP offset");
+    Statepoint.addImm(StackMaps::IndirectMemRefOp)
+        .addImm(PointerSize)
+        .addReg(X86::RSP)
+        .addImm(Offset);
+  }
+  AddConstant(0);                   // GC allocas.
+  AddConstant(PointerSlots.size()); // GC base/derived map entries.
+  for (uint64_t I = 0; I != PointerSlots.size(); ++I)
+    Statepoint.addImm(I).addImm(I);
   Statepoint
       .addRegMask(
           MF.getSubtarget<X86Subtarget>()
@@ -295,6 +320,15 @@ static void emitGoStackCheck(MachineFunction &MF,
     if (CompareMBB != CheckMBB)
       CompareMBB->addLiveIn(LI);
     MorestackMBB->addLiveIn(LI);
+  }
+  // Formal argument copies can be eliminated when an argument is unused in
+  // the function body, but the pre-frame morestack path still saves every
+  // ABIInternal register argument into its fixed home.
+  for (const X86MachineFunctionInfo::GoRegArgSpillSlot &Spill : Spills) {
+    CheckMBB->addLiveIn(Spill.Reg);
+    if (CompareMBB != CheckMBB)
+      CompareMBB->addLiveIn(Spill.Reg);
+    MorestackMBB->addLiveIn(Spill.Reg);
   }
   CheckMBB->addLiveIn(X86::R14);
   if (CompareMBB != CheckMBB) {

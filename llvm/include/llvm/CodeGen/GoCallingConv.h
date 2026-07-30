@@ -92,6 +92,11 @@ bool hasTupleResultsAttr(const AttributeList &Attrs);
 bool hasTupleResultsAttr(const Function &F);
 bool hasTupleResultsAttr(const CallBase &CB);
 
+/// Return the logical Go ABI type of an IR parameter. Frontends represent
+/// memory-class arguments as typed byval pointers, while direct arguments keep
+/// their source value type.
+Type *getParameterType(const Argument &Arg);
+
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys);
 

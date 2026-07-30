@@ -266,7 +266,7 @@ static uint32_t getGoObjArgSize(const Function &F, const DataLayout &DL,
   SmallVector<Type *, 8> ArgTys;
   for (const Argument &Arg : F.args())
     if (!Arg.hasNestAttr())
-      ArgTys.push_back(Arg.getType());
+      ArgTys.push_back(goabi::getParameterType(Arg));
 
   SmallVector<Type *, 8> ResultTys;
   goabi::getReturnTypes(F.getReturnType(), goabi::hasTupleResultsAttr(F),
@@ -1011,21 +1011,19 @@ static void collectGoObjModuleMetadata(AsmPrinter &AP, const Module &M) {
         report_fatal_error(
             "expected !goobj.marker_relocs entries to have four operands");
       const GlobalValue *Source =
-          getGoObjMetadataGlobal(Entry->getOperand(0),
-                                 "goobj.marker_relocs");
+          getGoObjMetadataGlobal(Entry->getOperand(0), "goobj.marker_relocs");
       const GlobalValue *Target =
-          getGoObjMetadataGlobal(Entry->getOperand(1),
-                                 "goobj.marker_relocs");
+          getGoObjMetadataGlobal(Entry->getOperand(1), "goobj.marker_relocs");
       const auto *Type =
           mdconst::dyn_extract<ConstantInt>(Entry->getOperand(2));
       const auto *Addend =
           mdconst::dyn_extract<ConstantInt>(Entry->getOperand(3));
-      if (!isa<Function>(Source) || !Type ||
-          Type->getValue().ugt(UINT16_MAX) || !Addend)
+      if (!isa<Function>(Source) || !Type || Type->getValue().ugt(UINT16_MAX) ||
+          !Addend)
         report_fatal_error("invalid !goobj.marker_relocs entry");
-      Relocs[Source].push_back(
-          {AP.getSymbol(Target), static_cast<uint16_t>(Type->getZExtValue()),
-           Addend->getSExtValue()});
+      Relocs[Source].push_back({AP.getSymbol(Target),
+                                static_cast<uint16_t>(Type->getZExtValue()),
+                                Addend->getSExtValue()});
     }
     for (auto &[Source, SourceRelocs] : Relocs)
       AP.OutContext.setGoObjMarkerRelocs(AP.getSymbol(Source),

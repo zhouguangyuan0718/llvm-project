@@ -9036,7 +9036,7 @@ getAArch64GoArgTypes(const Function &F, SmallVectorImpl<int> &LayoutMap) {
     if (Arg.hasNestAttr())
       continue;
     LayoutMap[Index] = ArgTys.size();
-    ArgTys.push_back(Arg.getType());
+    ArgTys.push_back(goabi::getParameterType(Arg));
   }
   return ArgTys;
 }
@@ -9050,7 +9050,7 @@ getAArch64GoCallArgTypes(const TargetLowering::ArgListTy &Args,
     if (Args[I].IsNest)
       continue;
     LayoutMap[I] = ArgTys.size();
-    ArgTys.push_back(Args[I].OrigTy);
+    ArgTys.push_back(Args[I].IsByVal ? Args[I].IndirectType : Args[I].OrigTy);
   }
   return ArgTys;
 }
@@ -9144,6 +9144,22 @@ static SDValue lowerAArch64GoFormalArguments(
     }
 
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
+    if (Ins[Group.Start].Flags.isByVal()) {
+      if (Group.End != Group.Start + 1)
+        report_fatal_error("split AArch64 Go byval formal argument");
+      if (ArgLayout.InRegs)
+        report_fatal_error(
+            "AArch64 Go byval formal argument was assigned to registers");
+      uint64_t Size = std::max<uint64_t>(1, ArgLayout.Size);
+      if (Ins[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("AArch64 Go byval formal argument size mismatch");
+      int FI = MFI.CreateFixedObject(Size, StackBias + ArgLayout.StackOffset,
+                                     /*IsImmutable=*/false, /*isAliased=*/true);
+      RecordPointerSlots(FI, ArgLayout.StackOffset, ArgLayout.Size);
+      InVals.push_back(DAG.getFrameIndex(FI, PtrVT));
+      continue;
+    }
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     uint64_t SpillPieceOffset = 0;
@@ -9324,6 +9340,29 @@ static SDValue lowerAArch64GoCall(const AArch64TargetLowering &TLI,
     }
 
     const goabi::ValueLayout &ArgLayout = Layout.Args[LayoutMap[Group.Index]];
+    if (Outs[Group.Start].Flags.isByVal()) {
+      if (Group.End != Group.Start + 1)
+        report_fatal_error("split AArch64 Go byval call argument");
+      if (ArgLayout.InRegs)
+        report_fatal_error(
+            "AArch64 Go byval call argument was assigned to registers");
+      if (Outs[Group.Start].Flags.getByValSize() != ArgLayout.Size)
+        report_fatal_error("AArch64 Go byval call argument size mismatch");
+
+      assert(StackPtr && "missing Go call stack pointer");
+      SDValue Addr = DAG.getNode(
+          ISD::ADD, DL, PtrVT, StackPtr,
+          DAG.getIntPtrConstant(StackBias + ArgLayout.StackOffset, DL));
+      SDValue Size = DAG.getConstant(ArgLayout.Size, DL, MVT::i64);
+      Align Alignment = Outs[Group.Start].Flags.getNonZeroByValAlign();
+      MemOpChains.push_back(DAG.getMemcpy(
+          Chain, DL, Addr, OutVals[Group.Start], Size, Alignment, Alignment,
+          /*isVol=*/false, /*AlwaysInline=*/false, /*CI=*/nullptr, std::nullopt,
+          MachinePointerInfo::getStack(MF, StackBias + ArgLayout.StackOffset),
+          MachinePointerInfo()));
+      continue;
+    }
+
     unsigned IntPiece = 0;
     unsigned FPPiece = 0;
     for (unsigned I = Group.Start; I != Group.End; ++I) {

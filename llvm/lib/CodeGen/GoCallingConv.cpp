@@ -120,6 +120,10 @@ bool hasTupleResultsAttr(const CallBase &CB) {
   return false;
 }
 
+Type *getParameterType(const Argument &Arg) {
+  return Arg.hasByValAttr() ? Arg.getParamByValType() : Arg.getType();
+}
+
 void getReturnTypes(Type *ReturnType, bool TupleResults,
                     SmallVectorImpl<Type *> &ResultTys) {
   if (ReturnType->isVoidTy())
