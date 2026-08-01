@@ -7985,6 +7985,20 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     DAG.setRoot(Res);
     return;
   }
+  case Intrinsic::go_gc_unsafe_point_start:
+  case Intrinsic::go_gc_unsafe_point_end: {
+    MachineFunction &MF = DAG.getMachineFunction();
+    MCSymbol *Label = MF.getContext().createTempSymbol("go_unsafe_point", true);
+    int32_t Value = Intrinsic == Intrinsic::go_gc_unsafe_point_start
+                        ? GoObj::UnsafePointUnsafe
+                        : GoObj::UnsafePointSafe;
+    bool EmitAtBlockEnd = Intrinsic == Intrinsic::go_gc_unsafe_point_end &&
+                          cast<ConstantInt>(I.getArgOperand(0))->isOne();
+    MF.addGoObjUnsafePointLabel(Label, Value, EmitAtBlockEnd);
+    Res = DAG.getLabelNode(ISD::ANNOTATION_LABEL, sdl, getRoot(), Label);
+    DAG.setRoot(Res);
+    return;
+  }
   case Intrinsic::invariant_start:
     // Discard region information.
     setValue(&I,

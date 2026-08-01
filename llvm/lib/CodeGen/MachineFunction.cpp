@@ -307,6 +307,7 @@ void MachineFunction::clear() {
   OperandRecycler.clear(Allocator);
   BasicBlockRecycler.clear(Allocator);
   CodeViewAnnotations.clear();
+  GoObjUnsafePointLabels.clear();
   VariableDbgInfos.clear();
   if (RegInfo) {
     RegInfo->~MachineRegisterInfo();

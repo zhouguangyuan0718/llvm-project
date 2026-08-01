@@ -1291,6 +1291,59 @@ uint64_t GoObjObjectWriter::writeObject() {
         });
       }
 
+      SmallVector<GoObjPCTabEntry, 8> UnsafePointEntries;
+      int32_t UnsafePointValue = GoObj::UnsafePointSafe;
+      if (const auto *Entries =
+              Asm->getContext().getGoObjSymbolUnsafePointEntries(
+                  Symbols[I].Symbol)) {
+        for (const MCContext::GoObjUnsafePointEntry &Entry : *Entries) {
+          if (!Entry.Label->isInSection())
+            report_fatal_error("GoObj unsafe-point label was not emitted");
+          if (&Entry.Label->getSection() != &Symbols[I].Symbol->getSection())
+            report_fatal_error(
+                "GoObj unsafe-point label is in a different section");
+          if (Entry.Value != GoObj::UnsafePointSafe &&
+              Entry.Value != GoObj::UnsafePointUnsafe)
+            report_fatal_error("GoObj unsafe-point event has invalid value");
+          if (Entry.Value == UnsafePointValue)
+            report_fatal_error(
+                Entry.Value == GoObj::UnsafePointUnsafe
+                    ? "GoObj unsafe-point ranges overlap"
+                    : "GoObj unsafe-point range ends without a matching start");
+          uint64_t LabelOffset = Asm->getSymbolOffset(*Entry.Label);
+          if (LabelOffset < Symbols[I].SectionBegin)
+            report_fatal_error(
+                "GoObj unsafe-point label precedes its function");
+          uint64_t EventPC = LabelOffset - Symbols[I].SectionBegin;
+          if (EventPC > CodeSize)
+            report_fatal_error(
+                "GoObj unsafe-point label is outside its function");
+          if (!UnsafePointEntries.empty() &&
+              EventPC < UnsafePointEntries.back().PC)
+            report_fatal_error(
+                "GoObj unsafe-point labels are not in emission order");
+          UnsafePointEntries.push_back({EventPC, Entry.Value});
+          UnsafePointValue = Entry.Value;
+        }
+      }
+      if (UnsafePointValue != GoObj::UnsafePointSafe)
+        report_fatal_error("GoObj unsafe-point range has no end marker");
+      SmallVector<GoObjPCTabEntry, 8> NormalizedUnsafePointEntries;
+      for (const GoObjPCTabEntry &Entry : UnsafePointEntries) {
+        if (!NormalizedUnsafePointEntries.empty() &&
+            NormalizedUnsafePointEntries.back().PC == Entry.PC)
+          NormalizedUnsafePointEntries.back().Value = Entry.Value;
+        else
+          NormalizedUnsafePointEntries.push_back(Entry);
+      }
+      int32_t InitialUnsafePointValue = GoObj::UnsafePointSafe;
+      if (!NormalizedUnsafePointEntries.empty() &&
+          NormalizedUnsafePointEntries.front().PC == 0) {
+        InitialUnsafePointValue = NormalizedUnsafePointEntries.front().Value;
+        NormalizedUnsafePointEntries.erase(
+            NormalizedUnsafePointEntries.begin());
+      }
+
       GoObjFuncDebugLines &LineInfo = FuncDebugLines[I];
       if (!LineInfo.hasLines())
         LineInfo.Files.push_back(GetFallbackFile());
@@ -1345,7 +1398,8 @@ uint64_t GoObjObjectWriter::writeObject() {
           Symbols, AuxCarrierIndexes, 'P', StackMapIndex);
       uint32_t UnsafePointSym = getOrAddHashedAuxCarrierSymbol(
           Symbols, AuxCarrierIndexes, 'P',
-          makeConstantPCTab(-1, CodeSize, PCQuantum));
+          makePCTab(InitialUnsafePointValue, NormalizedUnsafePointEntries,
+                    CodeSize, PCQuantum));
 
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncInfo, FuncInfoSym});
       Symbols[I].Auxiliaries.push_back({GoObj::AuxFuncdata, ArgsMapSym});

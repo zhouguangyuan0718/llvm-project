@@ -106,6 +106,11 @@ public:
     int32_t Value;
   };
 
+  struct GoObjUnsafePointEntry {
+    const MCSymbol *Label;
+    int32_t Value;
+  };
+
   struct GoObjStackMapLocation {
     enum LocationType : uint8_t {
       Unprocessed,
@@ -243,6 +248,10 @@ private:
   /// Go object pcsp entries keyed by MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjPCSPEntry>>
       GoObjSymbolPCSPEntries;
+
+  /// Go object asynchronous-preemption events keyed by function symbol.
+  DenseMap<const MCSymbol *, std::vector<GoObjUnsafePointEntry>>
+      GoObjSymbolUnsafePointEntries;
 
   /// Go object statepoint stack maps keyed by function MC symbol.
   DenseMap<const MCSymbol *, std::vector<GoObjStackMapEntry>>
@@ -773,6 +782,20 @@ public:
   getGoObjSymbolPCSPEntries(const MCSymbol *Sym) const {
     auto It = GoObjSymbolPCSPEntries.find(Sym);
     if (It == GoObjSymbolPCSPEntries.end())
+      return nullptr;
+    return &It->second;
+  }
+
+  void
+  setGoObjSymbolUnsafePointEntries(const MCSymbol *Sym,
+                                   std::vector<GoObjUnsafePointEntry> Entries) {
+    GoObjSymbolUnsafePointEntries[Sym] = std::move(Entries);
+  }
+
+  const std::vector<GoObjUnsafePointEntry> *
+  getGoObjSymbolUnsafePointEntries(const MCSymbol *Sym) const {
+    auto It = GoObjSymbolUnsafePointEntries.find(Sym);
+    if (It == GoObjSymbolUnsafePointEntries.end())
       return nullptr;
     return &It->second;
   }

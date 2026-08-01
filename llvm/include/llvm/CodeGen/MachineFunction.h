@@ -407,6 +407,13 @@ class LLVM_ABI MachineFunction {
   /// CodeView label annotations.
   std::vector<std::pair<MCSymbol *, MDNode *>> CodeViewAnnotations;
 
+  /// Go asynchronous-preemption state changes keyed by zero-width labels.
+  struct GoObjUnsafePointLabelInfo {
+    int32_t Value;
+    bool EmitAtBlockEnd;
+  };
+  DenseMap<const MCSymbol *, GoObjUnsafePointLabelInfo> GoObjUnsafePointLabels;
+
   bool CallsEHReturn = false;
   bool CallsUnwindInit = false;
   bool HasEHContTarget = false;
@@ -1419,6 +1426,25 @@ public:
 
   ArrayRef<std::pair<MCSymbol *, MDNode *>> getCodeViewAnnotations() const {
     return CodeViewAnnotations;
+  }
+
+  void addGoObjUnsafePointLabel(const MCSymbol *Label, int32_t Value,
+                                bool EmitAtBlockEnd) {
+    GoObjUnsafePointLabels[Label] = {Value, EmitAtBlockEnd};
+  }
+
+  bool getGoObjUnsafePointLabelInfo(const MCSymbol *Label, int32_t &Value,
+                                    bool &EmitAtBlockEnd) const {
+    auto It = GoObjUnsafePointLabels.find(Label);
+    if (It == GoObjUnsafePointLabels.end())
+      return false;
+    Value = It->second.Value;
+    EmitAtBlockEnd = It->second.EmitAtBlockEnd;
+    return true;
+  }
+
+  bool hasGoObjUnsafePointLabels() const {
+    return !GoObjUnsafePointLabels.empty();
   }
 
   /// Return a reference to the C++ typeinfo for the current function.

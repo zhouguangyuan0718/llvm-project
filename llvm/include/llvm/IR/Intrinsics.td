@@ -881,6 +881,21 @@ def int_gcwrite : Intrinsic<[],
                             [IntrArgMemOnly, NoCapture<ArgIndex<1>>,
                              NoCapture<ArgIndex<2>>]>;
 
+// Mark the beginning and end of a Go asynchronous-preemption unsafe range.
+// Frontends must emit balanced pairs within each IR basic block.  The end
+// marker's immediate argument requests that its label be emitted after all
+// machine instructions in the block, including its terminator.  Modeling the
+// markers as convergent writes keeps them ordered and prevents duplication or
+// merging until code generation replaces them with labels.
+def int_go_gc_unsafe_point_start :
+  DefaultAttrsIntrinsic<[], [],
+                        [IntrWriteMem, IntrNoDuplicate, IntrNoMerge,
+                         IntrConvergent]>;
+def int_go_gc_unsafe_point_end :
+  DefaultAttrsIntrinsic<[], [llvm_i1_ty],
+                        [IntrWriteMem, IntrNoDuplicate, IntrNoMerge,
+                         IntrConvergent, ImmArg<ArgIndex<0>>]>;
+
 //===------------------- ObjC ARC runtime Intrinsics --------------------===//
 //
 // Note these are to support the Objective-C ARC optimizer which wants to

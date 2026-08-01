@@ -2351,6 +2351,7 @@ void AsmPrinter::emitFunctionBody() {
 
   bool TrackGoObjPCSP = TM.getTargetTriple().isOSBinFormatGoObj();
   SmallVector<MCContext::GoObjPCSPEntry, 8> GoObjPCSPEntries;
+  SmallVector<MCContext::GoObjUnsafePointEntry, 8> GoObjUnsafePointEntries;
   int32_t GoObjSPDelta = 0;
 
   bool CanDoExtraAnalysis = ORE->allowExtraAnalysis(DEBUG_TYPE);
@@ -2383,6 +2384,8 @@ void AsmPrinter::emitFunctionBody() {
         PrefetchTargets ? PrefetchTargets->begin() : nullptr;
     auto PrefetchTargetEnd = PrefetchTargets ? PrefetchTargets->end() : nullptr;
     unsigned LastCallsiteIndex = 0;
+    SmallVector<std::pair<MCSymbol *, int32_t>, 1>
+        DeferredGoObjUnsafePointLabels;
 
     for (auto &MI : MBB) {
       if (PrefetchTargetIt != PrefetchTargetEnd &&
@@ -2422,7 +2425,21 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::LOCAL_ESCAPE:
         emitFrameAlloc(MI);
         break;
-      case TargetOpcode::ANNOTATION_LABEL:
+      case TargetOpcode::ANNOTATION_LABEL: {
+        MCSymbol *Label = MI.getOperand(0).getMCSymbol();
+        int32_t Value;
+        bool EmitAtBlockEnd;
+        if (TrackGoObjPCSP &&
+            MF->getGoObjUnsafePointLabelInfo(Label, Value, EmitAtBlockEnd)) {
+          if (EmitAtBlockEnd) {
+            DeferredGoObjUnsafePointLabels.push_back({Label, Value});
+            break;
+          }
+          GoObjUnsafePointEntries.push_back({Label, Value});
+        }
+        OutStreamer->emitLabel(Label);
+        break;
+      }
       case TargetOpcode::GC_LABEL:
         OutStreamer->emitLabel(MI.getOperand(0).getMCSymbol());
         break;
@@ -2624,6 +2641,10 @@ void AsmPrinter::emitFunctionBody() {
       for (auto &Handler : Handlers)
         Handler->endInstruction();
     }
+    for (const auto &[Label, Value] : DeferredGoObjUnsafePointLabels) {
+      OutStreamer->emitLabel(Label);
+      GoObjUnsafePointEntries.push_back({Label, Value});
+    }
     // Emit the remaining prefetch targets for this block. This includes
     // nonexisting callsite indexes.
     while (PrefetchTargetIt != PrefetchTargetEnd) {
@@ -2737,6 +2758,11 @@ void AsmPrinter::emitFunctionBody() {
     OutContext.setGoObjSymbolPCSPEntries(
         CurrentFnSym, std::vector<MCContext::GoObjPCSPEntry>(
                           GoObjPCSPEntries.begin(), GoObjPCSPEntries.end()));
+  if (TrackGoObjPCSP && CurrentFnSym)
+    OutContext.setGoObjSymbolUnsafePointEntries(
+        CurrentFnSym,
+        std::vector<MCContext::GoObjUnsafePointEntry>(
+            GoObjUnsafePointEntries.begin(), GoObjUnsafePointEntries.end()));
 
   emitFunctionBodyEnd();
 

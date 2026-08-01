@@ -1031,6 +1031,14 @@ PreservedAnalyses ShrinkWrapPass::run(MachineFunction &MF,
 }
 
 bool ShrinkWrapImpl::isShrinkWrapEnabled(const MachineFunction &MF) {
+  // A Go unsafe-point marker describes an exact instruction interval. A
+  // shrink-wrapped prologue or epilogue can be inserted before a marker that
+  // was originally first in its block, leaving frame setup/teardown outside
+  // the unsafe interval. Keep frame code at the ordinary function entry and
+  // exits until shrink wrapping can preserve these marker boundaries.
+  if (MF.hasGoObjUnsafePointLabels())
+    return false;
+
   const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
 
   switch (EnableShrinkWrapOpt) {
