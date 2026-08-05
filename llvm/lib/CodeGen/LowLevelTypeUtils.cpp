@@ -82,6 +82,7 @@ LLT llvm::getLLTForType(Type &Ty, const DataLayout &DL) {
 }
 
 MVT llvm::getMVTForLLT(LLT Ty) {
+  assert(!Ty.isTensor() && "tensor LLTs have no MVT representation");
   if (Ty.isVector())
     return MVT::getVectorVT(getMVTForLLT(Ty.getElementType()),
                             Ty.getElementCount());
@@ -103,6 +104,7 @@ MVT llvm::getMVTForLLT(LLT Ty) {
 }
 
 EVT llvm::getApproximateEVTForLLT(LLT Ty, LLVMContext &Ctx) {
+  assert(!Ty.isTensor() && "tensor LLTs have no approximate EVT");
   if (Ty.isVector()) {
     EVT EltVT = getApproximateEVTForLLT(Ty.getElementType(), Ctx);
     return EVT::getVectorVT(Ctx, EltVT, Ty.getElementCount());

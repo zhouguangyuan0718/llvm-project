@@ -342,8 +342,7 @@ GISelInstProfileBuilder::addNodeIDOpcode(unsigned Opc) const {
 
 const GISelInstProfileBuilder &
 GISelInstProfileBuilder::addNodeIDRegType(const LLT Ty) const {
-  uint64_t Val = Ty.getUniqueRAWLLTData();
-  ID.AddInteger(Val);
+  Ty.Profile(ID);
   return *this;
 }
 

@@ -685,6 +685,10 @@ static MIToken::TokenKind symbolToken(char C) {
     return MIToken::lbrace;
   case '}':
     return MIToken::rbrace;
+  case '[':
+    return MIToken::l_square;
+  case ']':
+    return MIToken::r_square;
   case '+':
     return MIToken::plus;
   case '-':

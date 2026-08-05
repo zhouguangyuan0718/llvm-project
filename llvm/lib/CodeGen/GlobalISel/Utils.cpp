@@ -1985,6 +1985,7 @@ bool llvm::isGuaranteedNotToBeUndef(Register Reg,
 }
 
 Type *llvm::getTypeForLLT(LLT Ty, LLVMContext &C) {
+  assert(!Ty.isTensor() && "tensor LLTs have no generic LLVM IR type");
   if (Ty.isVector())
     return VectorType::get(IntegerType::get(C, Ty.getScalarSizeInBits()),
                            Ty.getElementCount());

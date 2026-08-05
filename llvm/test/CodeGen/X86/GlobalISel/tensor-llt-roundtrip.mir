@@ -1,0 +1,19 @@
+# RUN: llc -mtriple=x86_64-linux-gnu -run-pass=none %s -o - | FileCheck %s
+
+--- |
+  define void @tensor_llt_roundtrip() {
+    ret void
+  }
+...
+---
+name:            tensor_llt_roundtrip
+legalized:       false
+regBankSelected: false
+selected:        false
+body:             |
+  bb.0:
+    ; CHECK-LABEL: name: tensor_llt_roundtrip
+    ; CHECK: %0:_(tensor<elem=s8,dtype=sint,shape=[1, 3, 4, 4],strides=[48, 16, 4, 1],format=nchw>) = G_IMPLICIT_DEF
+    %0:_(tensor<elem=s8,dtype=sint,shape=[1,3,4,4],strides=[48,16,4,1],format=nchw>) = G_IMPLICIT_DEF
+    RET 0
+...

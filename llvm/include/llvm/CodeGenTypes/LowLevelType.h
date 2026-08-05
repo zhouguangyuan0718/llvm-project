@@ -29,22 +29,52 @@
 #define LLVM_CODEGEN_LOWLEVELTYPE_H
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/bit.h"
 #include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
+#include <array>
 #include <cassert>
+#include <cstdint>
 
 namespace llvm {
 
 class Type;
+class FoldingSetNodeID;
 class raw_ostream;
+
+/// The arithmetic interpretation of an element in a tensor LLT. The physical
+/// representation and bit width are described separately by the element LLT.
+enum class TensorDataType : uint16_t {
+  Invalid,
+  Bool,
+  SInt,
+  UInt,
+  IEEEFloat,
+  BFloat,
+  TF32,
+  Float8E4M3FN,
+  Float8E5M2,
+};
+
+/// The semantic ordering of tensor dimensions. Explicit strides remain the
+/// authoritative description of the physical layout.
+enum class TensorDataFormat : uint16_t {
+  GenericStrided,
+  NCHW,
+  NHWC,
+  NCDHW,
+  NDHWC,
+};
 
 class LLT {
 public:
   using FpSemantics = APFloat::Semantics;
+  static constexpr unsigned MaxTensorRank = 5;
 
   enum class Kind : uint8_t {
     INVALID,
@@ -56,6 +86,9 @@ public:
     VECTOR_INTEGER,
     VECTOR_FLOAT,
     VECTOR_POINTER,
+    TENSOR_ANY,
+    TENSOR_INTEGER,
+    TENSOR_FLOAT,
   };
 
   constexpr static Kind toVector(Kind Ty) {
@@ -82,6 +115,16 @@ public:
       return Kind::FLOAT;
 
     return Kind::ANY_SCALAR;
+  }
+
+  constexpr static Kind toTensor(Kind Ty) {
+    if (Ty == Kind::INTEGER)
+      return Kind::TENSOR_INTEGER;
+
+    if (Ty == Kind::FLOAT)
+      return Kind::TENSOR_FLOAT;
+
+    return Kind::TENSOR_ANY;
   }
 
   /// Get a low-level scalar or aggregate "bag of bits".
@@ -236,6 +279,13 @@ public:
     return scalarOrVector(EC, LLT::scalar(static_cast<unsigned>(ScalarSize)));
   }
 
+  /// Get a fixed-rank tensor type whose metadata is stored directly in LLT.
+  /// Empty strides request a contiguous row-major layout.
+  LLVM_ABI static Expected<LLT> tensor(LLT ElementType, ArrayRef<int64_t> Shape,
+                                       ArrayRef<int64_t> Strides,
+                                       TensorDataFormat DataFormat,
+                                       TensorDataType DataType);
+
   explicit constexpr LLT(Kind Info, ElementCount EC, uint64_t SizeInBits)
       : LLT() {
     init(Info, EC, SizeInBits);
@@ -271,6 +321,14 @@ public:
   constexpr bool isFloatVector() const { return Info == Kind::VECTOR_FLOAT; }
   constexpr bool isPointerVector() const {
     return Info == Kind::VECTOR_POINTER;
+  }
+  constexpr bool isAnyTensor() const { return Info == Kind::TENSOR_ANY; }
+  constexpr bool isIntegerTensor() const {
+    return Info == Kind::TENSOR_INTEGER;
+  }
+  constexpr bool isFloatTensor() const { return Info == Kind::TENSOR_FLOAT; }
+  constexpr bool isTensor() const {
+    return isAnyTensor() || isIntegerTensor() || isFloatTensor();
   }
   constexpr bool isPointerOrPointerVector() const {
     return isPointer() || isPointerVector();
@@ -385,8 +443,11 @@ public:
 
   /// Returns the total size of the type. Must only be called on sized types.
   constexpr TypeSize getSizeInBits() const {
+    if (isTensor())
+      return getTensorStorageSizeInBits();
     if (isPointer() || isScalar())
       return TypeSize::getFixed(getScalarSizeInBits());
+    assert(isVector() && "expected a sized LLT");
     auto EC = getElementCount();
     return TypeSize(getScalarSizeInBits() * EC.getKnownMinValue(),
                     EC.isScalable());
@@ -399,7 +460,44 @@ public:
     return {(BaseSize.getKnownMinValue() + 7) / 8, BaseSize.isScalable()};
   }
 
-  LLT getScalarType() const { return isVector() ? getElementType() : *this; }
+  LLT getScalarType() const {
+    assert(!isTensor() && "tensor LLTs do not have a scalar type");
+    return isVector() ? getElementType() : *this;
+  }
+
+  LLT getTensorElementType() const {
+    assert(isTensor() && "expected a tensor LLT");
+    const uint64_t ElementBits = getFieldValue(ScalarSizeFieldInfo);
+    if (isIntegerTensor())
+      return LLT{Kind::INTEGER, ElementCount::getFixed(0), ElementBits};
+    if (isFloatTensor())
+      return LLT{Kind::FLOAT, ElementCount::getFixed(0), ElementBits,
+                 static_cast<FpSemantics>(getFieldValue(FpSemanticFieldInfo))};
+    return LLT::scalar(ElementBits);
+  }
+  uint64_t getTensorElementCount() const {
+    assert(isTensor() && "expected a tensor LLT");
+    return TensorElementCount;
+  }
+  ArrayRef<int64_t> getTensorShape() const {
+    assert(isTensor() && "expected a tensor LLT");
+    return {TensorShape.data(), getFieldValue(TensorRankFieldInfo)};
+  }
+  ArrayRef<int64_t> getTensorStrides() const {
+    assert(isTensor() && "expected a tensor LLT");
+    return {TensorStrides.data(), getFieldValue(TensorRankFieldInfo)};
+  }
+  TensorDataFormat getTensorDataFormat() const {
+    assert(isTensor() && "expected a tensor LLT");
+    return static_cast<TensorDataFormat>(
+        getFieldValue(TensorDataFormatFieldInfo));
+  }
+  TensorDataType getTensorDataType() const {
+    assert(isTensor() && "expected a tensor LLT");
+    return static_cast<TensorDataType>(getFieldValue(TensorDataTypeFieldInfo));
+  }
+  LLVM_ABI TypeSize getTensorLogicalSizeInBits() const;
+  LLVM_ABI TypeSize getTensorStorageSizeInBits() const;
 
   constexpr FpSemantics getFpSemantics() const {
     assert((isFloat() || isFloatVector()) &&
@@ -418,6 +516,7 @@ public:
   /// If this type is a vector, return a vector with the same number of elements
   /// but the new element type. Otherwise, return the new element type.
   constexpr LLT changeElementType(LLT NewEltTy) const {
+    assert(!isTensor() && "cannot change a tensor element type directly");
     return isVector() ? changeVectorElementType(NewEltTy) : NewEltTy;
   }
 
@@ -462,6 +561,7 @@ public:
   /// elements if this is a vector, or the bitwidth for scalar/pointers. Does
   /// not attempt to handle cases that aren't evenly divisible.
   LLT divide(int Factor) const {
+    assert(!isTensor() && "cannot divide a tensor LLT");
     assert(Factor != 1);
     assert((!isScalar() || getScalarSizeInBits() != 0) && !isFloat() &&
            "cannot divide scalar of size zero and floats");
@@ -482,6 +582,7 @@ public:
   /// element type. For a scalar or pointer, this will produce a new vector with
   /// \p Factor elements.
   LLT multiplyElements(int Factor) const {
+    assert(!isTensor() && "cannot multiply elements of a tensor LLT");
     if (isVector()) {
       return scalarOrVector(getElementCount().multiplyCoefficientBy(Factor),
                             getElementType());
@@ -495,6 +596,7 @@ public:
   }
 
   constexpr unsigned getScalarSizeInBits() const {
+    assert(!isTensor() && "tensor LLTs do not have a scalar size");
     if (isPointerOrPointerVector())
       return getFieldValue(PointerSizeFieldInfo);
     return getFieldValue(ScalarSizeFieldInfo);
@@ -522,6 +624,7 @@ public:
   }
 
   LLT changeToInteger() const {
+    assert(!isTensor() && "cannot convert a tensor LLT to an integer LLT");
     if (isPointer() || isPointerVector())
       return *this;
 
@@ -533,11 +636,23 @@ public:
 
   LLVM_ABI void print(raw_ostream &OS) const;
 
+  /// Add the complete semantic type to a FoldingSet profile.
+  LLVM_ABI void Profile(FoldingSetNodeID &ID) const;
+
+  LLVM_ABI unsigned getHashValue() const;
+
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   LLVM_DUMP_METHOD void dump() const;
 #endif
 
   bool operator==(const LLT &RHS) const {
+    if (isTensor() || RHS.isTensor())
+      return isTensor() && RHS.isTensor() && Info == RHS.Info &&
+             RawData == RHS.RawData &&
+             TensorElementCount == RHS.TensorElementCount &&
+             TensorShape == RHS.TensorShape &&
+             TensorStrides == RHS.TensorStrides;
+
     if (isAnyScalar() || RHS.isAnyScalar())
       return isScalar() == RHS.isScalar() &&
              getScalarSizeInBits() == RHS.getScalarSizeInBits();
@@ -627,9 +742,18 @@ private:
   static constexpr BitFieldInfo PointerAddressSpaceFieldInfo{24, 20};
   static constexpr BitFieldInfo ScalarSizeFieldInfo{32, 28};
   static constexpr BitFieldInfo PointerSizeFieldInfo{16, 44};
+  static constexpr BitFieldInfo TensorRankFieldInfo{3, 0};
+  static constexpr BitFieldInfo TensorDataFormatFieldInfo{3, 3};
+  static constexpr BitFieldInfo TensorDataTypeFieldInfo{4, 6};
 
   uint64_t RawData : 60;
   Kind Info : 4;
+
+  // Tensor metadata is deliberately inline. Non-tensor LLTs leave these
+  // fields zero-initialized and ignore them for equality and hashing.
+  std::array<int64_t, MaxTensorRank> TensorShape{};
+  std::array<int64_t, MaxTensorRank> TensorStrides{};
+  uint64_t TensorElementCount = 0;
 
   static constexpr uint64_t getMask(const BitFieldInfo FieldInfo) {
     const int FieldSizeInBits = FieldInfo[0];
@@ -701,6 +825,8 @@ private:
 
 public:
   constexpr uint64_t getUniqueRAWLLTData() const {
+    assert(!isTensor() &&
+           "tensor LLTs do not have a unique 64-bit representation");
     return ((uint64_t)RawData) | ((uint64_t)Info) << 60;
   }
 
@@ -718,8 +844,7 @@ inline raw_ostream &operator<<(raw_ostream &OS, const LLT &Ty) {
 
 template <> struct DenseMapInfo<LLT> {
   static inline unsigned getHashValue(const LLT &Ty) {
-    uint64_t Val = Ty.getUniqueRAWLLTData();
-    return DenseMapInfo<uint64_t>::getHashValue(Val);
+    return Ty.getHashValue();
   }
   static bool isEqual(const LLT &LHS, const LLT &RHS) { return LHS == RHS; }
 };

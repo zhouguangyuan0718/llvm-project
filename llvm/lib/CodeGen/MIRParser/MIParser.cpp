@@ -639,6 +639,14 @@ static const char *toString(MIToken::TokenKind TokenKind) {
     return "'('";
   case MIToken::rparen:
     return "')'";
+  case MIToken::l_square:
+    return "'['";
+  case MIToken::r_square:
+    return "']'";
+  case MIToken::less:
+    return "'<'";
+  case MIToken::greater:
+    return "'>'";
   default:
     return "<unknown token>";
   }
@@ -2119,6 +2127,93 @@ static bool verifyAddrSpace(uint64_t AddrSpace) {
 }
 
 bool MIParser::parseLowLevelType(StringRef::iterator Loc, LLT &Ty) {
+  if (Token.is(MIToken::Identifier) && Token.stringValue() == "tensor") {
+    auto ExpectSpelling = [this](StringRef Spelling) {
+      if (Token.range() != Spelling)
+        return error("expected '" + Spelling + "' in tensor type");
+      lex();
+      return false;
+    };
+
+    auto ParseIntegerList = [this](SmallVectorImpl<int64_t> &Values) {
+      if (expectAndConsume(MIToken::l_square))
+        return true;
+      if (consumeIfPresent(MIToken::r_square))
+        return false;
+      while (true) {
+        if (Token.isNot(MIToken::IntegerLiteral) ||
+            Token.integerValue().isNegative() ||
+            Token.integerValue().getActiveBits() > 63)
+          return error("expected a non-negative 63-bit integer in tensor list");
+        Values.push_back(Token.integerValue().getZExtValue());
+        lex();
+        if (consumeIfPresent(MIToken::r_square))
+          return false;
+        if (expectAndConsume(MIToken::comma))
+          return true;
+      }
+    };
+
+    lex();
+    if (expectAndConsume(MIToken::less) || ExpectSpelling("elem") ||
+        expectAndConsume(MIToken::equal))
+      return true;
+
+    LLT ElementType;
+    if (parseLowLevelType(Loc, ElementType) ||
+        expectAndConsume(MIToken::comma) || ExpectSpelling("dtype") ||
+        expectAndConsume(MIToken::equal))
+      return true;
+
+    std::optional<TensorDataType> DataType =
+        StringSwitch<std::optional<TensorDataType>>(Token.range())
+            .Case("bool", TensorDataType::Bool)
+            .Case("sint", TensorDataType::SInt)
+            .Case("uint", TensorDataType::UInt)
+            .Case("ieeefloat", TensorDataType::IEEEFloat)
+            .Case("bfloat", TensorDataType::BFloat)
+            .Case("tf32", TensorDataType::TF32)
+            .Case("f8e4m3fn", TensorDataType::Float8E4M3FN)
+            .Case("f8e5m2", TensorDataType::Float8E5M2)
+            .Default(std::nullopt);
+    if (!DataType)
+      return error("unknown tensor data type '" + Token.range() + "'");
+    lex();
+
+    if (expectAndConsume(MIToken::comma) || ExpectSpelling("shape") ||
+        expectAndConsume(MIToken::equal))
+      return true;
+    SmallVector<int64_t, 4> Shape;
+    if (ParseIntegerList(Shape) || expectAndConsume(MIToken::comma) ||
+        ExpectSpelling("strides") || expectAndConsume(MIToken::equal))
+      return true;
+    SmallVector<int64_t, 4> Strides;
+    if (ParseIntegerList(Strides) || expectAndConsume(MIToken::comma) ||
+        ExpectSpelling("format") || expectAndConsume(MIToken::equal))
+      return true;
+
+    std::optional<TensorDataFormat> DataFormat =
+        StringSwitch<std::optional<TensorDataFormat>>(Token.range())
+            .Case("generic", TensorDataFormat::GenericStrided)
+            .Case("nchw", TensorDataFormat::NCHW)
+            .Case("nhwc", TensorDataFormat::NHWC)
+            .Case("ncdhw", TensorDataFormat::NCDHW)
+            .Case("ndhwc", TensorDataFormat::NDHWC)
+            .Default(std::nullopt);
+    if (!DataFormat)
+      return error("unknown tensor data format '" + Token.range() + "'");
+    lex();
+    if (expectAndConsume(MIToken::greater))
+      return true;
+
+    Expected<LLT> TensorTy =
+        LLT::tensor(ElementType, Shape, Strides, *DataFormat, *DataType);
+    if (!TensorTy)
+      return error(Loc, toString(TensorTy.takeError()));
+    Ty = *TensorTy;
+    return false;
+  }
+
   StringRef TypeDigits = Token.range();
   if (TypeDigits.consume_front("s") || TypeDigits.consume_front("i") ||
       TypeDigits.consume_front("f") || TypeDigits.consume_front("p") ||

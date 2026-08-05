@@ -125,6 +125,96 @@ TEST(LowLevelTypeTest, Vector) {
   }
 }
 
+TEST(LowLevelTypeTest, Tensor) {
+  const int64_t Shape[] = {1, 3, 4, 4};
+
+  Expected<LLT> TensorOrErr = LLT::tensor(
+      LLT::scalar(8), Shape, {}, TensorDataFormat::NCHW, TensorDataType::SInt);
+  ASSERT_TRUE(!!TensorOrErr) << toString(TensorOrErr.takeError());
+  LLT Tensor = *TensorOrErr;
+
+  EXPECT_TRUE(Tensor.isValid());
+  EXPECT_TRUE(Tensor.isTensor());
+  EXPECT_TRUE(Tensor.isAnyTensor());
+  EXPECT_FALSE(Tensor.isIntegerTensor());
+  EXPECT_FALSE(Tensor.isFloatTensor());
+  EXPECT_FALSE(Tensor.isScalar());
+  EXPECT_FALSE(Tensor.isVector());
+  EXPECT_FALSE(Tensor.isPointer());
+  EXPECT_EQ(LLT::scalar(8), Tensor.getTensorElementType());
+  EXPECT_EQ(48u, Tensor.getTensorElementCount());
+  EXPECT_EQ(ArrayRef<int64_t>(Shape), Tensor.getTensorShape());
+  EXPECT_EQ((ArrayRef<int64_t>{48, 16, 4, 1}), Tensor.getTensorStrides());
+  EXPECT_EQ(TensorDataFormat::NCHW, Tensor.getTensorDataFormat());
+  EXPECT_EQ(TensorDataType::SInt, Tensor.getTensorDataType());
+  EXPECT_EQ(TypeSize::getFixed(384), Tensor.getTensorLogicalSizeInBits());
+  EXPECT_EQ(TypeSize::getFixed(384), Tensor.getSizeInBits());
+
+  Expected<LLT> SameTensorOrErr = LLT::tensor(
+      LLT::scalar(8), Shape, {}, TensorDataFormat::NCHW, TensorDataType::SInt);
+  ASSERT_TRUE(!!SameTensorOrErr) << toString(SameTensorOrErr.takeError());
+  EXPECT_EQ(Tensor, *SameTensorOrErr);
+  EXPECT_EQ(DenseMapInfo<LLT>::getHashValue(Tensor),
+            DenseMapInfo<LLT>::getHashValue(*SameTensorOrErr));
+
+  LLT Integer8(LLT::Kind::INTEGER, ElementCount::getFixed(0), 8);
+  Expected<LLT> TypedElementOrErr = LLT::tensor(
+      Integer8, Shape, {}, TensorDataFormat::NCHW, TensorDataType::SInt);
+  ASSERT_TRUE(!!TypedElementOrErr) << toString(TypedElementOrErr.takeError());
+  EXPECT_NE(Tensor, *TypedElementOrErr);
+  EXPECT_TRUE(TypedElementOrErr->isIntegerTensor());
+  EXPECT_FALSE(TypedElementOrErr->isAnyTensor());
+  EXPECT_FALSE(TypedElementOrErr->isFloatTensor());
+  EXPECT_EQ(Integer8, TypedElementOrErr->getTensorElementType());
+
+  LLT Float32 = LLT::float32();
+  Expected<LLT> FloatTensorOrErr = LLT::tensor(
+      Float32, Shape, {}, TensorDataFormat::NCHW, TensorDataType::IEEEFloat);
+  ASSERT_TRUE(!!FloatTensorOrErr) << toString(FloatTensorOrErr.takeError());
+  EXPECT_TRUE(FloatTensorOrErr->isFloatTensor());
+  EXPECT_FALSE(FloatTensorOrErr->isAnyTensor());
+  EXPECT_FALSE(FloatTensorOrErr->isIntegerTensor());
+  EXPECT_EQ(Float32, FloatTensorOrErr->getTensorElementType());
+}
+
+TEST(LowLevelTypeTest, StridedTensorSizeAndValidation) {
+  const int64_t Shape[] = {2, 3};
+  const int64_t PaddedStrides[] = {4, 1};
+  Expected<LLT> TensorOrErr =
+      LLT::tensor(LLT::scalar(16), Shape, PaddedStrides,
+                  TensorDataFormat::GenericStrided, TensorDataType::UInt);
+  ASSERT_TRUE(!!TensorOrErr) << toString(TensorOrErr.takeError());
+  EXPECT_EQ(6u, TensorOrErr->getTensorElementCount());
+  EXPECT_EQ(TypeSize::getFixed(96), TensorOrErr->getTensorLogicalSizeInBits());
+  EXPECT_EQ(TypeSize::getFixed(112), TensorOrErr->getSizeInBits());
+
+  const int64_t InvalidShape[] = {2, 0};
+  Expected<LLT> Invalid =
+      LLT::tensor(LLT::scalar(8), InvalidShape, {},
+                  TensorDataFormat::GenericStrided, TensorDataType::UInt);
+  EXPECT_FALSE(!!Invalid);
+  consumeError(Invalid.takeError());
+
+  const int64_t TooManyDimensions[] = {1, 1, 1, 1, 1, 1};
+  Expected<LLT> TooMany =
+      LLT::tensor(LLT::scalar(8), TooManyDimensions, {},
+                  TensorDataFormat::GenericStrided, TensorDataType::UInt);
+  EXPECT_FALSE(!!TooMany);
+  consumeError(TooMany.takeError());
+
+  Expected<LLT> UnknownFormat = LLT::tensor(
+      LLT::scalar(8), Shape, {}, static_cast<TensorDataFormat>(UINT16_MAX),
+      TensorDataType::UInt);
+  EXPECT_FALSE(!!UnknownFormat);
+  consumeError(UnknownFormat.takeError());
+
+  Expected<LLT> UnknownDataType =
+      LLT::tensor(LLT::scalar(8), Shape, {}, TensorDataFormat::GenericStrided,
+                  static_cast<TensorDataType>(UINT16_MAX));
+  EXPECT_FALSE(!!UnknownDataType);
+  consumeError(UnknownDataType.takeError());
+}
+
 TEST(LowLevelTypeTest, ScalarOrVector) {
   // Test version with number of bits for scalar type.
   EXPECT_EQ(LLT::scalar(32),

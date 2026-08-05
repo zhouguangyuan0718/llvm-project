@@ -42,6 +42,8 @@ struct MIToken {
     rparen,
     lbrace,
     rbrace,
+    l_square,
+    r_square,
     plus,
     minus,
     less,
