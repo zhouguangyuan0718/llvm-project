@@ -35,7 +35,6 @@
 #include "llvm/CodeGenTypes/MachineValueType.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include <array>
 #include <cassert>
@@ -281,10 +280,12 @@ public:
 
   /// Get a fixed-rank tensor type whose metadata is stored directly in LLT.
   /// Empty strides request a contiguous row-major layout.
-  LLVM_ABI static Expected<LLT> tensor(LLT ElementType, ArrayRef<int64_t> Shape,
-                                       ArrayRef<int64_t> Strides,
-                                       TensorDataFormat DataFormat,
-                                       TensorDataType DataType);
+  /// The caller must provide a valid scalar element type and one to five
+  /// dimensions, with matching explicit strides when present.
+  LLVM_ABI static LLT tensor(LLT ElementType, ArrayRef<int64_t> Shape,
+                             ArrayRef<int64_t> Strides,
+                             TensorDataFormat DataFormat,
+                             TensorDataType DataType);
 
   explicit constexpr LLT(Kind Info, ElementCount EC, uint64_t SizeInBits)
       : LLT() {

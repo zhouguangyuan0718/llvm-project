@@ -2206,11 +2206,7 @@ bool MIParser::parseLowLevelType(StringRef::iterator Loc, LLT &Ty) {
     if (expectAndConsume(MIToken::greater))
       return true;
 
-    Expected<LLT> TensorTy =
-        LLT::tensor(ElementType, Shape, Strides, *DataFormat, *DataType);
-    if (!TensorTy)
-      return error(Loc, toString(TensorTy.takeError()));
-    Ty = *TensorTy;
+    Ty = LLT::tensor(ElementType, Shape, Strides, *DataFormat, *DataType);
     return false;
   }
 
