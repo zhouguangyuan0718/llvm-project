@@ -287,6 +287,27 @@ public:
                              TensorDataFormat DataFormat,
                              TensorDataType DataType);
 
+  template <size_t Rank>
+  static constexpr LLT
+  tensor(LLT ElementType, const std::array<int64_t, Rank> &Shape,
+         TensorDataFormat DataFormat, TensorDataType DataType) {
+    static_assert(Rank > 0 && Rank <= MaxTensorRank,
+                  "tensor rank must be between one and five");
+    return tensorImpl(ElementType, Shape.data(), nullptr, Rank, DataFormat,
+                      DataType);
+  }
+
+  template <size_t Rank>
+  static constexpr LLT
+  tensor(LLT ElementType, const std::array<int64_t, Rank> &Shape,
+         const std::array<int64_t, Rank> &Strides, TensorDataFormat DataFormat,
+         TensorDataType DataType) {
+    static_assert(Rank > 0 && Rank <= MaxTensorRank,
+                  "tensor rank must be between one and five");
+    return tensorImpl(ElementType, Shape.data(), Strides.data(), Rank,
+                      DataFormat, DataType);
+  }
+
   explicit constexpr LLT(Kind Info, ElementCount EC, uint64_t SizeInBits)
       : LLT() {
     init(Info, EC, SizeInBits);
@@ -466,7 +487,7 @@ public:
     return isVector() ? getElementType() : *this;
   }
 
-  LLT getTensorElementType() const {
+  constexpr LLT getTensorElementType() const {
     assert(isTensor() && "expected a tensor LLT");
     const uint64_t ElementBits = getFieldValue(ScalarSizeFieldInfo);
     if (isIntegerTensor())
@@ -476,7 +497,7 @@ public:
                  static_cast<FpSemantics>(getFieldValue(FpSemanticFieldInfo))};
     return LLT::scalar(ElementBits);
   }
-  uint64_t getTensorElementCount() const {
+  constexpr uint64_t getTensorElementCount() const {
     assert(isTensor() && "expected a tensor LLT");
     return TensorElementCount;
   }
@@ -488,12 +509,12 @@ public:
     assert(isTensor() && "expected a tensor LLT");
     return {TensorStrides.data(), getFieldValue(TensorRankFieldInfo)};
   }
-  TensorDataFormat getTensorDataFormat() const {
+  constexpr TensorDataFormat getTensorDataFormat() const {
     assert(isTensor() && "expected a tensor LLT");
     return static_cast<TensorDataFormat>(
         getFieldValue(TensorDataFormatFieldInfo));
   }
-  TensorDataType getTensorDataType() const {
+  constexpr TensorDataType getTensorDataType() const {
     assert(isTensor() && "expected a tensor LLT");
     return static_cast<TensorDataType>(getFieldValue(TensorDataTypeFieldInfo));
   }
@@ -772,6 +793,36 @@ private:
 
   constexpr uint64_t getFieldValue(const BitFieldInfo FieldInfo) const {
     return getMask(FieldInfo) & (RawData >> FieldInfo[1]);
+  }
+
+  static constexpr LLT tensorImpl(LLT ElementType, const int64_t *Shape,
+                                  const int64_t *Strides, size_t Rank,
+                                  TensorDataFormat DataFormat,
+                                  TensorDataType DataType) {
+    LLT Tensor;
+    Tensor.Info = toTensor(ElementType.Info);
+    Tensor.RawData =
+        ElementType.RawData | maskAndShift(Rank, TensorRankFieldInfo) |
+        maskAndShift(static_cast<uint16_t>(DataFormat),
+                     TensorDataFormatFieldInfo) |
+        maskAndShift(static_cast<uint16_t>(DataType), TensorDataTypeFieldInfo);
+    Tensor.TensorElementCount = 1;
+    for (size_t I = 0; I != Rank; ++I) {
+      Tensor.TensorShape[I] = Shape[I];
+      Tensor.TensorElementCount *= static_cast<uint64_t>(Shape[I]);
+    }
+
+    if (Strides) {
+      for (size_t I = 0; I != Rank; ++I)
+        Tensor.TensorStrides[I] = Strides[I];
+    } else {
+      int64_t RunningStride = 1;
+      for (size_t I = Rank; I != 0; --I) {
+        Tensor.TensorStrides[I - 1] = RunningStride;
+        RunningStride *= Shape[I - 1];
+      }
+    }
+    return Tensor;
   }
 
   // Init for scalar and integer single or vector types

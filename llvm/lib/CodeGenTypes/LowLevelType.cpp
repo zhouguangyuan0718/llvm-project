@@ -16,7 +16,6 @@
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
-#include <algorithm>
 using namespace llvm;
 
 bool LLT::ExtendedLLT = false;
@@ -64,28 +63,9 @@ static StringRef getTensorDataFormatName(TensorDataFormat DataFormat) {
 LLT LLT::tensor(LLT ElementType, ArrayRef<int64_t> Shape,
                 ArrayRef<int64_t> Strides, TensorDataFormat DataFormat,
                 TensorDataType DataType) {
-  LLT Tensor;
-  Tensor.Info = toTensor(ElementType.Info);
-  Tensor.RawData =
-      ElementType.RawData | maskAndShift(Shape.size(), TensorRankFieldInfo) |
-      maskAndShift(static_cast<uint16_t>(DataFormat),
-                   TensorDataFormatFieldInfo) |
-      maskAndShift(static_cast<uint16_t>(DataType), TensorDataTypeFieldInfo);
-  std::copy(Shape.begin(), Shape.end(), Tensor.TensorShape.begin());
-  Tensor.TensorElementCount = 1;
-  for (int64_t Dim : Shape)
-    Tensor.TensorElementCount *= static_cast<uint64_t>(Dim);
-
-  if (Strides.empty()) {
-    int64_t RunningStride = 1;
-    for (size_t I = Shape.size(); I != 0; --I) {
-      Tensor.TensorStrides[I - 1] = RunningStride;
-      RunningStride *= Shape[I - 1];
-    }
-  } else {
-    std::copy(Strides.begin(), Strides.end(), Tensor.TensorStrides.begin());
-  }
-  return Tensor;
+  return tensorImpl(ElementType, Shape.data(),
+                    Strides.empty() ? nullptr : Strides.data(), Shape.size(),
+                    DataFormat, DataType);
 }
 
 static LLT::FpSemantics getFpSemanticsForMVT(MVT VT) {

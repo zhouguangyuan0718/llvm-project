@@ -452,6 +452,15 @@ constexpr LLT CEV2S32 = LLT::fixed_vector(2, 32);
 constexpr LLT CESV2S32 = LLT::scalable_vector(2, 32);
 constexpr LLT CEP0 = LLT::pointer(0, 32);
 constexpr LLT CEV2P1 = LLT::fixed_vector(2, LLT::pointer(1, 64));
+constexpr std::array<int64_t, 4> CETensorShape{1, 3, 4, 4};
+constexpr LLT CETensor =
+    LLT::tensor(LLT::scalar(8), CETensorShape, TensorDataFormat::NCHW,
+                TensorDataType::SInt);
+constexpr std::array<int64_t, 2> CEStridedTensorShape{2, 3};
+constexpr std::array<int64_t, 2> CEStridedTensorStrides{4, 1};
+constexpr LLT CEStridedTensor =
+    LLT::tensor(LLT::float32(), CEStridedTensorShape, CEStridedTensorStrides,
+                TensorDataFormat::GenericStrided, TensorDataType::IEEEFloat);
 
 static_assert(!CELLT.isValid());
 static_assert(CES32.isValid());
@@ -459,6 +468,17 @@ static_assert(CEV2S32.isValid());
 static_assert(CESV2S32.isValid());
 static_assert(CEP0.isValid());
 static_assert(CEV2P1.isValid());
+static_assert(CETensor.isValid());
+static_assert(CETensor.isAnyTensor());
+static_assert(CETensor.getTensorElementCount() == 48);
+static_assert(CETensor.getTensorElementType().isAnyScalar());
+static_assert(CETensor.getTensorElementType().getScalarSizeInBits() == 8);
+static_assert(CETensor.getTensorDataFormat() == TensorDataFormat::NCHW);
+static_assert(CETensor.getTensorDataType() == TensorDataType::SInt);
+static_assert(CEStridedTensor.isFloatTensor());
+static_assert(CEStridedTensor.getTensorElementCount() == 6);
+static_assert(CEStridedTensor.getTensorDataFormat() ==
+              TensorDataFormat::GenericStrided);
 static_assert(CEV2P1.isVector());
 static_assert(CEV2P1.getElementCount() == ElementCount::getFixed(2));
 static_assert(CEV2P1.getElementCount() != ElementCount::getFixed(1));
