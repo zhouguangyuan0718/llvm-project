@@ -8,7 +8,8 @@ templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
-`llvm-api-render-example.cpp`.
+`llvm-api-render-example.cpp`. `TARGET_INTEGRATION.md` shows how another LLVM
+Target compiles and exposes the generated legalizer to GlobalISel.
 
 ## Renderer input
 
