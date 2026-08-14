@@ -1,94 +1,171 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. It is
-deliberately independent of the CoreDSL frontend and can be rendered by a
-Mustache implementation that supports the standard set-delimiter tag.
+independent of the CoreDSL frontend and can be rendered by a Mustache
+implementation that supports the standard set-delimiter tag.
 
-The templates cover two mechanisms:
+The type policy is derived from one target-native type profile:
 
-1. same-size representation rewrites at a `G_INTRINSIC` boundary, such as
-   `f16` to `i16`, implemented with `G_BITCAST`; and
-2. replacement of the generic `i1` condition with a target-supported carrier
-   type across compare producers and selected condition consumers.
+1. a native scalar integer or floating-point type stays unchanged;
+2. a missing integer width is promoted to the narrowest wider native integer;
+3. a listed intrinsic floating-point operand is bitcast to an equal-width
+   integer and then promoted when that integer width is not native; and
+4. compare results and their enabled consumers use the smallest native integer
+   as the condition carrier.
 
-They do not generate numeric conversions, general floating-point legalization,
-instruction selection, or register-bank mappings.
+No intrinsic, condition, or opcode rule repeats source/destination types. The
+only type-related renderer input is `native_types`.
 
 ## Files
 
 - `LegalizerInfo.h.mustache` generates the class declaration.
-- `LegalizerInfo.cpp.mustache` generates rules and intrinsic legalization.
+- `LegalizerInfo.cpp.mustache` generates the native-type policy, opcode rules,
+  and intrinsic legalization.
 - `legalizer-input.schema.json` defines the renderer input contract.
-- `legalizer-input.example.json` demonstrates `f16 <-> i16` and an `i16`
+- `legalizer-input.example.json` demonstrates a target with native `i16/i32`,
+  no floating-point register type, an `f16` intrinsic boundary, and an `i16`
   condition carrier.
 
 The templates switch Mustache delimiters to `<%` and `%>` so C++ initializer
 lists containing `{{...}}` remain literal C++.
 
-## Input contract
+## Native type input
 
-The producer must normalize its target model before rendering. In particular:
+`native_types` has two fields:
 
-- every `*_type_cpp` value is a concrete LLVM C++ expression such as
-  `LLT::integer(16)` or `LLT::float16()`;
-- `has_subtarget` controls whether the generated constructor receives a
-  `subtarget_class_name` reference named `ST`; generated type expressions may
-  inspect it, but the legalizer does not retain the reference;
-- `bitcast_pairs` contains every ordered `{destination, source}` pair created
-  by intrinsic rewrites, with duplicate pairs removed;
-- each intrinsic rewrite uses a MIR operand index, not an LLVM IR argument
-  index;
-- every rewrite states the expected source representation and the required
-  target representation;
-- the producer rejects duplicate intrinsic IDs and duplicate operand indices
-  within one intrinsic rewrite list;
-- `is_def` must agree with the referenced `MachineOperand`; and
-- `has_fcmp` and `has_select` mirror whether their corresponding arrays are
-  non-empty. This duplication keeps the template logicless and portable across
-  Mustache implementations.
+```json
+{
+  "integer_widths": [16, 32],
+  "floating_point_types": ["LLT::float32()"]
+}
+```
+
+The input producer must validate that:
+
+- `integer_widths` is non-empty, unique, and strictly increasing;
+- every integer entry is a real target register carrier width;
+- every floating-point entry is a concrete ExtendedLLT expression;
+- every listed floating-point type is directly selectable by the target; and
+- the LLVM target enables ExtendedLLT consistently and produces concrete
+  `LLT::integer()`/`LLT::float*()` types rather than wildcard scalar types.
+
+The generated `getNativeIntegerTypeForWidth` function performs the promotion
+lookup. A value wider than the largest native integer is rejected; this
+prototype never narrows or splits it.
+
+## Opcode input is not a type input
+
+Native types do not prove that an opcode is implemented. The renderer therefore
+still receives opcode coverage separately:
+
+```json
+{
+  "opcode_cpp": "G_ADD",
+  "type_indices": [0],
+  "unsupported": true
+}
+```
+
+`integer_opcode_rules` promotes each listed integer type index independently.
+`floating_opcode_rules` accepts only native floating-point types and does not
+turn floating-point arithmetic into integer arithmetic. For example, changing
+`G_FADD f16` into `G_ADD i16` would change semantics and is never generated.
+
+Use `type_indices: [0, 1]` for an opcode such as a shift whose value and amount
+types are separate legality-query entries. Do not list `G_ICMP`, `G_FCMP`,
+`G_BRCOND`, `G_SELECT`, `G_PHI`, or the cast/extension artifacts here; their
+shapes are handled by dedicated generated rules.
+
+The input producer must reject duplicate `opcode_cpp` entries and validate
+each `type_indices` list against the opcode's actual `LegalityQuery` shape.
+
+The `unsupported` switch appends a catch-all rule. Set it only when this block
+owns the complete policy for that opcode.
+
+## Intrinsic carrier convention
+
+An intrinsic entry contains only its ID and the MIR operands that opt into the
+integer-carrier convention:
+
+```json
+{
+  "id_cpp": "Intrinsic::example_f16_op",
+  "operands": [
+    { "operand_index": 0, "is_def": true },
+    { "operand_index": 2, "is_def": false }
+  ]
+}
+```
 
 For a one-definition `G_INTRINSIC`, operand 0 is the definition, operand 1 is
 the intrinsic ID, and operand 2 is the first input. With multiple definitions,
-the intrinsic ID is at `getNumExplicitDefs()` and the inputs follow it. Compute
-the final MIR operand indices in the input producer.
+the ID is at `getNumExplicitDefs()` and inputs follow it. The input producer
+must reject duplicate intrinsic IDs and duplicate operand indices.
 
-The generated intrinsic helper validates every rewrite before mutating the
-instruction. It accepts an operand only when its exact LLT is either the stated
-source type or the already-legal target type, and it rejects width-changing
-bitcasts. Unknown intrinsics follow `intrinsics.default_result_cpp`; use
-`false` for fail-closed generated targets.
+For a listed use, the generated sequence is:
 
-## Condition closure
+```text
+fN -> G_BITCAST iN -> G_ANYEXT iM -> intrinsic
+```
 
-`G_ICMP` and `G_FCMP` use type index 0 for the condition result and type index
-1 for compared values. `G_BRCOND` uses type index 0 for its condition, while
-`G_SELECT` uses type index 1. The generated rules therefore rewrite the same
-source condition type consistently at each enabled boundary.
+The extension is omitted when `iN` is native. For a listed definition, the
+inverse boundary is:
 
-Enable `emit_phi` only when this template owns the target's complete `G_PHI`
-policy. Most targets should instead add the legal condition carrier to their
-existing `G_PHI` rules, because `G_PHI` also transports non-condition values.
+```text
+intrinsic iM -> G_TRUNC iN -> G_BITCAST fN
+```
 
-The `*_unsupported` switches append a catch-all rule for that opcode. Set them
-only when this generated block owns all legalization rules for the opcode;
-otherwise leave them false and let the surrounding target rules provide the
-fallback.
+Integer operands omit the bitcast and are only promoted/truncated. The helper
+validates every operand and carrier before changing the instruction, so an
+unsupported width cannot leave a partially legalized intrinsic.
 
-The condition convention expected by this prototype is false=`0`, true=`1`,
-with branch consumers treating any nonzero value as true. A target using a
-predicate register or an all-ones mask needs a different custom legalization.
+`G_ANYEXT` means this convention preserves a low-bit payload, not signed or
+unsigned numeric extension. An instruction that observes the promoted upper
+bits needs a separate per-operand semantic policy and must not use this rule.
+
+Unknown intrinsics follow `intrinsics.default_result_cpp`; generated targets
+should normally use `false` and fail closed.
+
+## Conditions and representation-safe float bitcasts
+
+The smallest native integer is the generated condition carrier. `G_ICMP`
+promotes both its result and integer operands. Enabled `G_BRCOND`, `G_SELECT`,
+and `G_PHI` rules consume the same integer policy. `G_FCMP` is legal only for
+native floating-point operand types; only its condition result is promoted.
+
+`G_SELECT` is representation-safe, so a non-native floating-point selected
+value may be bitcast to equal-width integer bits and then promoted. This is not
+extended to arbitrary opcodes. `G_PHI` only promotes integer types because the
+generic LegalizerHelper has no corresponding scalar PHI bitcast action.
+
+The condition convention is false=`0`, true=`1`, with branch consumers treating
+nonzero as true. Predicate registers or all-ones masks require a different
+custom policy.
+
+## Generated artifacts
+
+The template derives legality predicates for only the artifacts it introduces:
+
+- `G_ANYEXT/G_ZEXT/G_SEXT` from a missing integer width to its carrier;
+- the inverse `G_TRUNC`; and
+- equal-width integer/floating-point `G_BITCAST` boundaries.
+
+`artifact_rules.unsupported` should normally remain false when the surrounding
+target has additional pointer, vector, or cast rules. Legalizing these generic
+artifacts still requires matching instruction selection and register-bank
+support; type legalization alone does not make them selectable.
 
 ## Integration checks
 
-After rendering, validate at least these layers:
+After rendering:
 
-1. JSON input against `legalizer-input.schema.json`;
-2. compile the generated header and source against the exact LLVM payload;
-3. run a MIR legalizer test and verify the intrinsic has same-size `G_BITCAST`
-   boundaries and the compare/consumer use the configured condition type; and
-4. run instruction selection and verify `G_BITCAST`, `G_INTRINSIC`, compare,
-   and condition consumers are all selected or intentionally eliminated.
-
-The generator must also emit matching legality/selection and register-bank
-support for each ordered `bitcast_pairs` entry. Declaring `G_BITCAST` legal in
-this template alone does not make it selectable.
+1. validate JSON against `legalizer-input.schema.json` and validate the sorted
+   integer-width invariant in the input producer;
+2. run `clang-format` on the generated C++;
+3. compile it against the exact LLVM payload;
+4. test native integers, every gap below the maximum integer width, each
+   supported/unsupported floating-point width, and a width above the maximum;
+5. inspect MIR after legalization for the expected bitcast/extend/trunc order;
+   and
+6. run instruction selection to verify every generated artifact, intrinsic,
+   compare, and consumer is selected or intentionally eliminated.

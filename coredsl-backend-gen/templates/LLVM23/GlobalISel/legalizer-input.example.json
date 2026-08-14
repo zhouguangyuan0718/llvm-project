@@ -11,32 +11,33 @@
   ],
   "has_subtarget": true,
   "subtarget_class_name": "ExampleSubtarget",
-  "bitcast_pairs": [
+  "native_types": {
+    "integer_widths": [16, 32],
+    "floating_point_types": []
+  },
+  "artifact_rules": {
+    "unsupported": false
+  },
+  "integer_opcode_rules": [
     {
-      "dst_type_cpp": "LLT::integer(16)",
-      "src_type_cpp": "LLT::float16()"
+      "opcode_cpp": "G_ADD",
+      "type_indices": [0],
+      "unsupported": true
     },
     {
-      "dst_type_cpp": "LLT::float16()",
-      "src_type_cpp": "LLT::integer(16)"
+      "opcode_cpp": "G_SUB",
+      "type_indices": [0],
+      "unsupported": true
     }
   ],
+  "floating_opcode_rules": [],
   "condition": {
-    "source_type_cpp": "LLT::integer(1)",
-    "legal_type_cpp": "LLT::integer(16)",
-    "icmp_operand_types": [
-      { "type_cpp": "LLT::integer(16)" }
-    ],
     "icmp_unsupported": true,
-    "fcmp_operand_types": [],
-    "has_fcmp": false,
+    "emit_fcmp": false,
     "fcmp_unsupported": false,
     "emit_brcond": true,
     "brcond_unsupported": true,
-    "select_value_types": [
-      { "type_cpp": "LLT::integer(16)" }
-    ],
-    "has_select": true,
+    "emit_select": true,
     "select_unsupported": true,
     "emit_phi": false,
     "phi_unsupported": false
@@ -46,17 +47,13 @@
     "items": [
       {
         "id_cpp": "Intrinsic::example_f16_op",
-        "rewrites": [
+        "operands": [
           {
             "operand_index": 0,
-            "from_type_cpp": "LLT::float16()",
-            "to_type_cpp": "LLT::integer(16)",
             "is_def": true
           },
           {
             "operand_index": 2,
-            "from_type_cpp": "LLT::float16()",
-            "to_type_cpp": "LLT::integer(16)",
             "is_def": false
           }
         ]

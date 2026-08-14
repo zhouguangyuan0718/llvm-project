@@ -26,7 +26,10 @@
     "has_subtarget",
     "header_includes",
     "source_includes",
-    "bitcast_pairs"
+    "native_types",
+    "artifact_rules",
+    "integer_opcode_rules",
+    "floating_opcode_rules"
   ],
   "properties": {
     "$schema": { "type": "string" },
@@ -45,9 +48,15 @@
       "type": "array",
       "items": { "$ref": "#/$defs/include" }
     },
-    "bitcast_pairs": {
+    "native_types": { "$ref": "#/$defs/nativeTypes" },
+    "artifact_rules": { "$ref": "#/$defs/artifactRules" },
+    "integer_opcode_rules": {
       "type": "array",
-      "items": { "$ref": "#/$defs/typePair" }
+      "items": { "$ref": "#/$defs/opcodeRule" }
+    },
+    "floating_opcode_rules": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/opcodeRule" }
     },
     "condition": { "$ref": "#/$defs/condition" },
     "intrinsics": { "$ref": "#/$defs/intrinsics" }
@@ -61,98 +70,68 @@
         "path": { "type": "string", "minLength": 1 }
       }
     },
-    "type": {
+    "nativeTypes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type_cpp"],
+      "required": ["integer_widths", "floating_point_types"],
       "properties": {
-        "type_cpp": { "type": "string", "minLength": 1 }
+        "integer_widths": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 1 }
+        },
+        "floating_point_types": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     },
-    "typePair": {
+    "artifactRules": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["dst_type_cpp", "src_type_cpp"],
+      "required": ["unsupported"],
       "properties": {
-        "dst_type_cpp": { "type": "string", "minLength": 1 },
-        "src_type_cpp": { "type": "string", "minLength": 1 }
+        "unsupported": { "type": "boolean" }
+      }
+    },
+    "opcodeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opcode_cpp", "type_indices", "unsupported"],
+      "properties": {
+        "opcode_cpp": { "type": "string", "minLength": 1 },
+        "type_indices": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "unsupported": { "type": "boolean" }
       }
     },
     "condition": {
       "type": "object",
       "additionalProperties": false,
-      "allOf": [
-        {
-          "if": {
-            "properties": { "has_fcmp": { "const": true } },
-            "required": ["has_fcmp"]
-          },
-          "then": {
-            "properties": {
-              "fcmp_operand_types": { "minItems": 1 }
-            }
-          },
-          "else": {
-            "properties": {
-              "fcmp_operand_types": { "maxItems": 0 }
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": { "has_select": { "const": true } },
-            "required": ["has_select"]
-          },
-          "then": {
-            "properties": {
-              "select_value_types": { "minItems": 1 }
-            }
-          },
-          "else": {
-            "properties": {
-              "select_value_types": { "maxItems": 0 }
-            }
-          }
-        }
-      ],
       "required": [
-        "source_type_cpp",
-        "legal_type_cpp",
-        "icmp_operand_types",
         "icmp_unsupported",
-        "fcmp_operand_types",
-        "has_fcmp",
+        "emit_fcmp",
         "fcmp_unsupported",
         "emit_brcond",
         "brcond_unsupported",
-        "select_value_types",
-        "has_select",
+        "emit_select",
         "select_unsupported",
         "emit_phi",
         "phi_unsupported"
       ],
       "properties": {
-        "source_type_cpp": { "type": "string", "minLength": 1 },
-        "legal_type_cpp": { "type": "string", "minLength": 1 },
-        "icmp_operand_types": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/type" }
-        },
         "icmp_unsupported": { "type": "boolean" },
-        "fcmp_operand_types": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/type" }
-        },
-        "has_fcmp": { "type": "boolean" },
+        "emit_fcmp": { "type": "boolean" },
         "fcmp_unsupported": { "type": "boolean" },
         "emit_brcond": { "type": "boolean" },
         "brcond_unsupported": { "type": "boolean" },
-        "select_value_types": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/type" }
-        },
-        "has_select": { "type": "boolean" },
+        "emit_select": { "type": "boolean" },
         "select_unsupported": { "type": "boolean" },
         "emit_phi": { "type": "boolean" },
         "phi_unsupported": { "type": "boolean" }
@@ -174,29 +153,23 @@
     "intrinsic": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id_cpp", "rewrites"],
+      "required": ["id_cpp", "operands"],
       "properties": {
         "id_cpp": { "type": "string", "minLength": 1 },
-        "rewrites": {
+        "operands": {
           "type": "array",
           "minItems": 1,
-          "items": { "$ref": "#/$defs/rewrite" }
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/intrinsicOperand" }
         }
       }
     },
-    "rewrite": {
+    "intrinsicOperand": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "operand_index",
-        "from_type_cpp",
-        "to_type_cpp",
-        "is_def"
-      ],
+      "required": ["operand_index", "is_def"],
       "properties": {
         "operand_index": { "type": "integer", "minimum": 0 },
-        "from_type_cpp": { "type": "string", "minLength": 1 },
-        "to_type_cpp": { "type": "string", "minLength": 1 },
         "is_def": { "type": "boolean" }
       }
     }
