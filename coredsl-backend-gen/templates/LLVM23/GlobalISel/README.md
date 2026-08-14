@@ -34,13 +34,24 @@ The complete input shape is:
 
 - class: `ExampleLegalizerInfo`;
 - header: `ExampleLegalizerInfo.h`;
-- include guard: `LLVM_LIB_TARGET_Example_LEGALIZERINFO_H`;
+- include guard: `LLVM_LIB_TARGET_EXAMPLE_LEGALIZERINFO_H`;
 - intrinsic header: `llvm/IR/IntrinsicsExample.h`;
 - C++ namespace: always `llvm`.
 
 The target string must be a valid C++ identifier component and a valid file-name
 component. The input producer should use the exact LLVM Target spelling because
 Mustache does not perform case conversion.
+
+The LLVM API renderer registers a `target_upper` lambda derived from `target`:
+
+```cpp
+Template.registerLambda("target_upper", [Upper = Target.upper()]() {
+  return llvm::json::Value(Upper);
+});
+```
+
+The header template uses `{{target_upper}}` only for its include guard. This is
+renderer-derived state; callers still provide only the single `target` field.
 
 `integer_widths` must be non-empty, unique, and strictly increasing. A missing
 integer width is promoted to the narrowest wider native integer. A value wider

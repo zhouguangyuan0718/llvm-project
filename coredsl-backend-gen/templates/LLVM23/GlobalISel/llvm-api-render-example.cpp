@@ -9,6 +9,7 @@
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
 #include <utility>
 
 using namespace llvm;
@@ -50,6 +51,15 @@ static Error renderTemplate(StringRef TemplatePath, const json::Value &Data,
   StringSaver Saver(Allocator);
   mustache::MustacheContext Context(Allocator, Saver);
   mustache::Template Template((*TemplateOrError)->getBuffer(), Context);
+
+  const json::Object *Root = Data.getAsObject();
+  auto Target = Root ? Root->getString("target") : std::nullopt;
+  if (!Target)
+    return createStringError(inconvertibleErrorCode(),
+                             "template data requires a string target");
+  Template.registerLambda("target_upper", [Upper = Target->upper()]() {
+    return json::Value(Upper);
+  });
 
   // LLVM Mustache defaults to HTML escaping. Generated C++ must be emitted
   // verbatim, including possible '<', '>', '&', quote, and apostrophe tokens.
