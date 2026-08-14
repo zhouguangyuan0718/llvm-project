@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:coredsl:llvm23:globalisel-legalizer-input",
+  "title": "LLVM 23 GlobalISel Legalizer Mustache Input",
+  "type": "object",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "has_subtarget": { "const": true }
+        },
+        "required": ["has_subtarget"]
+      },
+      "then": {
+        "required": ["subtarget_class_name"]
+      }
+    }
+  ],
+  "required": [
+    "generated_notice",
+    "header_guard",
+    "header_include",
+    "cpp_namespace",
+    "class_name",
+    "has_subtarget",
+    "header_includes",
+    "source_includes",
+    "bitcast_pairs"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "generated_notice": { "type": "string", "minLength": 1 },
+    "header_guard": { "type": "string", "minLength": 1 },
+    "header_include": { "type": "string", "minLength": 1 },
+    "cpp_namespace": { "type": "string", "minLength": 1 },
+    "class_name": { "type": "string", "minLength": 1 },
+    "has_subtarget": { "type": "boolean" },
+    "subtarget_class_name": { "type": "string", "minLength": 1 },
+    "header_includes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/include" }
+    },
+    "source_includes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/include" }
+    },
+    "bitcast_pairs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/typePair" }
+    },
+    "condition": { "$ref": "#/$defs/condition" },
+    "intrinsics": { "$ref": "#/$defs/intrinsics" }
+  },
+  "$defs": {
+    "include": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type_cpp"],
+      "properties": {
+        "type_cpp": { "type": "string", "minLength": 1 }
+      }
+    },
+    "typePair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dst_type_cpp", "src_type_cpp"],
+      "properties": {
+        "dst_type_cpp": { "type": "string", "minLength": 1 },
+        "src_type_cpp": { "type": "string", "minLength": 1 }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "has_fcmp": { "const": true } },
+            "required": ["has_fcmp"]
+          },
+          "then": {
+            "properties": {
+              "fcmp_operand_types": { "minItems": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "fcmp_operand_types": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "has_select": { "const": true } },
+            "required": ["has_select"]
+          },
+          "then": {
+            "properties": {
+              "select_value_types": { "minItems": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "select_value_types": { "maxItems": 0 }
+            }
+          }
+        }
+      ],
+      "required": [
+        "source_type_cpp",
+        "legal_type_cpp",
+        "icmp_operand_types",
+        "icmp_unsupported",
+        "fcmp_operand_types",
+        "has_fcmp",
+        "fcmp_unsupported",
+        "emit_brcond",
+        "brcond_unsupported",
+        "select_value_types",
+        "has_select",
+        "select_unsupported",
+        "emit_phi",
+        "phi_unsupported"
+      ],
+      "properties": {
+        "source_type_cpp": { "type": "string", "minLength": 1 },
+        "legal_type_cpp": { "type": "string", "minLength": 1 },
+        "icmp_operand_types": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/type" }
+        },
+        "icmp_unsupported": { "type": "boolean" },
+        "fcmp_operand_types": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/type" }
+        },
+        "has_fcmp": { "type": "boolean" },
+        "fcmp_unsupported": { "type": "boolean" },
+        "emit_brcond": { "type": "boolean" },
+        "brcond_unsupported": { "type": "boolean" },
+        "select_value_types": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/type" }
+        },
+        "has_select": { "type": "boolean" },
+        "select_unsupported": { "type": "boolean" },
+        "emit_phi": { "type": "boolean" },
+        "phi_unsupported": { "type": "boolean" }
+      }
+    },
+    "intrinsics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_result_cpp", "items"],
+      "properties": {
+        "default_result_cpp": { "enum": ["true", "false"] },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/intrinsic" }
+        }
+      }
+    },
+    "intrinsic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id_cpp", "rewrites"],
+      "properties": {
+        "id_cpp": { "type": "string", "minLength": 1 },
+        "rewrites": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/rewrite" }
+        }
+      }
+    },
+    "rewrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operand_index",
+        "from_type_cpp",
+        "to_type_cpp",
+        "is_def"
+      ],
+      "properties": {
+        "operand_index": { "type": "integer", "minimum": 0 },
+        "from_type_cpp": { "type": "string", "minLength": 1 },
+        "to_type_cpp": { "type": "string", "minLength": 1 },
+        "is_def": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,185 @@
+{{=<% %>=}}
+<%generated_notice%>
+#include "<%header_include%>"
+
+#include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
+#include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
+#include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
+#include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineOperand.h"
+#include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetOpcodes.h"
+#include "llvm/CodeGenTypes/LowLevelType.h"
+<%#source_includes%>
+#include "<%path%>"
+<%/source_includes%>
+
+namespace <%cpp_namespace%> {
+
+<%#intrinsics%>
+namespace {
+
+// This action changes only the register representation. It must never be used
+// for a numeric conversion such as floating-point-to-integer conversion.
+struct IntrinsicBitcastRewrite {
+  unsigned OperandIndex;
+  LLT FromTy;
+  LLT ToTy;
+  bool IsDef;
+};
+
+static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
+  return ActualTy.isValid() && ExpectedTy.isValid() &&
+         ActualTy.getUniqueRAWLLTData() == ExpectedTy.getUniqueRAWLLTData();
+}
+
+static bool applyIntrinsicBitcastRewrites(
+    LegalizerHelper &Helper, MachineInstr &MI,
+    ArrayRef<IntrinsicBitcastRewrite> Rewrites) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  bool Changed = false;
+
+  // Validate the complete rewrite before changing MI, so a malformed generated
+  // rule cannot leave the instruction partially legalized.
+  for (const IntrinsicBitcastRewrite &Rewrite : Rewrites) {
+    if (!Rewrite.FromTy.isValid() || !Rewrite.ToTy.isValid() ||
+        Rewrite.FromTy.getSizeInBits() != Rewrite.ToTy.getSizeInBits() ||
+        Rewrite.OperandIndex >= MI.getNumOperands())
+      return false;
+
+    const MachineOperand &MO = MI.getOperand(Rewrite.OperandIndex);
+    if (!MO.isReg() || !MO.getReg().isVirtual() ||
+        MO.isDef() != Rewrite.IsDef)
+      return false;
+
+    const LLT ActualTy = MRI.getType(MO.getReg());
+    if (hasExactType(ActualTy, Rewrite.ToTy))
+      continue;
+    if (!hasExactType(ActualTy, Rewrite.FromTy))
+      return false;
+    Changed = true;
+  }
+
+  if (!Changed)
+    return true;
+
+  Helper.Observer.changingInstr(MI);
+
+  // Sources must be materialized before MI. Do them before destinations,
+  // because bitcastDst moves the builder insertion point past MI.
+  for (const IntrinsicBitcastRewrite &Rewrite : Rewrites) {
+    if (Rewrite.IsDef)
+      continue;
+    const LLT ActualTy = MRI.getType(MI.getOperand(Rewrite.OperandIndex).getReg());
+    if (!hasExactType(ActualTy, Rewrite.ToTy)) {
+      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+      Helper.bitcastSrc(MI, Rewrite.ToTy, Rewrite.OperandIndex);
+    }
+  }
+
+  for (const IntrinsicBitcastRewrite &Rewrite : Rewrites) {
+    if (!Rewrite.IsDef)
+      continue;
+    const LLT ActualTy = MRI.getType(MI.getOperand(Rewrite.OperandIndex).getReg());
+    if (!hasExactType(ActualTy, Rewrite.ToTy)) {
+      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+      Helper.bitcastDst(MI, Rewrite.ToTy, Rewrite.OperandIndex);
+    }
+  }
+
+  Helper.Observer.changedInstr(MI);
+  return true;
+}
+
+} // namespace
+
+<%/intrinsics%>
+<%#has_subtarget%>
+<%class_name%>::<%class_name%>(const <%subtarget_class_name%> &ST) {
+  (void)ST;
+<%/has_subtarget%>
+<%^has_subtarget%>
+<%class_name%>::<%class_name%>() {
+<%/has_subtarget%>
+  using namespace TargetOpcode;
+  using namespace LegalityPredicates;
+  using namespace LegalizeMutations;
+
+<%#bitcast_pairs%>
+  getActionDefinitionsBuilder(G_BITCAST)
+      .legalFor({{<%dst_type_cpp%>, <%src_type_cpp%>}});
+<%/bitcast_pairs%>
+<%#condition%>
+  const LLT CondTy = <%legal_type_cpp%>;
+
+  auto &ICmpActions = getActionDefinitionsBuilder(G_ICMP);
+<%#icmp_operand_types%>
+  ICmpActions.legalFor({{CondTy, <%type_cpp%>}});
+<%/icmp_operand_types%>
+  ICmpActions.widenScalarIf(typeIs(0, <%source_type_cpp%>),
+                            changeTo(0, CondTy));
+<%#icmp_unsupported%>
+  ICmpActions.unsupported();
+<%/icmp_unsupported%>
+
+<%#has_fcmp%>
+  auto &FCmpActions = getActionDefinitionsBuilder(G_FCMP);
+<%#fcmp_operand_types%>
+  FCmpActions.legalFor({{CondTy, <%type_cpp%>}});
+<%/fcmp_operand_types%>
+  FCmpActions.widenScalarIf(typeIs(0, <%source_type_cpp%>),
+                            changeTo(0, CondTy));
+<%#fcmp_unsupported%>
+  FCmpActions.unsupported();
+<%/fcmp_unsupported%>
+
+<%/has_fcmp%>
+<%#emit_brcond%>
+  getActionDefinitionsBuilder(G_BRCOND)
+      .legalFor({CondTy})
+      .widenScalarIf(typeIs(0, <%source_type_cpp%>), changeTo(0, CondTy))<%#brcond_unsupported%>
+      .unsupported()<%/brcond_unsupported%>;
+
+<%/emit_brcond%>
+<%#has_select%>
+  auto &SelectActions = getActionDefinitionsBuilder(G_SELECT);
+<%#select_value_types%>
+  SelectActions.legalFor({{<%type_cpp%>, CondTy}});
+<%/select_value_types%>
+  SelectActions.widenScalarIf(typeIs(1, <%source_type_cpp%>),
+                              changeTo(1, CondTy));
+<%#select_unsupported%>
+  SelectActions.unsupported();
+<%/select_unsupported%>
+
+<%/has_select%>
+<%#emit_phi%>
+  getActionDefinitionsBuilder(G_PHI)
+      .legalFor({CondTy})
+      .widenScalarIf(typeIs(0, <%source_type_cpp%>), changeTo(0, CondTy))<%#phi_unsupported%>
+      .unsupported()<%/phi_unsupported%>;
+<%/emit_phi%>
+<%/condition%>
+}
+
+<%#intrinsics%>
+bool <%class_name%>::legalizeIntrinsic(LegalizerHelper &Helper,
+                                       MachineInstr &MI) const {
+  switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
+<%#items%>
+  case <%id_cpp%>: {
+    const IntrinsicBitcastRewrite Rewrites[] = {
+<%#rewrites%>
+        {<%operand_index%>, <%from_type_cpp%>, <%to_type_cpp%>, <%#is_def%>true<%/is_def%><%^is_def%>false<%/is_def%>},
+<%/rewrites%>
+    };
+    return applyIntrinsicBitcastRewrites(Helper, MI, Rewrites);
+  }
+<%/items%>
+  default:
+    return <%default_result_cpp%>;
+  }
+}
+<%/intrinsics%>
+
+} // namespace <%cpp_namespace%>

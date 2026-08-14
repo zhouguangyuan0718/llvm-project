@@ -1,0 +1,34 @@
+{{=<% %>=}}
+<%generated_notice%>
+#ifndef <%header_guard%>
+#define <%header_guard%>
+
+#include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
+<%#header_includes%>
+#include "<%path%>"
+<%/header_includes%>
+
+namespace <%cpp_namespace%> {
+
+<%#has_subtarget%>
+class <%subtarget_class_name%>;
+<%/has_subtarget%>
+
+class <%class_name%> final : public LegalizerInfo {
+public:
+<%#has_subtarget%>
+  explicit <%class_name%>(const <%subtarget_class_name%> &ST);
+<%/has_subtarget%>
+<%^has_subtarget%>
+  <%class_name%>();
+<%/has_subtarget%>
+<%#intrinsics%>
+
+  bool legalizeIntrinsic(LegalizerHelper &Helper,
+                         MachineInstr &MI) const override;
+<%/intrinsics%>
+};
+
+} // namespace <%cpp_namespace%>
+
+#endif // <%header_guard%>
