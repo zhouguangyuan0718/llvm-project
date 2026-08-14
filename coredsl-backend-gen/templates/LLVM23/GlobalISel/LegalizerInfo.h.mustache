@@ -1,22 +1,18 @@
-{{generated_notice}}
-#ifndef {{header_guard}}
-#define {{header_guard}}
+#ifndef LLVM_LIB_TARGET_{{target}}_LEGALIZERINFO_H
+#define LLVM_LIB_TARGET_{{target}}_LEGALIZERINFO_H
 
 #include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
-{{#header_includes}}
-#include "{{path}}"
-{{/header_includes}}
 
-namespace {{cpp_namespace}} {
+namespace llvm {
 
-class {{class_name}} final : public LegalizerInfo {
+class {{target}}LegalizerInfo final : public LegalizerInfo {
 public:
-  {{class_name}}();
+  {{target}}LegalizerInfo();
 
   bool legalizeIntrinsic(LegalizerHelper &Helper,
                          MachineInstr &MI) const override;
 };
 
-} // namespace {{cpp_namespace}}
+} // namespace llvm
 
-#endif // {{header_guard}}
+#endif // LLVM_LIB_TARGET_{{target}}_LEGALIZERINFO_H

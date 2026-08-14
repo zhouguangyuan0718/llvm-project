@@ -1,8 +1,9 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
-input contains target-native scalar types and intrinsic scalar argument indices;
-the opcode, condition, and legalization-artifact policies are built into the
+input contains one target name, target-native scalar types, and intrinsic scalar
+argument indices. File names, the class name, the include guard, the `llvm`
+namespace, and all legalization policies are derived or built into the
 templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
@@ -15,15 +16,7 @@ The complete input shape is:
 
 ```json
 {
-  "generated_notice": "// Generated. Do not edit.",
-  "header_guard": "LLVM_LIB_TARGET_EXAMPLE_EXAMPLELEGALIZERINFO_H",
-  "header_include": "ExampleLegalizerInfo.h",
-  "cpp_namespace": "llvm",
-  "class_name": "ExampleLegalizerInfo",
-  "header_includes": [],
-  "source_includes": [
-    { "path": "llvm/IR/IntrinsicsExample.h" }
-  ],
+  "target": "Example",
   "native_types": {
     "integer_widths": [16, 32],
     "floating_point_types": []
@@ -36,6 +29,18 @@ The complete input shape is:
   ]
 }
 ```
+
+`target` is the single naming input. For `"Example"`, the templates derive:
+
+- class: `ExampleLegalizerInfo`;
+- header: `ExampleLegalizerInfo.h`;
+- include guard: `LLVM_LIB_TARGET_Example_LEGALIZERINFO_H`;
+- intrinsic header: `llvm/IR/IntrinsicsExample.h`;
+- C++ namespace: always `llvm`.
+
+The target string must be a valid C++ identifier component and a valid file-name
+component. The input producer should use the exact LLVM Target spelling because
+Mustache does not perform case conversion.
 
 `integer_widths` must be non-empty, unique, and strictly increasing. A missing
 integer width is promoted to the narrowest wider native integer. A value wider
@@ -120,12 +125,13 @@ llvm-api-render-example LegalizerInfo.h.mustache > ExampleLegalizerInfo.h
 llvm-api-render-example LegalizerInfo.cpp.mustache > ExampleLegalizerInfo.cpp
 ```
 
-The example JSON remains useful for schema validation or non-C++ renderers, but
-an LLVM-based input producer does not need to serialize through JSON text.
+The example JSON is only a compact description of the input shape. An
+LLVM-based input producer does not need to serialize through JSON text.
 
 ## Integration checks
 
-1. Validate the input contract and the strictly increasing integer widths.
+1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
+   and the strictly increasing integer widths.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

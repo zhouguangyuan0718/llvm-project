@@ -1,5 +1,4 @@
-{{generated_notice}}
-#include "{{header_include}}"
+#include "{{target}}LegalizerInfo.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
@@ -10,13 +9,11 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/LowLevelType.h"
-{{#source_includes}}
-#include "{{path}}"
-{{/source_includes}}
+#include "llvm/IR/Intrinsics{{target}}.h"
 
 #include <cassert>
 
-namespace {{cpp_namespace}} {
+namespace llvm {
 
 namespace {
 
@@ -210,7 +207,7 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
 }
 } // namespace
 
-{{class_name}}::{{class_name}}() {
+{{target}}LegalizerInfo::{{target}}LegalizerInfo() {
   using namespace TargetOpcode;
   using namespace LegalityPredicates;
   using namespace LegalizeMutations;
@@ -298,8 +295,8 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
                            promoteIntegerType(0));
 }
 
-bool {{class_name}}::legalizeIntrinsic(LegalizerHelper &Helper,
-                                       MachineInstr &MI) const {
+bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
+                                                MachineInstr &MI) const {
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
 {{#intrinsics}}
   case {{id_cpp}}: {
@@ -316,4 +313,4 @@ bool {{class_name}}::legalizeIntrinsic(LegalizerHelper &Helper,
   }
 }
 
-} // namespace {{cpp_namespace}}
+} // namespace llvm
