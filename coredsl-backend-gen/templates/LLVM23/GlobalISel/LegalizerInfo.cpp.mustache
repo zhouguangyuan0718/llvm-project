@@ -1,6 +1,5 @@
-{{=<% %>=}}
-<%generated_notice%>
-#include "<%header_include%>"
+{{generated_notice}}
+#include "{{header_include}}"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
@@ -11,13 +10,13 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/LowLevelType.h"
-<%#source_includes%>
-#include "<%path%>"
-<%/source_includes%>
+{{#source_includes}}
+#include "{{path}}"
+{{/source_includes}}
 
 #include <cassert>
 
-namespace <%cpp_namespace%> {
+namespace {{cpp_namespace}} {
 
 namespace {
 
@@ -29,10 +28,10 @@ static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
 // Return the narrowest native integer type that can carry Bits bits. The
 // Mustache input must keep integer_widths strictly increasing.
 static LLT getNativeIntegerTypeForWidth(unsigned Bits) {
-<%#native_types.integer_widths%>
-  if (Bits <= <%.%>)
-    return LLT::integer(<%.%>);
-<%/native_types.integer_widths%>
+{{#native_types.integer_widths}}
+  if (Bits <= {{.}})
+    return LLT::integer({{.}});
+{{/native_types.integer_widths}}
   return LLT{};
 }
 
@@ -46,10 +45,10 @@ static bool isNativeIntegerType(LLT Ty) {
 static bool isNativeFloatType(LLT Ty) {
   if (!Ty.isFloat())
     return false;
-<%#native_types.floating_point_types%>
-  if (hasExactType(Ty, <%.%>))
+{{#native_types.floating_point_types}}
+  if (hasExactType(Ty, {{.}}))
     return true;
-<%/native_types.floating_point_types%>
+{{/native_types.floating_point_types}}
   return false;
 }
 
@@ -143,35 +142,33 @@ static bool isGeneratedRepresentationBitcast(const LegalityQuery &Query) {
          getNativeIntegerTypeForWidth(DstTy.getScalarSizeInBits()).isValid();
 }
 
-<%#intrinsics%>
-// Listing an intrinsic operand opts it into the integer-carrier convention:
+// Listing an intrinsic scalar argument opts it into the integer-carrier
+// convention:
 // integer values are promoted to the next native width, and floating-point
 // values are first bitcast to equal-width integer bits and then promoted.
-struct IntrinsicCarrierRewrite {
-  unsigned OperandIndex;
-  bool IsDef;
-};
-
 static LLT getIntrinsicCarrierType(LLT Ty) {
   if (!Ty.isInteger() && !Ty.isFloat())
     return LLT{};
   return getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
 }
 
-static bool applyIntrinsicCarrierRewrites(
+[[maybe_unused]] static bool applyIntrinsicCarrierRewrites(
     LegalizerHelper &Helper, MachineInstr &MI,
-    ArrayRef<IntrinsicCarrierRewrite> Rewrites) {
+    ArrayRef<unsigned> ScalarArgumentIndices) {
   MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const unsigned FirstArgumentOperand = MI.getNumExplicitDefs() + 1;
+  const unsigned NumExplicitOperands = MI.getNumExplicitOperands();
   bool Changed = false;
 
   // Validate the complete rewrite before changing MI, so malformed generated
   // data cannot leave an instruction partially legalized.
-  for (const IntrinsicCarrierRewrite &Rewrite : Rewrites) {
-    if (Rewrite.OperandIndex >= MI.getNumOperands())
+  for (unsigned ArgumentIndex : ScalarArgumentIndices) {
+    if (FirstArgumentOperand > NumExplicitOperands ||
+        ArgumentIndex >= NumExplicitOperands - FirstArgumentOperand)
       return false;
-    const MachineOperand &MO = MI.getOperand(Rewrite.OperandIndex);
-    if (!MO.isReg() || !MO.getReg().isVirtual() ||
-        MO.isDef() != Rewrite.IsDef)
+    const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
+    const MachineOperand &MO = MI.getOperand(OperandIndex);
+    if (!MO.isReg() || !MO.getReg().isVirtual() || MO.isDef())
       return false;
 
     const LLT ActualTy = MRI.getType(MO.getReg());
@@ -189,127 +186,70 @@ static bool applyIntrinsicCarrierRewrites(
   // Sources are materialized before MI. G_ANYEXT deliberately preserves only
   // the low-bit payload contract; an intrinsic needing sign/zero extension
   // requires a separate semantic rule.
-  for (const IntrinsicCarrierRewrite &Rewrite : Rewrites) {
-    if (Rewrite.IsDef)
-      continue;
+  for (unsigned ArgumentIndex : ScalarArgumentIndices) {
+    const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
     const LLT OriginalTy =
-        MRI.getType(MI.getOperand(Rewrite.OperandIndex).getReg());
+        MRI.getType(MI.getOperand(OperandIndex).getReg());
     const LLT CarrierTy = getIntrinsicCarrierType(OriginalTy);
     LLT CurrentTy = OriginalTy;
 
     if (OriginalTy.isFloat()) {
       CurrentTy = LLT::integer(OriginalTy.getScalarSizeInBits());
       Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.bitcastSrc(MI, CurrentTy, Rewrite.OperandIndex);
+      Helper.bitcastSrc(MI, CurrentTy, OperandIndex);
     }
     if (!hasExactType(CurrentTy, CarrierTy)) {
       Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.widenScalarSrc(MI, CarrierTy, Rewrite.OperandIndex,
+      Helper.widenScalarSrc(MI, CarrierTy, OperandIndex,
                             TargetOpcode::G_ANYEXT);
-    }
-  }
-
-  // For a floating-point def, bitcastDst creates the final integer-to-float
-  // boundary first. A following widenScalarDst inserts G_TRUNC between MI and
-  // that bitcast, producing carrier-int -> exact-int -> original-float.
-  for (const IntrinsicCarrierRewrite &Rewrite : Rewrites) {
-    if (!Rewrite.IsDef)
-      continue;
-    const LLT OriginalTy =
-        MRI.getType(MI.getOperand(Rewrite.OperandIndex).getReg());
-    const LLT CarrierTy = getIntrinsicCarrierType(OriginalTy);
-    LLT CurrentTy = OriginalTy;
-
-    if (OriginalTy.isFloat()) {
-      CurrentTy = LLT::integer(OriginalTy.getScalarSizeInBits());
-      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.bitcastDst(MI, CurrentTy, Rewrite.OperandIndex);
-    }
-    if (!hasExactType(CurrentTy, CarrierTy)) {
-      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.widenScalarDst(MI, CarrierTy, Rewrite.OperandIndex,
-                            TargetOpcode::G_TRUNC);
     }
   }
 
   Helper.Observer.changedInstr(MI);
   return true;
 }
-
-<%/intrinsics%>
 } // namespace
 
-<%#has_subtarget%>
-<%class_name%>::<%class_name%>(const <%subtarget_class_name%> &ST) {
-  (void)ST;
-<%/has_subtarget%>
-<%^has_subtarget%>
-<%class_name%>::<%class_name%>() {
-<%/has_subtarget%>
+{{class_name}}::{{class_name}}() {
   using namespace TargetOpcode;
   using namespace LegalityPredicates;
   using namespace LegalizeMutations;
 
-<%#artifact_rules%>
   auto &ExtActions =
       getActionDefinitionsBuilder({G_ANYEXT, G_ZEXT, G_SEXT});
   ExtActions.legalIf(isGeneratedIntegerExtension);
-<%#unsupported%>
-  ExtActions.unsupported();
-<%/unsupported%>
 
   auto &TruncActions = getActionDefinitionsBuilder(G_TRUNC);
   TruncActions.legalIf(isGeneratedIntegerTruncation);
-<%#unsupported%>
-  TruncActions.unsupported();
-<%/unsupported%>
 
   auto &BitcastActions = getActionDefinitionsBuilder(G_BITCAST);
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
-<%#unsupported%>
-  BitcastActions.unsupported();
-<%/unsupported%>
 
-<%/artifact_rules%>
-<%#integer_opcode_rules%>
-  {
-    auto &Actions = getActionDefinitionsBuilder(<%opcode_cpp%>);
-    Actions.legalIf([](const LegalityQuery &Query) {
-<%#type_indices%>
-      if (Query.Types.size() <= <%.%> ||
-          !isNativeIntegerType(Query.Types[<%.%>]))
-        return false;
-<%/type_indices%>
-      return true;
-    });
-<%#type_indices%>
-    Actions.widenScalarIf(integerTypeNeedsPromotion(<%.%>),
-                          promoteIntegerType(<%.%>));
-<%/type_indices%>
-<%#unsupported%>
-    Actions.unsupported();
-<%/unsupported%>
-  }
+  auto &IntegerActions = getActionDefinitionsBuilder(
+      {G_ADD, G_SUB, G_MUL, G_AND, G_OR, G_XOR});
+  IntegerActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
+  });
+  IntegerActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                               promoteIntegerType(0));
 
-<%/integer_opcode_rules%>
-<%#floating_opcode_rules%>
-  {
-    auto &Actions = getActionDefinitionsBuilder(<%opcode_cpp%>);
-    Actions.legalIf([](const LegalityQuery &Query) {
-<%#type_indices%>
-      if (Query.Types.size() <= <%.%> ||
-          !isNativeFloatType(Query.Types[<%.%>]))
-        return false;
-<%/type_indices%>
-      return true;
-    });
-<%#unsupported%>
-    Actions.unsupported();
-<%/unsupported%>
-  }
+  auto &ShiftActions =
+      getActionDefinitionsBuilder({G_SHL, G_LSHR, G_ASHR});
+  ShiftActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
+           isNativeIntegerType(Query.Types[1]);
+  });
+  ShiftActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                             promoteIntegerType(0));
+  ShiftActions.widenScalarIf(integerTypeNeedsPromotion(1),
+                             promoteIntegerType(1));
 
-<%/floating_opcode_rules%>
-<%#condition%>
+  auto &FloatActions = getActionDefinitionsBuilder(
+      {G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FNEG, G_FABS});
+  FloatActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+  });
+
   const LLT CondTy = getNativeIntegerTypeForWidth(1);
   assert(CondTy.isValid() && "condition legalization needs an integer type");
 
@@ -322,11 +262,7 @@ static bool applyIntrinsicCarrierRewrites(
                             promoteIntegerType(0));
   ICmpActions.widenScalarIf(integerTypeNeedsPromotion(1),
                             promoteIntegerType(1));
-<%#icmp_unsupported%>
-  ICmpActions.unsupported();
-<%/icmp_unsupported%>
 
-<%#emit_fcmp%>
   auto &FCmpActions = getActionDefinitionsBuilder(G_FCMP);
   FCmpActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
@@ -334,24 +270,14 @@ static bool applyIntrinsicCarrierRewrites(
   });
   FCmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
                             promoteIntegerType(0));
-<%#fcmp_unsupported%>
-  FCmpActions.unsupported();
-<%/fcmp_unsupported%>
 
-<%/emit_fcmp%>
-<%#emit_brcond%>
   auto &BrCondActions = getActionDefinitionsBuilder(G_BRCOND);
   BrCondActions.legalIf([CondTy](const LegalityQuery &Query) {
     return !Query.Types.empty() && hasExactType(Query.Types[0], CondTy);
   });
   BrCondActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
-<%#brcond_unsupported%>
-  BrCondActions.unsupported();
-<%/brcond_unsupported%>
 
-<%/emit_brcond%>
-<%#emit_select%>
   auto &SelectActions = getActionDefinitionsBuilder(G_SELECT);
   SelectActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeScalarType(Query.Types[0]) &&
@@ -363,43 +289,31 @@ static bool applyIntrinsicCarrierRewrites(
                           bitcastFloatToSameWidthInteger(0));
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
-<%#select_unsupported%>
-  SelectActions.unsupported();
-<%/select_unsupported%>
 
-<%/emit_select%>
-<%#emit_phi%>
   auto &PhiActions = getActionDefinitionsBuilder(G_PHI);
   PhiActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeScalarType(Query.Types[0]);
   });
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));
-<%#phi_unsupported%>
-  PhiActions.unsupported();
-<%/phi_unsupported%>
-<%/emit_phi%>
-<%/condition%>
 }
 
-<%#intrinsics%>
-bool <%class_name%>::legalizeIntrinsic(LegalizerHelper &Helper,
+bool {{class_name}}::legalizeIntrinsic(LegalizerHelper &Helper,
                                        MachineInstr &MI) const {
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
-<%#items%>
-  case <%id_cpp%>: {
-    const IntrinsicCarrierRewrite Rewrites[] = {
-<%#operands%>
-        {<%operand_index%>, <%#is_def%>true<%/is_def%><%^is_def%>false<%/is_def%>},
-<%/operands%>
+{{#intrinsics}}
+  case {{id_cpp}}: {
+    const unsigned ScalarArgumentIndices[] = {
+{{#scalar_argument_indices}}
+        {{.}},
+{{/scalar_argument_indices}}
     };
-    return applyIntrinsicCarrierRewrites(Helper, MI, Rewrites);
+    return applyIntrinsicCarrierRewrites(Helper, MI, ScalarArgumentIndices);
   }
-<%/items%>
+{{/intrinsics}}
   default:
-    return <%default_result_cpp%>;
+    return false;
   }
 }
-<%/intrinsics%>
 
-} // namespace <%cpp_namespace%>
+} // namespace {{cpp_namespace}}

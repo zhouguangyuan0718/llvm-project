@@ -4,32 +4,16 @@
   "title": "LLVM 23 GlobalISel Legalizer Mustache Input",
   "type": "object",
   "additionalProperties": false,
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "has_subtarget": { "const": true }
-        },
-        "required": ["has_subtarget"]
-      },
-      "then": {
-        "required": ["subtarget_class_name"]
-      }
-    }
-  ],
   "required": [
     "generated_notice",
     "header_guard",
     "header_include",
     "cpp_namespace",
     "class_name",
-    "has_subtarget",
     "header_includes",
     "source_includes",
     "native_types",
-    "artifact_rules",
-    "integer_opcode_rules",
-    "floating_opcode_rules"
+    "intrinsics"
   ],
   "properties": {
     "$schema": { "type": "string" },
@@ -38,8 +22,6 @@
     "header_include": { "type": "string", "minLength": 1 },
     "cpp_namespace": { "type": "string", "minLength": 1 },
     "class_name": { "type": "string", "minLength": 1 },
-    "has_subtarget": { "type": "boolean" },
-    "subtarget_class_name": { "type": "string", "minLength": 1 },
     "header_includes": {
       "type": "array",
       "items": { "$ref": "#/$defs/include" }
@@ -49,17 +31,10 @@
       "items": { "$ref": "#/$defs/include" }
     },
     "native_types": { "$ref": "#/$defs/nativeTypes" },
-    "artifact_rules": { "$ref": "#/$defs/artifactRules" },
-    "integer_opcode_rules": {
+    "intrinsics": {
       "type": "array",
-      "items": { "$ref": "#/$defs/opcodeRule" }
-    },
-    "floating_opcode_rules": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/opcodeRule" }
-    },
-    "condition": { "$ref": "#/$defs/condition" },
-    "intrinsics": { "$ref": "#/$defs/intrinsics" }
+      "items": { "$ref": "#/$defs/intrinsic" }
+    }
   },
   "$defs": {
     "include": {
@@ -88,89 +63,18 @@
         }
       }
     },
-    "artifactRules": {
+    "intrinsic": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["unsupported"],
+      "required": ["id_cpp", "scalar_argument_indices"],
       "properties": {
-        "unsupported": { "type": "boolean" }
-      }
-    },
-    "opcodeRule": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["opcode_cpp", "type_indices", "unsupported"],
-      "properties": {
-        "opcode_cpp": { "type": "string", "minLength": 1 },
-        "type_indices": {
+        "id_cpp": { "type": "string", "minLength": 1 },
+        "scalar_argument_indices": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "integer", "minimum": 0 }
-        },
-        "unsupported": { "type": "boolean" }
-      }
-    },
-    "condition": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "icmp_unsupported",
-        "emit_fcmp",
-        "fcmp_unsupported",
-        "emit_brcond",
-        "brcond_unsupported",
-        "emit_select",
-        "select_unsupported",
-        "emit_phi",
-        "phi_unsupported"
-      ],
-      "properties": {
-        "icmp_unsupported": { "type": "boolean" },
-        "emit_fcmp": { "type": "boolean" },
-        "fcmp_unsupported": { "type": "boolean" },
-        "emit_brcond": { "type": "boolean" },
-        "brcond_unsupported": { "type": "boolean" },
-        "emit_select": { "type": "boolean" },
-        "select_unsupported": { "type": "boolean" },
-        "emit_phi": { "type": "boolean" },
-        "phi_unsupported": { "type": "boolean" }
-      }
-    },
-    "intrinsics": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["default_result_cpp", "items"],
-      "properties": {
-        "default_result_cpp": { "enum": ["true", "false"] },
-        "items": {
-          "type": "array",
-          "minItems": 1,
-          "items": { "$ref": "#/$defs/intrinsic" }
         }
-      }
-    },
-    "intrinsic": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id_cpp", "operands"],
-      "properties": {
-        "id_cpp": { "type": "string", "minLength": 1 },
-        "operands": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "$ref": "#/$defs/intrinsicOperand" }
-        }
-      }
-    },
-    "intrinsicOperand": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["operand_index", "is_def"],
-      "properties": {
-        "operand_index": { "type": "integer", "minimum": 0 },
-        "is_def": { "type": "boolean" }
       }
     }
   }

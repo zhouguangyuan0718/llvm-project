@@ -42,6 +42,26 @@ target_link_libraries(coredsl-backend-gen PRIVATE coredsl_frontend)
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(coredsl-legalizer-mustache-example
+    templates/LLVM23/GlobalISel/llvm-api-render-example.cpp)
+  target_include_directories(coredsl-legalizer-mustache-example
+    SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+  target_compile_features(coredsl-legalizer-mustache-example PRIVATE cxx_std_17)
+  if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    target_compile_options(coredsl-legalizer-mustache-example
+      PRIVATE ${COREDSL_LLVM_DEFINITIONS})
+  endif()
+  target_link_libraries(coredsl-legalizer-mustache-example PRIVATE LLVMSupport)
+
+  add_test(
+    NAME coredsl-legalizer-mustache-header
+    COMMAND coredsl-legalizer-mustache-example
+      ${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel/LegalizerInfo.h.mustache)
+  add_test(
+    NAME coredsl-legalizer-mustache-source
+    COMMAND coredsl-legalizer-mustache-example
+      ${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel/LegalizerInfo.cpp.mustache)
+
   add_test(
     NAME coredsl-parser-basic
     COMMAND ${CMAKE_COMMAND}
