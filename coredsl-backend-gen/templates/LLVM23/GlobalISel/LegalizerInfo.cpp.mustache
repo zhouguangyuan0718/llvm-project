@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
@@ -177,9 +178,9 @@ static bool isNativeFloatTruncation(const LegalityQuery &Query) {
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
-// An unsupported floating-point constant is a representation, not a numeric
-// operation. Materialize its exact bits as an equal-width integer and let the
-// ordinary integer-constant policy promote that temporary when necessary.
+// Fold every equal-width integer bitcast of an unsupported floating-point
+// constant directly into G_CONSTANT. This preserves the bitcast result
+// registers and lets the ordinary integer policy promote them if necessary.
 static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
                                          MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::G_FCONSTANT ||
@@ -187,23 +188,53 @@ static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
     return false;
 
   MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  MachineOperand &Dst = MI.getOperand(0);
+  const MachineOperand &Dst = MI.getOperand(0);
   const MachineOperand &Value = MI.getOperand(1);
   if (!Dst.isReg() || !Dst.getReg().isVirtual() || !Dst.isDef() ||
       !Value.isFPImm())
     return false;
 
-  const LLT FloatTy = MRI.getType(Dst.getReg());
+  const Register FloatDstReg = Dst.getReg();
+  const LLT FloatTy = MRI.getType(FloatDstReg);
   if (!FloatTy.isFloat() ||
       !getNativeIntegerTypeForWidth(FloatTy.getScalarSizeInBits()).isValid())
     return false;
 
   const LLT IntegerTy = LLT::integer(FloatTy.getScalarSizeInBits());
   const APInt Bits = Value.getFPImm()->getValueAPF().bitcastToAPInt();
-  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-  Register IntegerConstant =
-      Helper.MIRBuilder.buildConstant(IntegerTy, Bits).getReg(0);
-  Helper.MIRBuilder.buildBitcast(Dst, IntegerConstant);
+
+  SmallVector<MachineInstr *, 4> Bitcasts;
+  for (MachineInstr &UseMI : MRI.use_nodbg_instructions(FloatDstReg)) {
+    if (UseMI.getOpcode() != TargetOpcode::G_BITCAST ||
+        UseMI.getNumExplicitDefs() != 1 ||
+        UseMI.getNumExplicitOperands() < 2 ||
+        !UseMI.getOperand(0).isReg() || !UseMI.getOperand(0).isDef() ||
+        !UseMI.getOperand(1).isReg() ||
+        UseMI.getOperand(1).getReg() != FloatDstReg ||
+        !hasExactType(MRI.getType(UseMI.getOperand(0).getReg()), IntegerTy))
+      return false;
+    Bitcasts.push_back(&UseMI);
+  }
+  if (Bitcasts.empty())
+    return false;
+
+  const Register DebugReg = Bitcasts.front()->getOperand(0).getReg();
+  for (MachineInstr *Bitcast : Bitcasts) {
+    const Register IntegerDstReg = Bitcast->getOperand(0).getReg();
+    Helper.MIRBuilder.setInstrAndDebugLoc(*Bitcast);
+    Helper.MIRBuilder.buildConstant(IntegerDstReg, Bits);
+    Bitcast->eraseFromParent();
+  }
+
+  // Debug users can refer to any folded result: each constant has the same
+  // bits as the original floating-point value.
+  SmallVector<MachineOperand *, 4> DebugUses;
+  for (MachineOperand &Use : MRI.use_operands(FloatDstReg))
+    if (Use.getParent()->isDebugInstr())
+      DebugUses.push_back(&Use);
+  for (MachineOperand *Use : DebugUses)
+    Use->setReg(DebugReg);
+
   MI.eraseFromParent();
   return true;
 }

@@ -126,14 +126,20 @@ legal, while a missing integer width is promoted to the smallest wider native
 integer. LLVM's generic legalizer handles the corresponding constant widening.
 
 A native `G_FCONSTANT` is legal. An unsupported floating-point constant with
-an available integer carrier is rewritten without changing its bits:
+an available integer carrier is folded directly into an integer constant:
 
 ```text
-G_FCONSTANT fN -> G_CONSTANT iN -> G_BITCAST fN
+%dst:fN = G_FCONSTANT value
+%bits:iN = G_BITCAST %dst
+  ->
+%bits:iN = G_CONSTANT bitcast(value)
 ```
 
-The intermediate `G_CONSTANT iN` is then promoted by the integer-width policy
-when `iN` itself is not native. Unsupported numerical floating-point operations
+The bitcast result register and all of its uses are preserved; the
+`G_FCONSTANT` and `G_BITCAST` are removed. Every non-debug use of the
+unsupported floating-point constant must be an equal-width integer bitcast.
+The resulting `G_CONSTANT iN` is promoted by the integer-width policy when
+`iN` itself is not native. Unsupported numerical floating-point operations
 still fail closed; they are not reinterpreted as integer arithmetic.
 
 `G_SELECT` may bitcast an unsupported floating-point selected value to an

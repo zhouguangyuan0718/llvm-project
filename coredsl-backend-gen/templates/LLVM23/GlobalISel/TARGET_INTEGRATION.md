@@ -209,8 +209,8 @@ Inspect that, for native integers `[16, 32]`:
 - an `i8 G_CONSTANT` is promoted to the `i16` carrier while `i16` remains legal;
 - `i1` and `i8` integer operations are promoted to `i16`;
 - an `i24` integer operation is promoted to `i32`;
-- an `f16 G_FCONSTANT` becomes an `i16` constant plus a representation bitcast
-  when `f16` is not native;
+- an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
+  remaining `G_BITCAST` when `f16` is not native;
 - an `f16` listed intrinsic argument becomes an `i16` bit carrier;
 - an `icmp` result uses `i16` rather than `i1`;
 - a value wider than `i32` fails closed instead of narrowing.
