@@ -104,10 +104,13 @@ a numerically signed or unsigned argument needs a different semantic rule.
 
 ## Built-in opcode policy
 
-The following scalar rules are always emitted:
+The following scalar and pointer-carrier rules are always emitted:
 
-- scalar carriers: `G_IMPLICIT_DEF`, `G_FREEZE`;
-- integer type index 0: `G_CONSTANT`, `G_ADD`, `G_SUB`, `G_MUL`, `G_SDIV`,
+- value carriers: `G_IMPLICIT_DEF`, `G_FREEZE`,
+  `G_CONSTANT_FOLD_BARRIER`; pointer values are accepted directly, while
+  integer and floating-point values must use native types;
+- constants: native-width integer and pointer `G_CONSTANT`;
+- integer type index 0: `G_ADD`, `G_SUB`, `G_MUL`, `G_SDIV`,
   `G_UDIV`, `G_SREM`, `G_UREM`, `G_AND`, `G_OR`, `G_XOR`, `G_SMIN`,
   `G_SMAX`, `G_UMIN`, `G_UMAX`, `G_ABS`, `G_SEXT_INREG`, `G_BSWAP`,
   `G_BITREVERSE`;
@@ -122,13 +125,33 @@ The following scalar rules are always emitted:
 - scalar casts: native integer `G_ANYEXT`/`G_ZEXT`/`G_SEXT`/`G_TRUNC` pairs,
   native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
   `G_FPTOUI` when their floating-point side is native;
+- pointer representation: `G_PTR_ADD`, `G_INTTOPTR`, `G_PTRTOINT`; their
+  integer operand or result follows the native integer-width policy;
+- direct pointer carriers: `G_FRAME_INDEX`, `G_GLOBAL_VALUE`,
+  `G_CONSTANT_POOL`, `G_BLOCK_ADDR`, `G_JUMP_TABLE`, `G_BRINDIRECT`;
+- untyped unconditional control flow: `G_BR`;
 - plain non-atomic scalar memory: `G_LOAD`, `G_STORE`;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
 The smallest native integer is the condition carrier. `G_ICMP` promotes both
-its result and integer input type. `G_FCMP` promotes only its result and accepts
-only native floating-point inputs. `G_BRCOND` and the condition input of
-`G_SELECT` use the same carrier.
+its result and integer input type; pointer inputs are accepted without changing
+their pointer type. `G_FCMP` promotes only its result and accepts only native
+floating-point inputs. `G_BRCOND` and the condition input of `G_SELECT` use the
+same carrier. Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+
+`G_PTR_ADD` preserves its pointer type. A missing integer offset width is
+promoted to the narrowest native integer with the generic legalizer's signed
+extension, matching pointer-offset semantics. `G_INTTOPTR` similarly promotes
+its integer input, using zero extension; `G_PTRTOINT` promotes a missing integer
+result width and leaves a truncation for users of the original result.
+
+The direct pointer-carrier group has no type mutation because pointer types are
+not part of this compact native scalar input. Declaring these GMIR operations
+legal only means that type legalization is complete. The target's instruction
+selector must still implement its frame, relocation/code-model, constant-pool,
+block-address, jump-table, and indirect-branch forms.
+
+`G_BR` has no register type to legalize, so it is always legal at this layer.
 
 `G_CONSTANT` uses the same integer-width policy: a native-width constant is
 legal, while a missing integer width is promoted to the smallest wider native
@@ -188,6 +211,16 @@ operations whose value and memory types are compatible. Native floating-point
 loads and stores require an exact value/memory type match. Atomic, indexed,
 vector, multi-MMO, and mismatched floating-point memory operations fall back to
 the target's other rules rather than being inferred from scalar register types.
+Exact pointer-valued loads and stores are accepted without changing the pointer
+or memory type.
+
+The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
+`G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
+operations, or `G_VAARG`/`G_VASTART` directly legal. Those require address-space,
+pointer-width, stack/ABI, jump-table, atomic, or varargs policy that cannot be
+derived from `native_types`. Optimization hints such as `G_ASSERT_ZEXT`,
+`G_ASSERT_SEXT`, and `G_ASSERT_ALIGN` are outside the normal pre-isel generic
+opcode legality range and are eliminated later; they need no generated rule.
 
 At `llvmorg-23-init`, `LegalizerInfo` still falls back to its embedded
 `LegacyLegalizerInfo` when no modern rule matches. The generated constructor

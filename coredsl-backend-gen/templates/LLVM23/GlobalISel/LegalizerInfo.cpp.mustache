@@ -52,8 +52,8 @@ static bool isNativeFloatType(LLT Ty) {
   return false;
 }
 
-[[maybe_unused]] static bool isNativeScalarType(LLT Ty) {
-  return isNativeIntegerType(Ty) || isNativeFloatType(Ty);
+[[maybe_unused]] static bool isNativeValueType(LLT Ty) {
+  return Ty.isPointer() || isNativeIntegerType(Ty) || isNativeFloatType(Ty);
 }
 
 [[maybe_unused]] static LegalityPredicate
@@ -188,9 +188,10 @@ static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   const LLT ValueTy = Query.Types[0];
   const LLT PointerTy = Query.Types[1];
   const LegalityQuery::MemDesc &Memory = Query.MMODescrs[0];
-  if ((!ValueTy.isInteger() && !ValueTy.isFloat()) ||
+  if ((!ValueTy.isInteger() && !ValueTy.isFloat() && !ValueTy.isPointer()) ||
       !PointerTy.isPointer() ||
-      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat()) ||
+      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat() &&
+       !Memory.MemoryTy.isPointer()) ||
       Memory.Ordering != AtomicOrdering::NotAtomic ||
       Memory.FailureOrdering != AtomicOrdering::NotAtomic)
     return false;
@@ -206,6 +207,8 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
   const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
   if (ValueTy.isInteger())
     return MemoryTy.isInteger() && isNativeIntegerType(ValueTy);
+  if (ValueTy.isPointer())
+    return MemoryTy.isPointer() && hasExactType(ValueTy, MemoryTy);
 
   // There is no representation-preserving meaning for extending or
   // truncating a floating-point memory operation.
@@ -432,18 +435,65 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
                               promoteIntegerType(0));
   MemoryActions.fallback();
 
+  auto &PointerAddActions = getActionDefinitionsBuilder(G_PTR_ADD);
+  PointerAddActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
+           isNativeIntegerType(Query.Types[1]);
+  });
+  PointerAddActions.widenScalarIf(integerTypeNeedsPromotion(1),
+                                  promoteIntegerType(1));
+  PointerAddActions.fallback();
+
+  auto &IntToPtrActions = getActionDefinitionsBuilder(G_INTTOPTR);
+  IntToPtrActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
+           isNativeIntegerType(Query.Types[1]);
+  });
+  IntToPtrActions.widenScalarIf(integerTypeNeedsPromotion(1),
+                                promoteIntegerType(1));
+  IntToPtrActions.fallback();
+
+  auto &PtrToIntActions = getActionDefinitionsBuilder(G_PTRTOINT);
+  PtrToIntActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
+           Query.Types[1].isPointer();
+  });
+  PtrToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                                promoteIntegerType(0));
+  PtrToIntActions.fallback();
+
+  auto &PointerCarrierActions = getActionDefinitionsBuilder(
+      {G_FRAME_INDEX, G_GLOBAL_VALUE, G_CONSTANT_POOL, G_BLOCK_ADDR,
+       G_JUMP_TABLE, G_BRINDIRECT});
+  PointerCarrierActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && Query.Types[0].isPointer();
+  });
+  PointerCarrierActions.fallback();
+
+  getActionDefinitionsBuilder(G_BR).alwaysLegal();
+
   auto &ScalarCarrierActions =
-      getActionDefinitionsBuilder({G_IMPLICIT_DEF, G_FREEZE});
+      getActionDefinitionsBuilder(
+          {G_IMPLICIT_DEF, G_FREEZE, G_CONSTANT_FOLD_BARRIER});
   ScalarCarrierActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeScalarType(Query.Types[0]);
+    return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
   });
   ScalarCarrierActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                      promoteIntegerType(0));
 
+  auto &ConstantActions = getActionDefinitionsBuilder(G_CONSTANT);
+  ConstantActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() &&
+           (Query.Types[0].isPointer() ||
+            isNativeIntegerType(Query.Types[0]));
+  });
+  ConstantActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                                promoteIntegerType(0));
+
   auto &IntegerActions = getActionDefinitionsBuilder({
-      G_CONSTANT, G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_UREM,
-      G_AND, G_OR, G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS,
-      G_SEXT_INREG, G_BSWAP, G_BITREVERSE});
+      G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_UREM, G_AND, G_OR,
+      G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS, G_SEXT_INREG, G_BSWAP,
+      G_BITREVERSE});
   IntegerActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
@@ -524,7 +574,8 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
   auto &ICmpActions = getActionDefinitionsBuilder(G_ICMP);
   ICmpActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
-           isNativeIntegerType(Query.Types[1]);
+           (Query.Types[1].isPointer() ||
+            isNativeIntegerType(Query.Types[1]));
   });
   ICmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
                             promoteIntegerType(0));
@@ -548,7 +599,7 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
 
   auto &SelectActions = getActionDefinitionsBuilder(G_SELECT);
   SelectActions.legalIf([CondTy](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeScalarType(Query.Types[0]) &&
+    return Query.Types.size() > 1 && isNativeValueType(Query.Types[0]) &&
            hasExactType(Query.Types[1], CondTy);
   });
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(1),
@@ -560,7 +611,7 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
 
   auto &PhiActions = getActionDefinitionsBuilder(G_PHI);
   PhiActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeScalarType(Query.Types[0]);
+    return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
   });
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));

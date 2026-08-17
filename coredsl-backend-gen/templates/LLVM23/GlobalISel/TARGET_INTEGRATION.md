@@ -219,6 +219,12 @@ Inspect that, for native integers `[16, 32]`:
   unchanged;
 - an `i8` load/store value is promoted to `i16` without changing an `i8` MMO
   into an `i16` memory access;
+- `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
+  signed extension;
+- pointer constants, frame/global/constant-pool/block/jump-table addresses,
+  indirect branches, pointer `G_PHI`/`G_SELECT`, and exact pointer loads/stores
+  pass type legalization unchanged and remain covered by instruction selection;
+- an unconditional `G_BR` passes legality unchanged;
 - an `icmp` result uses `i16` rather than `i1`;
 - a value wider than `i32` fails closed instead of narrowing.
 
