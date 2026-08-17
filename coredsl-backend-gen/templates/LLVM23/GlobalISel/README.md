@@ -122,6 +122,7 @@ The following scalar rules are always emitted:
 - scalar casts: native integer `G_ANYEXT`/`G_ZEXT`/`G_SEXT`/`G_TRUNC` pairs,
   native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
   `G_FPTOUI` when their floating-point side is native;
+- plain non-atomic scalar memory: `G_LOAD`, `G_STORE`;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
 The smallest native integer is the condition carrier. `G_ICMP` promotes both
@@ -162,9 +163,31 @@ pairs listed above are legal as well. No generated rule ends in a catch-all
 `unsupported()`, so a surrounding target may add pointer, vector, memory,
 multi-result, or opcode-specific rules.
 
-`G_LOAD` and `G_STORE` are intentionally not inferred from register types.
-Their legality also depends on pointer types, memory widths, extension kind,
-and alignment, none of which are part of this compact template input.
+Plain non-atomic scalar `G_LOAD` and `G_STORE` apply the same value-carrier
+policy while preserving their pointer operand and MMO width, alignment, and
+flags. LLVM clears load range metadata when the loaded representation type is
+changed because the old range is no longer valid:
+
+```text
+G_LOAD  fN              -> G_LOAD iN; G_BITCAST iN to fN
+G_STORE fN              -> G_BITCAST fN to iN; G_STORE iN
+G_LOAD  iN, memory iK   -> G_LOAD iM, memory iK; G_TRUNC iM to iN
+G_STORE iN, memory iK   -> G_ZEXT/G_ANYEXT iN to iM; G_STORE iM, memory iK
+```
+
+Here `fN` is an unsupported floating-point type, `iM` is the narrowest native
+integer carrier for `iN`, and `K <= N <= M`. The equal-width float/integer
+conversion changes the MMO type but not its size. Integer promotion therefore
+produces an any-extending load or truncating store without widening the actual
+memory access. Store promotion uses `G_ZEXT` for `i1` and `G_ANYEXT` otherwise.
+A stored `G_FCONSTANT` can subsequently fold with its generated bitcast into a
+`G_CONSTANT`, using the same constant-carrier rule described above.
+
+This built-in rule is deliberately limited to one-MMO, non-atomic scalar
+operations whose value and memory types are compatible. Native floating-point
+loads and stores require an exact value/memory type match. Atomic, indexed,
+vector, multi-MMO, and mismatched floating-point memory operations fall back to
+the target's other rules rather than being inferred from scalar register types.
 
 At `llvmorg-23-init`, `LegalizerInfo` still falls back to its embedded
 `LegacyLegalizerInfo` when no modern rule matches. The generated constructor

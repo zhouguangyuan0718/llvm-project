@@ -178,6 +178,71 @@ static bool isNativeFloatTruncation(const LegalityQuery &Query) {
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
+// The built-in memory policy only handles an ordinary, non-atomic scalar
+// value and one MMO. Pointer address spaces and widths are preserved; indexed,
+// atomic, vector, and multi-MMO operations remain target-specific.
+static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
+    return false;
+
+  const LLT ValueTy = Query.Types[0];
+  const LLT PointerTy = Query.Types[1];
+  const LegalityQuery::MemDesc &Memory = Query.MMODescrs[0];
+  if ((!ValueTy.isInteger() && !ValueTy.isFloat()) ||
+      !PointerTy.isPointer() ||
+      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat()) ||
+      Memory.Ordering != AtomicOrdering::NotAtomic ||
+      Memory.FailureOrdering != AtomicOrdering::NotAtomic)
+    return false;
+
+  return Memory.MemoryTy.getSizeInBits() <= ValueTy.getSizeInBits();
+}
+
+static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
+  if (!hasPlainScalarMemoryShape(Query))
+    return false;
+
+  const LLT ValueTy = Query.Types[0];
+  const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
+  if (ValueTy.isInteger())
+    return MemoryTy.isInteger() && isNativeIntegerType(ValueTy);
+
+  // There is no representation-preserving meaning for extending or
+  // truncating a floating-point memory operation.
+  return MemoryTy.isFloat() && hasExactType(ValueTy, MemoryTy) &&
+         isNativeFloatType(ValueTy);
+}
+
+static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
+  return [](const LegalityQuery &Query) {
+    if (!hasPlainScalarMemoryShape(Query))
+      return false;
+
+    const LLT ValueTy = Query.Types[0];
+    const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
+    return ValueTy.isFloat() && hasExactType(ValueTy, MemoryTy) &&
+           !isNativeFloatType(ValueTy) &&
+           getNativeIntegerTypeForWidth(ValueTy.getScalarSizeInBits())
+               .isValid();
+  };
+}
+
+static LegalityPredicate plainMemoryIntegerNeedsPromotion() {
+  return [](const LegalityQuery &Query) {
+    if (!hasPlainScalarMemoryShape(Query))
+      return false;
+
+    const LLT ValueTy = Query.Types[0];
+    const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
+    if (!ValueTy.isInteger() || !MemoryTy.isInteger())
+      return false;
+
+    const LLT CarrierTy =
+        getNativeIntegerTypeForWidth(ValueTy.getScalarSizeInBits());
+    return CarrierTy.isValid() && !hasExactType(ValueTy, CarrierTy);
+  };
+}
+
 // Fold every equal-width integer bitcast of an unsupported floating-point
 // constant directly into G_CONSTANT. This preserves the bitcast result
 // registers and lets the ordinary integer policy promote them if necessary.
@@ -358,6 +423,14 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
 
   auto &BitcastActions = getActionDefinitionsBuilder(G_BITCAST);
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
+
+  auto &MemoryActions = getActionDefinitionsBuilder({G_LOAD, G_STORE});
+  MemoryActions.legalIf(isLegalPlainScalarMemoryValue);
+  MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
+                          bitcastFloatToSameWidthInteger(0));
+  MemoryActions.widenScalarIf(plainMemoryIntegerNeedsPromotion(),
+                              promoteIntegerType(0));
+  MemoryActions.fallback();
 
   auto &ScalarCarrierActions =
       getActionDefinitionsBuilder({G_IMPLICIT_DEF, G_FREEZE});

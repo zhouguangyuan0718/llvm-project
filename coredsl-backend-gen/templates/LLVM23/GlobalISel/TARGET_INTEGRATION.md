@@ -214,6 +214,11 @@ Inspect that, for native integers `[16, 32]`:
 - a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
   while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
   directly, without a `G_BITCAST`;
+- a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
+  equal-width `i16` memory carrier, while its MMO width and alignment stay
+  unchanged;
+- an `i8` load/store value is promoted to `i16` without changing an `i8` MMO
+  into an `i16` memory access;
 - an `icmp` result uses `i16` rather than `i1`;
 - a value wider than `i32` fails closed instead of narrowing.
 
