@@ -16,7 +16,7 @@ Root["target"] = "Toy16";
 
 llvm::json::Object NativeTypes;
 NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
-NativeTypes["floating_point_types"] = llvm::json::Array{};
+NativeTypes["floating_point_widths"] = llvm::json::Array{16};
 Root["native_types"] = std::move(NativeTypes);
 
 llvm::json::Object Intrinsic;

@@ -20,7 +20,7 @@ The complete input shape is:
   "target": "Example",
   "native_types": {
     "integer_widths": [16, 32],
-    "floating_point_types": []
+    "floating_point_widths": [16, 32]
   },
   "intrinsics": [
     {
@@ -59,16 +59,20 @@ integer width is promoted to the narrowest wider native integer. A value wider
 than the largest native integer is not handled; this policy never narrows or
 splits integers.
 
-Each `floating_point_types` entry is a concrete LLT C++ expression such as
-`LLT::float32()`. Only listed types are accepted by numerical floating-point
-opcodes. An empty array represents a target without floating-point register
-types.
+`floating_point_widths` must contain only the supported IEEE widths `16`, `32`,
+`64`, and `128`; entries must be unique and strictly increasing. Each width is
+converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`. Only listed
+types are accepted by numerical floating-point opcodes. An empty array
+represents a target without floating-point register types. Non-IEEE formats
+such as `bf16`, x87 extended precision, and PPC double-double are intentionally
+outside this compact input contract.
 
 These templates assume that the ExtendedLLT reland is cherry-picked onto
 `llvmorg-23-init` and enabled consistently by the integrating target. Integer,
 floating-point, and generic `sN` types then have different identities. The
-generated legalizer deliberately uses `LLT::integer(N)` and `LLT::float*()`;
-do not replace them with the generic `LLT::scalar(N)` wildcard.
+generated legalizer deliberately uses `LLT::integer(N)` and
+`LLT::floatIEEE(N)`; do not replace them with the generic `LLT::scalar(N)`
+wildcard.
 
 Each intrinsic entry contains only:
 
@@ -193,7 +197,8 @@ LLVM-based input producer does not need to serialize through JSON text.
 ## Integration checks
 
 1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
-   and the strictly increasing integer widths.
+   the strictly increasing integer widths, and the strictly increasing IEEE
+   floating-point widths drawn from `16`, `32`, `64`, and `128`.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

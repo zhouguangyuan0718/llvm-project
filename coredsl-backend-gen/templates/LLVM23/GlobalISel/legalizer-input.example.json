@@ -2,7 +2,7 @@
   "target": "Example",
   "native_types": {
     "integer_widths": [16, 32],
-    "floating_point_types": []
+    "floating_point_widths": [16, 32]
   },
   "intrinsics": [
     {

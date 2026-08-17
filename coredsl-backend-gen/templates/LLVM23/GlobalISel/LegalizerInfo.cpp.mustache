@@ -45,10 +45,10 @@ static bool isNativeIntegerType(LLT Ty) {
 static bool isNativeFloatType(LLT Ty) {
   if (!Ty.isFloat())
     return false;
-{{#native_types.floating_point_types}}
-  if (hasExactType(Ty, {{.}}))
+{{#native_types.floating_point_widths}}
+  if (hasExactType(Ty, LLT::floatIEEE({{.}})))
     return true;
-{{/native_types.floating_point_types}}
+{{/native_types.floating_point_widths}}
   return false;
 }
 

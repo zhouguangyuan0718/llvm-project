@@ -22,9 +22,13 @@ static json::Value makeLegalizerInput() {
   IntegerWidths.emplace_back(16);
   IntegerWidths.emplace_back(32);
 
+  json::Array FloatingPointWidths;
+  FloatingPointWidths.emplace_back(16);
+  FloatingPointWidths.emplace_back(32);
+
   json::Object NativeTypes;
   NativeTypes["integer_widths"] = std::move(IntegerWidths);
-  NativeTypes["floating_point_types"] = json::Array{};
+  NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
   Root["native_types"] = std::move(NativeTypes);
 
   json::Array ScalarArgumentIndices;
