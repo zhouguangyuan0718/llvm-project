@@ -223,7 +223,7 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
 
   auto &IntegerActions = getActionDefinitionsBuilder(
-      {G_ADD, G_SUB, G_MUL, G_AND, G_OR, G_XOR});
+      {G_CONSTANT, G_ADD, G_SUB, G_MUL, G_AND, G_OR, G_XOR});
   IntegerActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });

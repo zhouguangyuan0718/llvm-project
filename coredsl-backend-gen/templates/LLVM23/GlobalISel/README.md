@@ -98,7 +98,8 @@ different semantic rule.
 
 The following scalar rules are always emitted:
 
-- integer type index 0: `G_ADD`, `G_SUB`, `G_MUL`, `G_AND`, `G_OR`, `G_XOR`;
+- integer type index 0: `G_CONSTANT`, `G_ADD`, `G_SUB`, `G_MUL`, `G_AND`,
+  `G_OR`, `G_XOR`;
 - integer type indices 0 and 1: `G_SHL`, `G_LSHR`, `G_ASHR`;
 - native floating-point type index 0: `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`,
   `G_FNEG`, `G_FABS`;
@@ -108,6 +109,10 @@ The smallest native integer is the condition carrier. `G_ICMP` promotes both
 its result and integer input type. `G_FCMP` promotes only its result and accepts
 only native floating-point inputs. `G_BRCOND` and the condition input of
 `G_SELECT` use the same carrier.
+
+`G_CONSTANT` uses the same integer-width policy: a native-width constant is
+legal, while a missing integer width is promoted to the smallest wider native
+integer. LLVM's generic legalizer handles the corresponding constant widening.
 
 `G_SELECT` may bitcast an unsupported floating-point selected value to an
 equal-width integer and then promote that integer. This is representation-safe
