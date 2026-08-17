@@ -47,7 +47,38 @@ the corresponding `-gen-intrinsic-enums` entry to
 `llvm/include/llvm/IR/CMakeLists.txt`, following the existing target intrinsic
 headers. The `id_cpp` spelling must match the generated enum.
 
-## 2. Compile the generated source
+## 2. Enable ExtendedLLT consistently
+
+This template targets `llvmorg-23-init` plus the ExtendedLLT reland. Enable
+ExtendedLLT in both the generated matcher and the target runtime.
+
+Add `-gisel-extended-llt` to the target's GlobalISel TableGen command:
+
+```cmake
+tablegen(LLVM Toy16GenGlobalISel.inc
+  -gen-global-isel
+  -gisel-extended-llt)
+```
+
+Enable the same representation in the target-machine constructor, before
+GlobalISel creates any LLTs:
+
+```cpp
+#include "llvm/CodeGenTypes/LowLevelType.h"
+
+Toy16TargetMachine::Toy16TargetMachine(/* existing arguments */)
+    : LLVMTargetMachine(/* existing initialization */) {
+  LLT::setUseExtended(true);
+  // Existing target-machine initialization...
+}
+```
+
+The switch is process-wide in this LLVM revision. Setting only the TableGen
+flag or only the runtime flag is invalid: generated `GIM_SwitchType` tables use
+the exact ExtendedLLT raw identity, so `s32`, `i32`, and `f32` are different
+keys.
+
+## 3. Compile the generated source
 
 Add the generated implementation to `llvm/lib/Target/Toy16/CMakeLists.txt`:
 
@@ -66,7 +97,13 @@ add_llvm_target(Toy16CodeGen
 The generated legalizer has no Subtarget constructor argument. CPU or feature
 dependent legality is intentionally outside this simplified policy.
 
-## 3. Expose it from the Subtarget
+The generated constructor also finalizes the embedded legacy tables required
+by `llvmorg-23-init`. Do not remove its
+`getLegacyLegalizerInfo().computeTables()` call: an opcode not covered by the
+built-in rules can still reach the legacy fallback, even if the target defines
+no legacy actions itself.
+
+## 4. Expose it from the Subtarget
 
 The GlobalISel `Legalizer` pass obtains the policy through
 `TargetSubtargetInfo::getLegalizerInfo()`. Add storage and the override to
@@ -118,7 +155,7 @@ If the target already owns a `std::unique_ptr<LegalizerInfo>`, only replace its
 old construction with `std::make_unique<Toy16LegalizerInfo>()`; do not add a
 second legalizer.
 
-## 4. Ensure the GlobalISel pipeline is present
+## 5. Ensure the GlobalISel pipeline is present
 
 An existing GlobalISel target normally already has these hooks. A new target
 needs the standard pass sequence in its `TargetPassConfig`:
@@ -157,7 +194,7 @@ extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeToy16Target() {
 These pipeline hooks are prerequisites of GlobalISel as a whole; the generated
 legalizer does not replace them.
 
-## 5. Validate the integration
+## 6. Validate the integration
 
 Build the target and first stop immediately after legalization:
 

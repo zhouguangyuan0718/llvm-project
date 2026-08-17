@@ -59,10 +59,16 @@ integer width is promoted to the narrowest wider native integer. A value wider
 than the largest native integer is not handled; this policy never narrows or
 splits integers.
 
-Each `floating_point_types` entry is a concrete ExtendedLLT C++ expression such
-as `LLT::float32()`. Only listed types are accepted by numerical floating-point
+Each `floating_point_types` entry is a concrete LLT C++ expression such as
+`LLT::float32()`. Only listed types are accepted by numerical floating-point
 opcodes. An empty array represents a target without floating-point register
 types.
+
+These templates assume that the ExtendedLLT reland is cherry-picked onto
+`llvmorg-23-init` and enabled consistently by the integrating target. Integer,
+floating-point, and generic `sN` types then have different identities. The
+generated legalizer deliberately uses `LLT::integer(N)` and `LLT::float*()`;
+do not replace them with the generic `LLT::scalar(N)` wildcard.
 
 Each intrinsic entry contains only:
 
@@ -114,6 +120,12 @@ equal-width integer/floating-point bitcasts. No generated rule ends in a
 catch-all `unsupported()`, so a surrounding target may add pointer, vector,
 cast, or opcode-specific rules.
 
+At `llvmorg-23-init`, `LegalizerInfo` still falls back to its embedded
+`LegacyLegalizerInfo` when no modern rule matches. The generated constructor
+therefore finishes with `getLegacyLegalizerInfo().computeTables()`. This is
+required even when the target adds no legacy actions; omitting it triggers the
+`TablesInitialized` assertion on the first fallback query.
+
 Declaring a native type does not prove instruction-selector coverage. Every
 built-in opcode that can reach legalization must still be selected, lowered,
 or otherwise eliminated by the target.
@@ -147,7 +159,9 @@ LLVM-based input producer does not need to serialize through JSON text.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.
-5. Test every native integer, every gap below the largest integer, native and
+5. Confirm that target TableGen uses `-gisel-extended-llt` and target runtime
+   setup calls `LLT::setUseExtended(true)` before GlobalISel creates LLTs.
+6. Test every native integer, every gap below the largest integer, native and
    unsupported floating-point types, and a width above the largest integer.
-6. Inspect post-legalization MIR and run instruction selection for every
+7. Inspect post-legalization MIR and run instruction selection for every
    generated artifact, intrinsic, comparison, and consumer.

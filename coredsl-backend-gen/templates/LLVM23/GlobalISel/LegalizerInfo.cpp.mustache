@@ -293,6 +293,11 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
   });
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));
+
+  // llvmorg-23-init still falls back to LegacyLegalizerInfo for opcodes that
+  // have no matching rule above. Its lookup tables must be finalized even
+  // when this target does not add any target-specific legacy actions.
+  getLegacyLegalizerInfo().computeTables();
 }
 
 bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
