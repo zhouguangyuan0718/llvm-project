@@ -90,13 +90,17 @@ return `false`.
 For a listed intrinsic argument the generated boundary is:
 
 ```text
-fN -> G_BITCAST iN -> G_ANYEXT iM -> intrinsic
-iN ----------------> G_ANYEXT iM -> intrinsic
+nonconstant fN -> G_BITCAST iN  -> G_ANYEXT iM -> intrinsic
+G_FCONSTANT fN -> G_CONSTANT iN -> G_ANYEXT iM -> intrinsic
+iN -----------------------------> G_ANYEXT iM -> intrinsic
 ```
 
-The extension is omitted when `iN` is native. `G_ANYEXT` preserves only a
-low-bit payload convention; a numerically signed or unsigned argument needs a
-different semantic rule.
+The extension is omitted when `iN` is native. Thus a half constant passed to an
+intrinsic on an `i16` target becomes one `G_CONSTANT i16` whose value is the
+exact `APFloat::bitcastToAPInt()` result; no `G_BITCAST` is emitted. The original
+`G_FCONSTANT` is removed by normal dead-instruction handling when it has no
+other non-debug users. `G_ANYEXT` preserves only a low-bit payload convention;
+a numerically signed or unsigned argument needs a different semantic rule.
 
 ## Built-in opcode policy
 

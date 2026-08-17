@@ -211,7 +211,9 @@ Inspect that, for native integers `[16, 32]`:
 - an `i24` integer operation is promoted to `i32`;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
   remaining `G_BITCAST` when `f16` is not native;
-- an `f16` listed intrinsic argument becomes an `i16` bit carrier;
+- a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
+  while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
+  directly, without a `G_BITCAST`;
 - an `icmp` result uses `i16` rather than `i1`;
 - a value wider than `i32` fails closed instead of narrowing.
 

@@ -241,12 +241,41 @@ static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
 
 // Listing an intrinsic scalar argument opts it into the integer-carrier
 // convention:
-// integer values are promoted to the next native width, and floating-point
-// values are first bitcast to equal-width integer bits and then promoted.
+// integer values are promoted to the next native width. Floating-point
+// constants are rematerialized directly as equal-width integer constants;
+// other floating-point values are bitcast to integer bits. The integer value
+// is then promoted when its width is not native.
 static LLT getIntrinsicCarrierType(LLT Ty) {
   if (!Ty.isInteger() && !Ty.isFloat())
     return LLT{};
   return getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
+}
+
+// Replace a G_FCONSTANT source with a G_CONSTANT carrying the APFloat's exact
+// bit pattern. The old floating-point constant is deliberately left in place:
+// the legalizer's normal dead-instruction handling removes it when this was its
+// last non-debug use, while other users remain valid.
+static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
+                                          MachineRegisterInfo &MRI,
+                                          MachineInstr &UseMI,
+                                          LLT IntegerTy,
+                                          unsigned OperandIndex) {
+  const MachineOperand &Source = UseMI.getOperand(OperandIndex);
+  MachineInstr *DefMI = MRI.getVRegDef(Source.getReg());
+  if (!DefMI || DefMI->getOpcode() != TargetOpcode::G_FCONSTANT ||
+      DefMI->getNumExplicitDefs() != 1 ||
+      DefMI->getNumExplicitOperands() < 2 ||
+      !DefMI->getOperand(1).isFPImm())
+    return false;
+
+  const APInt Bits =
+      DefMI->getOperand(1).getFPImm()->getValueAPF().bitcastToAPInt();
+  if (Bits.getBitWidth() != IntegerTy.getScalarSizeInBits())
+    return false;
+
+  UseMI.getOperand(OperandIndex)
+      .setReg(MIRBuilder.buildConstant(IntegerTy, Bits).getReg(0));
+  return true;
 }
 
 [[maybe_unused]] static bool applyIntrinsicCarrierRewrites(
@@ -293,7 +322,9 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
     if (OriginalTy.isFloat()) {
       CurrentTy = LLT::integer(OriginalTy.getScalarSizeInBits());
       Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.bitcastSrc(MI, CurrentTy, OperandIndex);
+      if (!materializeFConstantAsInteger(Helper.MIRBuilder, MRI, MI,
+                                         CurrentTy, OperandIndex))
+        Helper.bitcastSrc(MI, CurrentTy, OperandIndex);
     }
     if (!hasExactType(CurrentTy, CarrierTy)) {
       Helper.MIRBuilder.setInstrAndDebugLoc(MI);
