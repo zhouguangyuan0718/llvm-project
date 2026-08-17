@@ -1,5 +1,6 @@
 #include "{{target}}LegalizerInfo.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
@@ -9,6 +10,7 @@
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/LowLevelType.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics{{target}}.h"
 
 #include <cassert>
@@ -139,6 +141,73 @@ static bool isGeneratedRepresentationBitcast(const LegalityQuery &Query) {
          getNativeIntegerTypeForWidth(DstTy.getScalarSizeInBits()).isValid();
 }
 
+static bool isNativeIntegerExtension(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  return isNativeIntegerType(DstTy) && isNativeIntegerType(SrcTy) &&
+         DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
+}
+
+static bool isNativeIntegerTruncation(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  return isNativeIntegerType(DstTy) && isNativeIntegerType(SrcTy) &&
+         DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
+}
+
+static bool isNativeFloatExtension(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  return isNativeFloatType(DstTy) && isNativeFloatType(SrcTy) &&
+         DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
+}
+
+static bool isNativeFloatTruncation(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  return isNativeFloatType(DstTy) && isNativeFloatType(SrcTy) &&
+         DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
+}
+
+// An unsupported floating-point constant is a representation, not a numeric
+// operation. Materialize its exact bits as an equal-width integer and let the
+// ordinary integer-constant policy promote that temporary when necessary.
+static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
+                                         MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_FCONSTANT ||
+      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 2)
+    return false;
+
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  MachineOperand &Dst = MI.getOperand(0);
+  const MachineOperand &Value = MI.getOperand(1);
+  if (!Dst.isReg() || !Dst.getReg().isVirtual() || !Dst.isDef() ||
+      !Value.isFPImm())
+    return false;
+
+  const LLT FloatTy = MRI.getType(Dst.getReg());
+  if (!FloatTy.isFloat() ||
+      !getNativeIntegerTypeForWidth(FloatTy.getScalarSizeInBits()).isValid())
+    return false;
+
+  const LLT IntegerTy = LLT::integer(FloatTy.getScalarSizeInBits());
+  const APInt Bits = Value.getFPImm()->getValueAPF().bitcastToAPInt();
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+  Register IntegerConstant =
+      Helper.MIRBuilder.buildConstant(IntegerTy, Bits).getReg(0);
+  Helper.MIRBuilder.buildBitcast(Dst, IntegerConstant);
+  MI.eraseFromParent();
+  return true;
+}
+
 // Listing an intrinsic scalar argument opts it into the integer-carrier
 // convention:
 // integer values are promoted to the next native width, and floating-point
@@ -214,16 +283,32 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
 
   auto &ExtActions =
       getActionDefinitionsBuilder({G_ANYEXT, G_ZEXT, G_SEXT});
-  ExtActions.legalIf(isGeneratedIntegerExtension);
+  ExtActions.legalIf([](const LegalityQuery &Query) {
+    return isGeneratedIntegerExtension(Query) ||
+           isNativeIntegerExtension(Query);
+  });
 
   auto &TruncActions = getActionDefinitionsBuilder(G_TRUNC);
-  TruncActions.legalIf(isGeneratedIntegerTruncation);
+  TruncActions.legalIf([](const LegalityQuery &Query) {
+    return isGeneratedIntegerTruncation(Query) ||
+           isNativeIntegerTruncation(Query);
+  });
 
   auto &BitcastActions = getActionDefinitionsBuilder(G_BITCAST);
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
 
-  auto &IntegerActions = getActionDefinitionsBuilder(
-      {G_CONSTANT, G_ADD, G_SUB, G_MUL, G_AND, G_OR, G_XOR});
+  auto &ScalarCarrierActions =
+      getActionDefinitionsBuilder({G_IMPLICIT_DEF, G_FREEZE});
+  ScalarCarrierActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeScalarType(Query.Types[0]);
+  });
+  ScalarCarrierActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                                     promoteIntegerType(0));
+
+  auto &IntegerActions = getActionDefinitionsBuilder({
+      G_CONSTANT, G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_UREM,
+      G_AND, G_OR, G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS,
+      G_SEXT_INREG, G_BSWAP, G_BITREVERSE});
   IntegerActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
@@ -241,11 +326,62 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
   ShiftActions.widenScalarIf(integerTypeNeedsPromotion(1),
                              promoteIntegerType(1));
 
-  auto &FloatActions = getActionDefinitionsBuilder(
-      {G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FNEG, G_FABS});
+  auto &BitCountActions = getActionDefinitionsBuilder(
+      {G_CTLZ, G_CTLZ_ZERO_UNDEF, G_CTTZ, G_CTTZ_ZERO_UNDEF, G_CTPOP});
+  BitCountActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
+           isNativeIntegerType(Query.Types[1]);
+  });
+  BitCountActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                                promoteIntegerType(0));
+  BitCountActions.widenScalarIf(integerTypeNeedsPromotion(1),
+                                promoteIntegerType(1));
+
+  auto &FConstantActions = getActionDefinitionsBuilder(G_FCONSTANT);
+  FConstantActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+  });
+  FConstantActions.customIf(floatTypeNeedsIntegerBitcast(0));
+
+  auto &FloatActions = getActionDefinitionsBuilder({
+      G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FREM, G_FMA, G_FMAD, G_FNEG,
+      G_FABS, G_FCANONICALIZE, G_FMINNUM, G_FMAXNUM, G_FMINNUM_IEEE,
+      G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM, G_FMINIMUMNUM,
+      G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
+      G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
   });
+
+  auto &FCopySignActions = getActionDefinitionsBuilder(G_FCOPYSIGN);
+  FCopySignActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
+           isNativeFloatType(Query.Types[1]);
+  });
+
+  auto &FPExtActions = getActionDefinitionsBuilder(G_FPEXT);
+  FPExtActions.legalIf(isNativeFloatExtension);
+
+  auto &FPTruncActions = getActionDefinitionsBuilder(G_FPTRUNC);
+  FPTruncActions.legalIf(isNativeFloatTruncation);
+
+  auto &IntToFPActions =
+      getActionDefinitionsBuilder({G_SITOFP, G_UITOFP});
+  IntToFPActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
+           isNativeIntegerType(Query.Types[1]);
+  });
+  IntToFPActions.widenScalarIf(integerTypeNeedsPromotion(1),
+                               promoteIntegerType(1));
+
+  auto &FPToIntActions =
+      getActionDefinitionsBuilder({G_FPTOSI, G_FPTOUI});
+  FPToIntActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
+           isNativeFloatType(Query.Types[1]);
+  });
+  FPToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                               promoteIntegerType(0));
 
   const LLT CondTy = getNativeIntegerTypeForWidth(1);
   assert(CondTy.isValid() && "condition legalization needs an integer type");
@@ -298,6 +434,18 @@ static LLT getIntrinsicCarrierType(LLT Ty) {
   // have no matching rule above. Its lookup tables must be finalized even
   // when this target does not add any target-specific legacy actions.
   getLegacyLegalizerInfo().computeTables();
+}
+
+bool {{target}}LegalizerInfo::legalizeCustom(
+    LegalizerHelper &Helper, MachineInstr &MI,
+    LostDebugLocObserver &LocObserver) const {
+  (void)LocObserver;
+  switch (MI.getOpcode()) {
+  case TargetOpcode::G_FCONSTANT:
+    return applyFConstantCarrierRewrite(Helper, MI);
+  default:
+    return false;
+  }
 }
 
 bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,

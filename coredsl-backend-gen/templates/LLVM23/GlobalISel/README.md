@@ -98,11 +98,22 @@ different semantic rule.
 
 The following scalar rules are always emitted:
 
-- integer type index 0: `G_CONSTANT`, `G_ADD`, `G_SUB`, `G_MUL`, `G_AND`,
-  `G_OR`, `G_XOR`;
+- scalar carriers: `G_IMPLICIT_DEF`, `G_FREEZE`;
+- integer type index 0: `G_CONSTANT`, `G_ADD`, `G_SUB`, `G_MUL`, `G_SDIV`,
+  `G_UDIV`, `G_SREM`, `G_UREM`, `G_AND`, `G_OR`, `G_XOR`, `G_SMIN`,
+  `G_SMAX`, `G_UMIN`, `G_UMAX`, `G_ABS`, `G_SEXT_INREG`, `G_BSWAP`,
+  `G_BITREVERSE`;
 - integer type indices 0 and 1: `G_SHL`, `G_LSHR`, `G_ASHR`;
-- native floating-point type index 0: `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`,
-  `G_FNEG`, `G_FABS`;
+- integer result and input types: `G_CTLZ`, `G_CTLZ_ZERO_UNDEF`, `G_CTTZ`,
+  `G_CTTZ_ZERO_UNDEF`, `G_CTPOP`;
+- floating-point constants and native floating-point operations:
+  `G_FCONSTANT`, `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
+  `G_FMAD`, `G_FNEG`, `G_FABS`, `G_FCANONICALIZE`, all standard
+  `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FCEIL`, `G_FFLOOR`, `G_FRINT`,
+  `G_FNEARBYINT`, `G_FCOPYSIGN`;
+- scalar casts: native integer `G_ANYEXT`/`G_ZEXT`/`G_SEXT`/`G_TRUNC` pairs,
+  native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
+  `G_FPTOUI` when their floating-point side is native;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
 The smallest native integer is the condition carrier. `G_ICMP` promotes both
@@ -114,16 +125,32 @@ only native floating-point inputs. `G_BRCOND` and the condition input of
 legal, while a missing integer width is promoted to the smallest wider native
 integer. LLVM's generic legalizer handles the corresponding constant widening.
 
+A native `G_FCONSTANT` is legal. An unsupported floating-point constant with
+an available integer carrier is rewritten without changing its bits:
+
+```text
+G_FCONSTANT fN -> G_CONSTANT iN -> G_BITCAST fN
+```
+
+The intermediate `G_CONSTANT iN` is then promoted by the integer-width policy
+when `iN` itself is not native. Unsupported numerical floating-point operations
+still fail closed; they are not reinterpreted as integer arithmetic.
+
 `G_SELECT` may bitcast an unsupported floating-point selected value to an
 equal-width integer and then promote that integer. This is representation-safe
 for selection and is not applied to numerical floating-point operations.
 `G_PHI` promotes integer values but does not bitcast unsupported float values.
 
-The templates also mark exactly the artifacts introduced by this policy as
-legal: integer extensions to a native carrier, the inverse truncations, and
-equal-width integer/floating-point bitcasts. No generated rule ends in a
-catch-all `unsupported()`, so a surrounding target may add pointer, vector,
-cast, or opcode-specific rules.
+The templates also mark the artifacts introduced by this policy as legal:
+integer extensions to a native carrier, the inverse truncations, and equal-width
+integer/floating-point bitcasts. Native integer and floating-point conversion
+pairs listed above are legal as well. No generated rule ends in a catch-all
+`unsupported()`, so a surrounding target may add pointer, vector, memory,
+multi-result, or opcode-specific rules.
+
+`G_LOAD` and `G_STORE` are intentionally not inferred from register types.
+Their legality also depends on pointer types, memory widths, extension kind,
+and alignment, none of which are part of this compact template input.
 
 At `llvmorg-23-init`, `LegalizerInfo` still falls back to its embedded
 `LegacyLegalizerInfo` when no modern rule matches. The generated constructor
