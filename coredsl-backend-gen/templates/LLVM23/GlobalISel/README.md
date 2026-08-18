@@ -133,11 +133,15 @@ The following scalar and pointer-carrier rules are always emitted:
 - plain non-atomic scalar memory: `G_LOAD`, `G_STORE`;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
-The smallest native integer is the condition carrier. `G_ICMP` promotes both
-its result and integer input type; pointer inputs are accepted without changing
-their pointer type. `G_FCMP` promotes only its result and accepts only native
-floating-point inputs. The condition input of `G_SELECT` uses the same carrier.
-Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+The smallest native integer is the default condition carrier for a missing
+result width. `G_ICMP` accepts every native integer result directly and promotes
+missing result and integer-input widths to the narrowest sufficiently wide
+native integers. Pointer inputs are accepted without changing their pointer
+type. Non-integer results, non-integer/non-pointer inputs, and widths exceeding
+every native integer fail closed. `G_FCMP` promotes only its result and accepts
+only native floating-point inputs. The condition input of `G_SELECT` uses the
+smallest condition carrier. Pointer values are also accepted by `G_SELECT` and
+`G_PHI`.
 
 `G_BRCOND` accepts every native integer condition directly. A condition whose
 integer width is missing is promoted to the narrowest native integer at least

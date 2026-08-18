@@ -572,8 +572,9 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
   assert(CondTy.isValid() && "condition legalization needs an integer type");
 
   auto &ICmpActions = getActionDefinitionsBuilder(G_ICMP);
-  ICmpActions.legalIf([CondTy](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
+  ICmpActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 &&
+           isNativeIntegerType(Query.Types[0]) &&
            (Query.Types[1].isPointer() ||
             isNativeIntegerType(Query.Types[1]));
   });
