@@ -136,8 +136,15 @@ The following scalar and pointer-carrier rules are always emitted:
 The smallest native integer is the condition carrier. `G_ICMP` promotes both
 its result and integer input type; pointer inputs are accepted without changing
 their pointer type. `G_FCMP` promotes only its result and accepts only native
-floating-point inputs. `G_BRCOND` and the condition input of `G_SELECT` use the
-same carrier. Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+floating-point inputs. The condition input of `G_SELECT` uses the same carrier.
+Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+
+`G_BRCOND` accepts every native integer condition directly. A condition whose
+integer width is missing is promoted to the narrowest native integer at least
+as wide as the original condition; LLVM's generic legalizer uses its boolean
+extension operation for this rewrite. This covers both the usual promoted `i1`
+condition and branches driven by an already-native wider integer. Non-integer
+conditions and integer conditions wider than every native type fail closed.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
 promoted to the narrowest native integer with the generic legalizer's signed

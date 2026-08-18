@@ -226,6 +226,8 @@ Inspect that, for native integers `[16, 32]`:
   pass type legalization unchanged and remain covered by instruction selection;
 - an unconditional `G_BR` passes legality unchanged;
 - an `icmp` result uses `i16` rather than `i1`;
+- `G_BRCOND` accepts both `i16` and `i32` conditions directly, and promotes an
+  `i1` or `i8` condition to `i16` with LLVM's boolean extension operation;
 - a value wider than `i32` fails closed instead of narrowing.
 
 Then run through instruction selection:

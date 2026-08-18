@@ -591,8 +591,8 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
                             promoteIntegerType(0));
 
   auto &BrCondActions = getActionDefinitionsBuilder(G_BRCOND);
-  BrCondActions.legalIf([CondTy](const LegalityQuery &Query) {
-    return !Query.Types.empty() && hasExactType(Query.Types[0], CondTy);
+  BrCondActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
   BrCondActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
