@@ -178,9 +178,40 @@ static bool isNativeFloatTruncation(const LegalityQuery &Query) {
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
+static bool isSupportedIntegerMemoryType(LLT Ty) {
+  if (!Ty.isInteger())
+    return false;
+{{#memory_types.integer_widths}}
+  if (hasExactType(Ty, LLT::integer({{.}})))
+    return true;
+{{/memory_types.integer_widths}}
+  return false;
+}
+
+static bool isSupportedFloatMemoryType(LLT Ty) {
+  if (!Ty.isFloat())
+    return false;
+{{#memory_types.floating_point_widths}}
+  if (hasExactType(Ty, LLT::floatIEEE({{.}})))
+    return true;
+{{/memory_types.floating_point_widths}}
+  return false;
+}
+
+static bool isSupportedPointerMemoryType(LLT Ty) {
+{{#memory_types.pointer}}
+  return Ty.isPointer();
+{{/memory_types.pointer}}
+{{^memory_types.pointer}}
+  (void)Ty;
+  return false;
+{{/memory_types.pointer}}
+}
+
 // The built-in memory policy only handles an ordinary, non-atomic scalar
-// value and one MMO. Pointer address spaces and widths are preserved; indexed,
-// atomic, vector, and multi-MMO operations remain target-specific.
+// value and one MMO whose value and memory types are identical. Pointer
+// address spaces and widths are preserved; indexed, atomic, vector, and
+// multi-MMO operations remain target-specific.
 static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
     return false;
@@ -196,7 +227,7 @@ static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
       Memory.FailureOrdering != AtomicOrdering::NotAtomic)
     return false;
 
-  return Memory.MemoryTy.getSizeInBits() <= ValueTy.getSizeInBits();
+  return hasExactType(ValueTy, Memory.MemoryTy);
 }
 
 static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
@@ -204,16 +235,13 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
     return false;
 
   const LLT ValueTy = Query.Types[0];
-  const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
   if (ValueTy.isInteger())
-    return MemoryTy.isInteger() && isNativeIntegerType(ValueTy);
+    return isNativeIntegerType(ValueTy) &&
+           isSupportedIntegerMemoryType(ValueTy);
   if (ValueTy.isPointer())
-    return MemoryTy.isPointer() && hasExactType(ValueTy, MemoryTy);
+    return isSupportedPointerMemoryType(ValueTy);
 
-  // There is no representation-preserving meaning for extending or
-  // truncating a floating-point memory operation.
-  return MemoryTy.isFloat() && hasExactType(ValueTy, MemoryTy) &&
-         isNativeFloatType(ValueTy);
+  return isNativeFloatType(ValueTy) && isSupportedFloatMemoryType(ValueTy);
 }
 
 static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
@@ -222,27 +250,13 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
       return false;
 
     const LLT ValueTy = Query.Types[0];
-    const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
-    return ValueTy.isFloat() && hasExactType(ValueTy, MemoryTy) &&
-           !isNativeFloatType(ValueTy) &&
-           getNativeIntegerTypeForWidth(ValueTy.getScalarSizeInBits())
-               .isValid();
-  };
-}
-
-static LegalityPredicate plainMemoryIntegerNeedsPromotion() {
-  return [](const LegalityQuery &Query) {
-    if (!hasPlainScalarMemoryShape(Query))
+    if (!ValueTy.isFloat())
       return false;
 
-    const LLT ValueTy = Query.Types[0];
-    const LLT MemoryTy = Query.MMODescrs[0].MemoryTy;
-    if (!ValueTy.isInteger() || !MemoryTy.isInteger())
-      return false;
-
-    const LLT CarrierTy =
-        getNativeIntegerTypeForWidth(ValueTy.getScalarSizeInBits());
-    return CarrierTy.isValid() && !hasExactType(ValueTy, CarrierTy);
+    const LLT IntegerTy =
+        LLT::integer(ValueTy.getScalarSizeInBits());
+    return isNativeIntegerType(IntegerTy) &&
+           isSupportedIntegerMemoryType(IntegerTy);
   };
 }
 
@@ -431,8 +445,6 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
   MemoryActions.legalIf(isLegalPlainScalarMemoryValue);
   MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
                           bitcastFloatToSameWidthInteger(0));
-  MemoryActions.widenScalarIf(plainMemoryIntegerNeedsPromotion(),
-                              promoteIntegerType(0));
   MemoryActions.fallback();
 
   auto &PointerAddActions = getActionDefinitionsBuilder(G_PTR_ADD);

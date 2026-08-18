@@ -31,6 +31,20 @@ static json::Value makeLegalizerInput() {
   NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
   Root["native_types"] = std::move(NativeTypes);
 
+  json::Array MemoryIntegerWidths;
+  MemoryIntegerWidths.emplace_back(16);
+  MemoryIntegerWidths.emplace_back(32);
+
+  json::Array MemoryFloatingPointWidths;
+  MemoryFloatingPointWidths.emplace_back(32);
+
+  json::Object MemoryTypes;
+  MemoryTypes["integer_widths"] = std::move(MemoryIntegerWidths);
+  MemoryTypes["floating_point_widths"] =
+      std::move(MemoryFloatingPointWidths);
+  MemoryTypes["pointer"] = true;
+  Root["memory_types"] = std::move(MemoryTypes);
+
   json::Array ScalarArgumentIndices;
   ScalarArgumentIndices.emplace_back(0);
 

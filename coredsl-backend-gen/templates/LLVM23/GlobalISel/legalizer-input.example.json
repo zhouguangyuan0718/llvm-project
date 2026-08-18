@@ -4,6 +4,11 @@
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
   },
+  "memory_types": {
+    "integer_widths": [16, 32],
+    "floating_point_widths": [32],
+    "pointer": true
+  },
   "intrinsics": [
     {
       "id_cpp": "Intrinsic::example_f16_op",

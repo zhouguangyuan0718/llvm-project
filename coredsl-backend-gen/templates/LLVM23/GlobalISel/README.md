@@ -1,10 +1,10 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
-input contains one target name, target-native scalar types, and intrinsic scalar
-argument indices. File names, the class name, the include guard, the `llvm`
-namespace, and all legalization policies are derived or built into the
-templates.
+input contains one target name, target-native scalar types, the scalar types
+supported by ordinary load/store instructions, and intrinsic scalar argument
+indices. File names, the class name, the include guard, the `llvm` namespace,
+and all legalization policies are derived or built into the templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
@@ -21,6 +21,11 @@ The complete input shape is:
   "native_types": {
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
+  },
+  "memory_types": {
+    "integer_widths": [16, 32],
+    "floating_point_widths": [32],
+    "pointer": true
   },
   "intrinsics": [
     {
@@ -66,6 +71,20 @@ types are accepted by numerical floating-point opcodes. An empty array
 represents a target without floating-point register types. Non-IEEE formats
 such as `bf16`, x87 extended precision, and PPC double-double are intentionally
 outside this compact input contract.
+
+`memory_types` is the common capability set for plain non-atomic scalar
+`G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
+strict ordering and type spelling rules as `native_types`; every directly legal
+memory type must also be present in the corresponding native-type list.
+`pointer: true` accepts exact pointer-valued load/store pairs in every address
+space, while `false` accepts none. Value and MMO memory types must be identical;
+the generated policy does not infer extending loads or truncating stores.
+
+A floating-point memory operation not listed in
+`memory_types.floating_point_widths` may still be represented by an equal-width
+integer only when that exact integer width is present in both
+`native_types.integer_widths` and `memory_types.integer_widths`. The legalizer
+bitcasts the value and changes the MMO type without changing its bit width.
 
 These templates assume that the ExtendedLLT reland is cherry-picked onto
 `llvmorg-23-init` and enabled consistently by the integrating target. Integer,
@@ -197,33 +216,35 @@ pairs listed above are legal as well. No generated rule ends in a catch-all
 `unsupported()`, so a surrounding target may add pointer, vector, memory,
 multi-result, or opcode-specific rules.
 
-Plain non-atomic scalar `G_LOAD` and `G_STORE` apply the same value-carrier
-policy while preserving their pointer operand and MMO width, alignment, and
-flags. LLVM clears load range metadata when the loaded representation type is
-changed because the old range is no longer valid:
+Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
+memory types. An integer or floating-point operation is directly legal only
+when its type is present in both the corresponding native-register list and
+the corresponding `memory_types` list. Pointer operations additionally require
+`memory_types.pointer`. The pointer operand, alignment, ordering, and other MMO
+flags are preserved.
+
+When a floating-point type is not directly supported but the exact same-width
+integer is both native and memory-supported, the representation is changed
+without changing the access width. LLVM clears load range metadata because the
+old floating-point range is no longer valid:
 
 ```text
 G_LOAD  fN              -> G_LOAD iN; G_BITCAST iN to fN
 G_STORE fN              -> G_BITCAST fN to iN; G_STORE iN
-G_LOAD  iN, memory iK   -> G_LOAD iM, memory iK; G_TRUNC iM to iN
-G_STORE iN, memory iK   -> G_ZEXT/G_ANYEXT iN to iM; G_STORE iM, memory iK
 ```
 
-Here `fN` is an unsupported floating-point type, `iM` is the narrowest native
-integer carrier for `iN`, and `K <= N <= M`. The equal-width float/integer
-conversion changes the MMO type but not its size. Integer promotion therefore
-produces an any-extending load or truncating store without widening the actual
-memory access. Store promotion uses `G_ZEXT` for `i1` and `G_ANYEXT` otherwise.
-A stored `G_FCONSTANT` can subsequently fold with its generated bitcast into a
-`G_CONSTANT`, using the same constant-carrier rule described above.
+Here `fN` and `iN` have identical bit widths. There is deliberately no integer
+widening rule for memory operations: an unsupported `G_LOAD/G_STORE i8` does
+not become a mismatched `value i16, memory i8` operation. When `fN` is also not
+a native floating-point register type, a stored `G_FCONSTANT` can subsequently
+fold with its generated bitcast into a `G_CONSTANT`, using the same
+constant-carrier rule described above.
 
 This built-in rule is deliberately limited to one-MMO, non-atomic scalar
-operations whose value and memory types are compatible. Native floating-point
-loads and stores require an exact value/memory type match. Atomic, indexed,
-vector, multi-MMO, and mismatched floating-point memory operations fall back to
-the target's other rules rather than being inferred from scalar register types.
-Exact pointer-valued loads and stores are accepted without changing the pointer
-or memory type.
+operations with exact value/memory type identity. Atomic, indexed, vector,
+multi-MMO, and mismatched value/memory operations fall back to the target's
+other rules rather than being inferred from register types. Enabled pointer
+loads and stores are accepted without changing the pointer or memory type.
 
 The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
 `G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
@@ -268,8 +289,9 @@ LLVM-based input producer does not need to serialize through JSON text.
 ## Integration checks
 
 1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
-   the strictly increasing integer widths, and the strictly increasing IEEE
-   floating-point widths drawn from `16`, `32`, `64`, and `128`.
+   all strictly increasing integer-width lists, and all strictly increasing
+   IEEE floating-point lists drawn from `16`, `32`, `64`, and `128`. Direct
+   memory-type lists must be subsets of their corresponding native-type lists.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

@@ -7,8 +7,8 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 
 ## 1. Construct the renderer input
 
-The generator supplies only the target name, native scalar types, and intrinsic
-scalar input arguments:
+The generator supplies only the target name, native scalar types, the common
+plain load/store types, and intrinsic scalar input arguments:
 
 ```cpp
 llvm::json::Object Root;
@@ -18,6 +18,12 @@ llvm::json::Object NativeTypes;
 NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
 NativeTypes["floating_point_widths"] = llvm::json::Array{16};
 Root["native_types"] = std::move(NativeTypes);
+
+llvm::json::Object MemoryTypes;
+MemoryTypes["integer_widths"] = llvm::json::Array{16, 32};
+MemoryTypes["floating_point_widths"] = llvm::json::Array{};
+MemoryTypes["pointer"] = true;
+Root["memory_types"] = std::move(MemoryTypes);
 
 llvm::json::Object Intrinsic;
 Intrinsic["id_cpp"] = "Intrinsic::toy16_f16_op";
@@ -217,8 +223,10 @@ Inspect that, for native integers `[16, 32]`:
 - a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
   equal-width `i16` memory carrier, while its MMO width and alignment stay
   unchanged;
-- an `i8` load/store value is promoted to `i16` without changing an `i8` MMO
-  into an `i16` memory access;
+- an `i8` load/store remains unsupported rather than being changed into a
+  mismatched `value i16, memory i8` operation;
+- a native register type omitted from `memory_types` is not directly legal for
+  load/store;
 - `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
   signed extension;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
