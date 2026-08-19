@@ -24,12 +24,17 @@ MemoryTypes["integer_widths"] = llvm::json::Array{16, 32};
 MemoryTypes["floating_point_widths"] = llvm::json::Array{};
 Root["memory_types"] = std::move(MemoryTypes);
 
-llvm::json::Object ScalarArgumentType;
-ScalarArgumentType["integer_width"] = 16;
+llvm::json::Object ScalarArgumentI16;
+ScalarArgumentI16["integer_width"] = 16;
+
+llvm::json::Object ScalarArgumentI32;
+ScalarArgumentI32["integer_width"] = 32;
 
 llvm::json::Object ScalarArgument;
 ScalarArgument["index"] = 0;
-ScalarArgument["type"] = std::move(ScalarArgumentType);
+ScalarArgument["types"] = llvm::json::Array{
+    llvm::json::Value(std::move(ScalarArgumentI16)),
+    llvm::json::Value(std::move(ScalarArgumentI32))};
 
 llvm::json::Object Intrinsic;
 Intrinsic["id_cpp"] = "Intrinsic::toy16_f16_op";
@@ -227,9 +232,10 @@ Inspect that, for native integers `[16, 32]`:
 - a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
   while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
   directly, without a `G_BITCAST`;
-- an `i64 G_CONSTANT` intrinsic argument requested as `i16` becomes an
-  `i16 G_CONSTANT` when its value fits either the signed or unsigned `i16`
-  range, while an out-of-range constant and a nonconstant `i64` are rejected;
+- an `i64 G_CONSTANT` intrinsic argument with candidates `[i16, i32]` becomes
+  `i16` when its value fits either the signed or unsigned `i16` range and falls
+  through to `i32` otherwise; a value outside both ranges and a nonconstant
+  `i64` are rejected;
 - a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
   equal-width `i16` memory carrier, while its MMO width and alignment stay
   unchanged;

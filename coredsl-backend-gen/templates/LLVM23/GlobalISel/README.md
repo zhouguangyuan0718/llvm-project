@@ -33,7 +33,10 @@ The complete input shape is:
       "scalar_arguments": [
         {
           "index": 0,
-          "type": { "integer_width": 16 }
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 }
+          ]
         }
       ]
     }
@@ -104,29 +107,41 @@ Each intrinsic entry contains:
 
 - `id_cpp`: the C++ intrinsic ID used in the generated `switch`;
 - `scalar_arguments`: per-argument rules containing a zero-based explicit
-  input `index` and a required `type`.
+  input `index` and a non-empty ordered `types` list.
 
-The argument index excludes definitions and the intrinsic-ID operand. Its type
-object must contain exactly one of:
+The argument index excludes definitions and the intrinsic-ID operand. Every
+entry in `types` must contain exactly one of:
 
 ```json
 { "integer_width": 16 }
 { "floating_point_width": 32 }
 ```
 
-The requested type must occur in the corresponding `native_types` list. An
-integer target type enables the carrier conversions below. A floating-point
-target type currently requires the actual argument to have that exact native
+Every candidate type must occur in the corresponding `native_types` list. An
+integer candidate enables the carrier conversions below. A floating-point
+candidate currently matches only an actual argument with that exact native
 floating-point type; the template does not infer numeric integer/float
 conversions.
+
+Candidate selection is deterministic:
+
+1. Preserve an exact actual type, regardless of candidate order.
+2. Prefer an equal-width floating-point-to-integer representation change.
+3. For all remaining widening and constant-narrowing conversions, select the
+   first convertible candidate in the declared `types` order.
+
+For example, actual `i32` with candidates `[i16, i32]` remains `i32`; actual
+`f16` with `[i32, i16]` selects the equal-width `i16`; and actual `i8` with
+`[i16, i32]` selects `i16`.
 
 For example, argument index `0` is mapped at legalization time to MIR operand
 `MI.getNumExplicitDefs() + 1`. The runtime helper verifies that every listed
 argument is a convertible virtual-register use before changing any operand.
 Duplicate intrinsic IDs and duplicate argument indices must be rejected by the
-input producer. Unknown intrinsics return `false`.
+input producer. Empty candidate lists and duplicate candidate types must also
+be rejected. Unknown intrinsics return `false`.
 
-For an intrinsic argument whose requested type is `iM`, the generated boundary
+For an intrinsic argument whose selected type is `iM`, the generated boundary
 is:
 
 ```text
@@ -145,13 +160,15 @@ other non-debug users. `G_ANYEXT` preserves only a low-bit payload convention;
 a numerically signed or unsigned widening needs a different semantic rule.
 
 A wider integer is accepted only when it is defined directly by `G_CONSTANT`
-and its value is representable in the requested width. LLVM integer types are
+and its value is representable in a candidate width. LLVM integer types are
 signless, so the test accepts a value when truncation can be reversed by either
 zero extension or sign extension. For `i16`, both `65535` and `-1` are accepted
-and materialized as `0xffff`; `65536` and `-32769` are rejected. Nonconstant
-wider integers are never implicitly truncated. The normal bottom-up legalizer
-order rewrites the intrinsic use before visiting its constant definition; an
-original wide constant with no remaining uses is then removed as dead.
+and materialized as `0xffff`; `65536` tries the next candidate instead. With
+`[i16, i32]`, `70000` therefore selects `i32`, while a value outside both ranges
+is rejected. Nonconstant wider integers are never implicitly truncated. The
+normal bottom-up legalizer order rewrites the intrinsic use before visiting its
+constant definition; an original wide constant with no remaining uses is then
+removed as dead.
 
 ## Built-in opcode policy
 
@@ -331,11 +348,11 @@ LLVM-based input producer does not need to serialize through JSON text.
 ## Integration checks
 
 1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
-   exactly one type variant for every intrinsic argument, and that every
-   requested argument type is native. Also validate all strictly increasing
-   integer-width lists and all strictly increasing IEEE floating-point lists
-   drawn from `16`, `32`, `64`, and `128`. Direct memory-type lists must be
-   subsets of their corresponding native-type lists.
+   non-empty candidate lists, duplicate candidates, exactly one type variant
+   for every candidate, and that every candidate type is native. Also validate
+   all strictly increasing integer-width lists and all strictly increasing IEEE
+   floating-point lists drawn from `16`, `32`, `64`, and `128`. Direct
+   memory-type lists must be subsets of their corresponding native-type lists.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

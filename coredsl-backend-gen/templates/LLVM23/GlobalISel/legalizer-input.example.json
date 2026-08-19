@@ -14,7 +14,10 @@
       "scalar_arguments": [
         {
           "index": 0,
-          "type": { "integer_width": 16 }
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 }
+          ]
         }
       ]
     }

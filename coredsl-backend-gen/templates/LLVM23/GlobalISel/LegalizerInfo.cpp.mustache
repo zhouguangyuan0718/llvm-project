@@ -336,7 +336,7 @@ static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
 
 struct IntrinsicScalarArgumentRule {
   unsigned ArgumentIndex;
-  LLT TargetTy;
+  ArrayRef<LLT> TargetTypes;
 };
 
 // Replace a G_FCONSTANT source with a G_CONSTANT carrying the APFloat's exact
@@ -411,6 +411,43 @@ static bool canRewriteIntrinsicScalarArgument(MachineRegisterInfo &MRI,
   return Value && integerConstantFits(*Value, TargetBits);
 }
 
+static bool isValidIntrinsicTargetType(LLT TargetTy) {
+  return isNativeIntegerType(TargetTy) || isNativeFloatType(TargetTy);
+}
+
+// Prefer preserving the actual type, then an equal-width float-to-integer
+// representation change. For the remaining widening and constant-narrowing
+// conversions, the target controls priority through the declared type order.
+static LLT selectIntrinsicScalarArgumentType(
+    MachineRegisterInfo &MRI, const MachineOperand &Source,
+    ArrayRef<LLT> TargetTypes) {
+  if (!Source.isReg() || !Source.getReg().isVirtual() || Source.isDef() ||
+      TargetTypes.empty())
+    return LLT{};
+  for (LLT TargetTy : TargetTypes)
+    if (!isValidIntrinsicTargetType(TargetTy))
+      return LLT{};
+
+  const LLT ActualTy = MRI.getType(Source.getReg());
+  for (LLT TargetTy : TargetTypes)
+    if (hasExactType(ActualTy, TargetTy))
+      return TargetTy;
+
+  if (ActualTy.isFloat()) {
+    for (LLT TargetTy : TargetTypes)
+      if (TargetTy.isInteger() &&
+          ActualTy.getScalarSizeInBits() ==
+              TargetTy.getScalarSizeInBits() &&
+          canRewriteIntrinsicScalarArgument(MRI, Source, TargetTy))
+        return TargetTy;
+  }
+
+  for (LLT TargetTy : TargetTypes)
+    if (canRewriteIntrinsicScalarArgument(MRI, Source, TargetTy))
+      return TargetTy;
+  return LLT{};
+}
+
 static bool materializeNarrowIntegerConstant(MachineIRBuilder &MIRBuilder,
                                              MachineRegisterInfo &MRI,
                                              MachineInstr &UseMI,
@@ -464,6 +501,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
   const unsigned FirstArgumentOperand = MI.getNumExplicitDefs() + 1;
   const unsigned NumExplicitOperands = MI.getNumExplicitOperands();
+  SmallVector<LLT, 4> SelectedTargetTypes;
+  SelectedTargetTypes.reserve(ScalarArguments.size());
   bool Changed = false;
 
   // Validate the complete rewrite before changing MI, so malformed generated
@@ -475,11 +514,14 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
       return false;
     const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
     const MachineOperand &MO = MI.getOperand(OperandIndex);
-    if (!canRewriteIntrinsicScalarArgument(MRI, MO, Rule.TargetTy))
+    const LLT TargetTy =
+        selectIntrinsicScalarArgumentType(MRI, MO, Rule.TargetTypes);
+    if (!TargetTy.isValid())
       return false;
 
     const LLT ActualTy = MRI.getType(MO.getReg());
-    Changed |= !hasExactType(ActualTy, Rule.TargetTy);
+    SelectedTargetTypes.push_back(TargetTy);
+    Changed |= !hasExactType(ActualTy, TargetTy);
   }
 
   if (!Changed)
@@ -490,12 +532,14 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   // Sources are materialized before MI. Narrowing is permitted only for a
   // constant representable in the target width. Widening retains the previous
   // G_ANYEXT low-bit payload convention.
-  for (const IntrinsicScalarArgumentRule &Rule : ScalarArguments) {
+  for (unsigned RuleIndex = 0; RuleIndex < ScalarArguments.size();
+       ++RuleIndex) {
+    const IntrinsicScalarArgumentRule &Rule = ScalarArguments[RuleIndex];
     const unsigned ArgumentIndex = Rule.ArgumentIndex;
     const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
     const LLT OriginalTy =
         MRI.getType(MI.getOperand(OperandIndex).getReg());
-    const LLT TargetTy = Rule.TargetTy;
+    const LLT TargetTy = SelectedTargetTypes[RuleIndex];
     if (hasExactType(OriginalTy, TargetTy))
       continue;
 
@@ -770,9 +814,16 @@ bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
 {{#intrinsics}}
   case {{id_cpp}}: {
+{{#scalar_arguments}}
+    const LLT ScalarArgumentTypes{{index}}[] = {
+{{#types}}
+        {{#integer_width}}LLT::integer({{.}}){{/integer_width}}{{#floating_point_width}}LLT::floatIEEE({{.}}){{/floating_point_width}},
+{{/types}}
+    };
+{{/scalar_arguments}}
     const IntrinsicScalarArgumentRule ScalarArguments[] = {
 {{#scalar_arguments}}
-        { {{index}}, {{#type.integer_width}}LLT::integer({{.}}){{/type.integer_width}}{{#type.floating_point_width}}LLT::floatIEEE({{.}}){{/type.floating_point_width}} },
+        { {{index}}, ScalarArgumentTypes{{index}} },
 {{/scalar_arguments}}
     };
     return applyIntrinsicCarrierRewrites(Helper, MI, ScalarArguments);
