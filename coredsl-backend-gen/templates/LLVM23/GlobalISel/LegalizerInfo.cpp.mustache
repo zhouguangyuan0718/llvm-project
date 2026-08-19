@@ -225,10 +225,11 @@ static bool isSupportedFloatMemoryType(LLT Ty) {
   return false;
 }
 
-// The built-in memory policy only handles an ordinary, non-atomic scalar
-// integer or floating-point value and one MMO whose value and memory types are
-// identical. The address operand remains a pointer; pointer-valued memory,
-// indexed, atomic, vector, and multi-MMO operations remain target-specific.
+// The built-in memory policy only handles an ordinary, non-atomic scalar value
+// and one MMO whose value and memory types are identical. Integer and floating-
+// point values use the configured memory capabilities; pointer values are
+// directly legal. Indexed, atomic, vector, and multi-MMO operations remain
+// target-specific.
 static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
     return false;
@@ -236,9 +237,10 @@ static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   const LLT ValueTy = Query.Types[0];
   const LLT PointerTy = Query.Types[1];
   const LegalityQuery::MemDesc &Memory = Query.MMODescrs[0];
-  if ((!ValueTy.isInteger() && !ValueTy.isFloat()) ||
+  if ((!ValueTy.isInteger() && !ValueTy.isFloat() && !ValueTy.isPointer()) ||
       !PointerTy.isPointer() ||
-      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat()) ||
+      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat() &&
+       !Memory.MemoryTy.isPointer()) ||
       Memory.Ordering != AtomicOrdering::NotAtomic ||
       Memory.FailureOrdering != AtomicOrdering::NotAtomic)
     return false;
@@ -254,6 +256,8 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
   if (ValueTy.isInteger())
     return isNativeIntegerType(ValueTy) &&
            isSupportedIntegerMemoryType(ValueTy);
+  if (ValueTy.isPointer())
+    return true;
   return isNativeFloatType(ValueTy) && isSupportedFloatMemoryType(ValueTy);
 }
 

@@ -84,11 +84,11 @@ outside this compact input contract.
 `G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
 strict ordering and type spelling rules as `native_types`; every directly legal
 memory type must also be present in the corresponding native-type list. Only
-integer and floating-point memory values are modeled; pointer-valued loads and
-stores are intentionally outside this compact policy. The load/store address
-operand is still a pointer and is preserved. Value and MMO memory types must be
-identical; the generated policy does not infer extending loads or truncating
-stores.
+integer and floating-point capabilities need configuration. Exact pointer-
+valued loads and stores are directly legal without a `memory_types.pointer`
+input. The load/store address operand is also a pointer and is preserved. Value
+and MMO memory types must be identical; the generated policy does not infer
+extending loads or truncating stores.
 
 A floating-point memory operation not listed in
 `memory_types.floating_point_widths` may still be represented by an equal-width
@@ -279,9 +279,9 @@ multi-result, or opcode-specific rules.
 Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
 memory types. An integer or floating-point operation is directly legal only
 when its type is present in both the corresponding native-register list and
-the corresponding `memory_types` list. Pointer-valued memory operations are not
-modeled. The address pointer operand, alignment, ordering, and other MMO flags
-are preserved.
+the corresponding `memory_types` list. An exact pointer-valued operation is
+directly legal without a separate capability field. The address pointer
+operand, alignment, ordering, and other MMO flags are preserved.
 
 When a floating-point type is not directly supported but the exact same-width
 integer is both native and memory-supported, the representation is changed
@@ -302,8 +302,8 @@ constant-carrier rule described above.
 
 This built-in rule is deliberately limited to one-MMO, non-atomic scalar
 operations with exact value/memory type identity. Atomic, indexed, vector,
-multi-MMO, pointer-valued, and mismatched value/memory operations fall back to
-the target's other rules rather than being inferred from register types.
+multi-MMO, and mismatched value/memory operations fall back to the target's
+other rules rather than being inferred from register types.
 
 The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
 `G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory

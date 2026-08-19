@@ -246,9 +246,9 @@ Inspect that, for native integers `[16, 32]`:
 - `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
   signed extension;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
-  indirect branches, and pointer `G_PHI`/`G_SELECT` pass type legalization
-  unchanged and remain covered by instruction selection; pointer-valued
-  loads/stores are outside the generated memory policy;
+  indirect branches, pointer `G_PHI`/`G_SELECT`, and exact pointer-valued
+  loads/stores pass type legalization unchanged and remain covered by
+  instruction selection;
 - an unconditional `G_BR` passes legality unchanged;
 - an integer `icmp` result uses the same carrier as its legalized inputs:
   `(i1, i8)` and `(i1, i16)` become `(i16, i16)`, while `(i1, i32)` becomes
