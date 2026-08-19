@@ -50,6 +50,22 @@
       ]
     },
     {
+      "opcode_cpp": "G_SHL",
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 }
+          ]
+        },
+        {
+          "index": 1,
+          "types": [{ "integer_width": 16 }]
+        }
+      ]
+    },
+    {
       "intrinsic_id_cpp": "Intrinsic::example_f16_op",
       "scalar_types": [
         {

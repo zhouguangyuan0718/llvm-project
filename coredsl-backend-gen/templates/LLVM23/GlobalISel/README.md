@@ -68,6 +68,22 @@ The complete input shape is:
       ]
     },
     {
+      "opcode_cpp": "G_SHL",
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 }
+          ]
+        },
+        {
+          "index": 1,
+          "types": [{ "integer_width": 16 }]
+        }
+      ]
+    },
+    {
       "intrinsic_id_cpp": "Intrinsic::example_f16_op",
       "scalar_types": [
         {
@@ -169,7 +185,8 @@ built-in opcode rule. Thus `G_FDIV` constrained to `[32]` promotes `f16` to
 `f32`, while an unsupported `G_FMA` remains unsupported because `G_FMA` has no
 built-in numeric-promotion action. Multi-type-index instructions can constrain
 each index independently; for example, `G_SHL` uses index 0 for the shifted
-value/result and index 1 for the shift amount.
+value/result and index 1 for the shift amount. The complete input example gives
+index 0 both `i16` and `i32` candidates while restricting index 1 to `i16`.
 
 Plain non-atomic scalar `G_LOAD` and `G_STORE` use this same mechanism. Type
 index 0 describes both the value type and, under this template's required

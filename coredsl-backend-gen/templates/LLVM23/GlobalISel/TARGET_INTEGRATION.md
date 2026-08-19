@@ -29,16 +29,18 @@ auto FloatType = [](unsigned Width) {
   Type["floating_point_width"] = Width;
   return Type;
 };
-auto MakeOperation = [](llvm::StringRef IdKey, llvm::StringRef Id,
-                        unsigned Index, llvm::json::Array Types) {
+auto MakeScalarType = [](unsigned Index, llvm::json::Array Types) {
   llvm::json::Object ScalarType;
   ScalarType["index"] = Index;
   ScalarType["types"] = std::move(Types);
+  return ScalarType;
+};
 
+auto MakeOperation = [](llvm::StringRef IdKey, llvm::StringRef Id,
+                        llvm::json::Array ScalarTypes) {
   llvm::json::Object Operation;
   Operation[IdKey] = Id;
-  Operation["scalar_types"] = llvm::json::Array{
-      llvm::json::Value(std::move(ScalarType))};
+  Operation["scalar_types"] = std::move(ScalarTypes);
   return Operation;
 };
 auto MemoryTypes = [&]() {
@@ -54,22 +56,43 @@ MulTypes.emplace_back(IntegerType(16));
 llvm::json::Array FDivTypes;
 FDivTypes.emplace_back(FloatType(32));
 
+llvm::json::Array ShlValueTypes;
+ShlValueTypes.emplace_back(IntegerType(16));
+ShlValueTypes.emplace_back(IntegerType(32));
+
+llvm::json::Array ShlAmountTypes;
+ShlAmountTypes.emplace_back(IntegerType(16));
+
 llvm::json::Array IntrinsicTypes;
 IntrinsicTypes.emplace_back(IntegerType(16));
 IntrinsicTypes.emplace_back(IntegerType(32));
 
+auto SingleScalarType = [&](unsigned Index, llvm::json::Array Types) {
+  llvm::json::Array ScalarTypes;
+  ScalarTypes.emplace_back(MakeScalarType(Index, std::move(Types)));
+  return ScalarTypes;
+};
+
+llvm::json::Array ShlScalarTypes;
+ShlScalarTypes.emplace_back(
+    MakeScalarType(0, std::move(ShlValueTypes)));
+ShlScalarTypes.emplace_back(
+    MakeScalarType(1, std::move(ShlAmountTypes)));
+
 Root["operation_type_constraints"] = llvm::json::Array{
-    llvm::json::Value(
-        MakeOperation("opcode_cpp", "G_LOAD", 0, MemoryTypes())),
-    llvm::json::Value(
-        MakeOperation("opcode_cpp", "G_STORE", 0, MemoryTypes())),
-    llvm::json::Value(MakeOperation("opcode_cpp", "G_MUL", 0,
-                                    std::move(MulTypes))),
-    llvm::json::Value(MakeOperation("opcode_cpp", "G_FDIV", 0,
-                                    std::move(FDivTypes))),
     llvm::json::Value(MakeOperation(
-        "intrinsic_id_cpp", "Intrinsic::toy16_f16_op", 0,
-        std::move(IntrinsicTypes)))};
+        "opcode_cpp", "G_LOAD", SingleScalarType(0, MemoryTypes()))),
+    llvm::json::Value(MakeOperation(
+        "opcode_cpp", "G_STORE", SingleScalarType(0, MemoryTypes()))),
+    llvm::json::Value(MakeOperation(
+        "opcode_cpp", "G_MUL", SingleScalarType(0, std::move(MulTypes)))),
+    llvm::json::Value(MakeOperation(
+        "opcode_cpp", "G_FDIV", SingleScalarType(0, std::move(FDivTypes)))),
+    llvm::json::Value(MakeOperation(
+        "opcode_cpp", "G_SHL", std::move(ShlScalarTypes))),
+    llvm::json::Value(MakeOperation(
+        "intrinsic_id_cpp", "Intrinsic::toy16_f16_op",
+        SingleScalarType(0, std::move(IntrinsicTypes))))};
 ```
 
 Register the `target_upper` lambda as shown in
@@ -258,6 +281,9 @@ Inspect that, for native integers `[16, 32]`:
 - an `i24` integer operation is promoted to `i32`;
 - the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
   `i32` instead of treating every native integer type as legal;
+- the multi-index `G_SHL` accepts `i16` or `i32` at type index 0 but only
+  `i16` at type index 1; an `i8` shift amount widens to `i16`, while an `i32`
+  shift amount is rejected;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
   remaining `G_BITCAST` when `f16` is not native;
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
