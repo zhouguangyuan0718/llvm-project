@@ -73,8 +73,8 @@ The complete input shape is:
         {
           "index": 0,
           "types": [
-            { "integer_width": 16 },
-            { "integer_width": 32 }
+            { "integer_width": 32 },
+            { "integer_width": 16 }
           ]
         },
         {
@@ -89,8 +89,8 @@ The complete input shape is:
         {
           "index": 0,
           "types": [
-            { "integer_width": 16 },
-            { "integer_width": 32 }
+            { "integer_width": 32 },
+            { "integer_width": 16 }
           ]
         }
       ]
@@ -122,18 +122,19 @@ Template.registerLambda("target_upper", [Upper = Target.upper()]() {
 The header template uses `{{target_upper}}` only for its include guard. This is
 renderer-derived state; callers still provide only the single `target` field.
 
-`integer_widths` must be non-empty, unique, and strictly increasing. A missing
-integer width is promoted to the narrowest wider native integer. A value wider
-than the largest native integer is not handled; this policy never narrows or
-splits integers.
+`integer_widths` must be non-empty and unique. Input order has no semantic
+effect. A missing integer width is promoted to the narrowest wider native
+integer. A value wider than the largest native integer is not handled; this
+policy never narrows or splits integers.
 
 `floating_point_widths` must contain only the supported IEEE widths `16`, `32`,
-`64`, and `128`; entries must be unique and strictly increasing. Each width is
-converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`. Listed types
-are directly legal. An unlisted IEEE type used by `G_FADD`, `G_FSUB`, `G_FMUL`,
-`G_FDIV`, or as the input of `G_FCMP` is promoted to the narrowest listed type
-with a greater width. A type wider than every listed type is not handled. An
-empty array represents a target without floating-point register types.
+`64`, and `128`; entries must be unique, and their order has no semantic effect.
+Each width is converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`.
+Listed types are directly legal. An unlisted IEEE type used by `G_FADD`,
+`G_FSUB`, `G_FMUL`, `G_FDIV`, or as the input of `G_FCMP` is promoted to the
+narrowest listed type with a greater width. A type wider than every listed type
+is not handled. An empty array represents a target without floating-point
+register types.
 Non-IEEE formats such as `bf16`, x87 extended precision, and PPC double-double
 are intentionally outside this compact input contract.
 
@@ -150,8 +151,8 @@ contain exactly one operation identifier:
 ```
 
 Both forms contain a non-empty `scalar_types` array. Each scalar position has
-an `index` and a non-empty ordered `types` array. Every candidate contains
-exactly one type spelling:
+an `index` and a non-empty `types` array. Every candidate contains exactly one
+type spelling:
 
 ```json
 { "integer_width": 16 }
@@ -166,11 +167,11 @@ must be rejected by the input producer.
 For `opcode_cpp`, `index` is a `LegalityQuery::Types` index, not a MachineInstr
 operand index. Opcode names and indices must already be covered by the built-in
 policy; this input supplies capabilities, not the semantics of a previously
-unlisted opcode. Within the `types` list, integer candidates must be strictly
-increasing relative to other integer candidates, and floating-point candidates
-must be strictly increasing relative to other floating-point candidates. The
-two categories may coexist for an index whose opcode supports both, notably
-the value/memory index of `G_LOAD`/`G_STORE`.
+unlisted opcode. Candidate order has no semantic effect: the generated policy
+scans the complete set and chooses the narrowest type capable of carrying the
+original width. Integer and floating-point candidates may coexist for an index
+whose opcode supports both categories, notably the value/memory index of
+`G_LOAD`/`G_STORE`.
 
 An omitted opcode/type-index pair inherits the full matching `native_types`
 list. A configured pair replaces that list. For example, with native integers
@@ -217,20 +218,19 @@ For `intrinsic_id_cpp`, `index` is a zero-based explicit input argument index;
 it excludes definitions and the intrinsic-ID operand. Integer candidates enable
 the carrier conversions below. A floating-point candidate currently matches
 only an actual argument with that exact native floating-point type; the
-template does not infer numeric integer/float conversions. Unlike an opcode
-entry, intrinsic candidate order is a conversion priority after exact-match
-and equal-width carrier preferences.
+template does not infer numeric integer/float conversions. Like opcode entries,
+intrinsic legalization treats the candidates as an unordered capability set.
 
 Candidate selection is deterministic:
 
-1. Preserve an exact actual type, regardless of candidate order.
+1. Preserve an exact actual type.
 2. Prefer an equal-width floating-point-to-integer representation change.
 3. For all remaining widening and constant-narrowing conversions, select the
-   first convertible candidate in the declared `types` order.
+   narrowest convertible candidate.
 
 For example, actual `i32` with candidates `[i16, i32]` remains `i32`; actual
 `f16` with `[i32, i16]` selects the equal-width `i16`; and actual `i8` with
-`[i16, i32]` selects `i16`.
+the deliberately unsorted candidates `[i32, i16]` still selects `i16`.
 
 For example, argument index `0` is mapped at legalization time to MIR operand
 `MI.getNumExplicitDefs() + 1`. The runtime helper verifies that every listed
@@ -476,9 +476,8 @@ LLVM-based input producer does not need to serialize through JSON text.
 1. Validate the target spelling; exactly one operation identifier per entry;
    duplicate opcode/intrinsic IDs and indices; non-empty `scalar_types` and
    candidate lists; duplicate candidates; exactly one type variant per
-   candidate; and that every candidate type is native. For opcode entries,
-   also validate strictly increasing integer and IEEE floating-point candidate
-   subsequences, with floating widths drawn from `16`, `32`, `64`, and `128`.
+   candidate; that every candidate type is native; and that floating widths are
+   drawn from `16`, `32`, `64`, and `128`.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

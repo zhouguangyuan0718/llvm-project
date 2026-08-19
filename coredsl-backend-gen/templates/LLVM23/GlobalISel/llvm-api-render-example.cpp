@@ -69,15 +69,15 @@ static json::Value makeLegalizerInput() {
   FDivTypes.emplace_back(FloatType(32));
 
   json::Array ShlValueTypes;
-  ShlValueTypes.emplace_back(IntegerType(16));
   ShlValueTypes.emplace_back(IntegerType(32));
+  ShlValueTypes.emplace_back(IntegerType(16));
 
   json::Array ShlAmountTypes;
   ShlAmountTypes.emplace_back(IntegerType(16));
 
   json::Array IntrinsicTypes;
-  IntrinsicTypes.emplace_back(IntegerType(16));
   IntrinsicTypes.emplace_back(IntegerType(32));
+  IntrinsicTypes.emplace_back(IntegerType(16));
 
   auto SingleScalarType = [&](unsigned Index, json::Array Types) {
     json::Array ScalarTypes;

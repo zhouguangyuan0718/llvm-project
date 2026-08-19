@@ -57,15 +57,15 @@ llvm::json::Array FDivTypes;
 FDivTypes.emplace_back(FloatType(32));
 
 llvm::json::Array ShlValueTypes;
-ShlValueTypes.emplace_back(IntegerType(16));
 ShlValueTypes.emplace_back(IntegerType(32));
+ShlValueTypes.emplace_back(IntegerType(16));
 
 llvm::json::Array ShlAmountTypes;
 ShlAmountTypes.emplace_back(IntegerType(16));
 
 llvm::json::Array IntrinsicTypes;
-IntrinsicTypes.emplace_back(IntegerType(16));
 IntrinsicTypes.emplace_back(IntegerType(32));
+IntrinsicTypes.emplace_back(IntegerType(16));
 
 auto SingleScalarType = [&](unsigned Index, llvm::json::Array Types) {
   llvm::json::Array ScalarTypes;
@@ -94,6 +94,10 @@ Root["operation_type_constraints"] = llvm::json::Array{
         "intrinsic_id_cpp", "Intrinsic::toy16_f16_op",
         SingleScalarType(0, std::move(IntrinsicTypes))))};
 ```
+
+The `G_SHL` index-0 and intrinsic candidate lists deliberately spell `i32`
+before `i16`. Capability-list order has no semantic effect; legalization still
+selects the narrowest convertible type after preserving an exact match.
 
 Register the `target_upper` lambda as shown in
 `llvm-api-render-example.cpp`, disable HTML escaping, and render:

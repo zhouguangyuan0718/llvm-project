@@ -27,14 +27,16 @@ static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
          ActualTy.getUniqueRAWLLTData() == ExpectedTy.getUniqueRAWLLTData();
 }
 
-// Return the narrowest native integer type that can carry Bits bits. The
-// Mustache input must keep integer_widths strictly increasing.
+// Return the narrowest native integer type that can carry Bits bits. Input
+// order has no semantic effect.
 static LLT getNativeIntegerTypeForWidth(unsigned Bits) {
+  (void)Bits;
+  unsigned BestWidth = 0;
 {{#native_types.integer_widths}}
-  if (Bits <= {{.}})
-    return LLT::integer({{.}});
+  if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+    BestWidth = {{.}};
 {{/native_types.integer_widths}}
-  return LLT{};
+  return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
 }
 
 static bool isNativeIntegerType(LLT Ty) {
@@ -55,14 +57,15 @@ static bool isNativeFloatType(LLT Ty) {
 }
 
 // Return the narrowest native IEEE floating-point type that can carry Bits
-// bits. The Mustache input must keep floating_point_widths strictly increasing.
+// bits. Input order has no semantic effect.
 static LLT getNativeFloatTypeForWidth(unsigned Bits) {
   (void)Bits;
+  unsigned BestWidth = 0;
 {{#native_types.floating_point_widths}}
-  if (Bits <= {{.}})
-    return LLT::floatIEEE({{.}});
+  if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+    BestWidth = {{.}};
 {{/native_types.floating_point_widths}}
-  return LLT{};
+  return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
 }
 
 // An opcode/type-index constraint replaces the corresponding global native
@@ -78,13 +81,14 @@ static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   case TargetOpcode::{{.}}:
 {{#scalar_types}}
     if (TypeIdx == {{index}}) {
+      unsigned BestWidth = 0;
 {{#types}}
 {{#integer_width}}
-      if (Bits <= {{.}})
-        return LLT::integer({{.}});
+      if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+        BestWidth = {{.}};
 {{/integer_width}}
 {{/types}}
-      return LLT{};
+      return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
     }
 {{/scalar_types}}
     break;
@@ -107,13 +111,14 @@ static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   case TargetOpcode::{{.}}:
 {{#scalar_types}}
     if (TypeIdx == {{index}}) {
+      unsigned BestWidth = 0;
 {{#types}}
 {{#floating_point_width}}
-      if (Bits <= {{.}})
-        return LLT::floatIEEE({{.}});
+      if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+        BestWidth = {{.}};
 {{/floating_point_width}}
 {{/types}}
-      return LLT{};
+      return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
     }
 {{/scalar_types}}
     break;
@@ -582,7 +587,8 @@ static bool isValidIntrinsicTargetType(LLT TargetTy) {
 
 // Prefer preserving the actual type, then an equal-width float-to-integer
 // representation change. For the remaining widening and constant-narrowing
-// conversions, the target controls priority through the declared type order.
+// conversions, choose the narrowest convertible target type independent of
+// declaration order.
 static LLT selectIntrinsicScalarArgumentType(
     MachineRegisterInfo &MRI, const MachineOperand &Source,
     ArrayRef<LLT> TargetTypes) {
@@ -607,10 +613,16 @@ static LLT selectIntrinsicScalarArgumentType(
         return TargetTy;
   }
 
-  for (LLT TargetTy : TargetTypes)
-    if (canRewriteIntrinsicScalarArgument(MRI, Source, TargetTy))
-      return TargetTy;
-  return LLT{};
+  LLT SelectedTy;
+  for (LLT TargetTy : TargetTypes) {
+    if (!canRewriteIntrinsicScalarArgument(MRI, Source, TargetTy))
+      continue;
+    if (!SelectedTy.isValid() ||
+        TargetTy.getScalarSizeInBits() <
+            SelectedTy.getScalarSizeInBits())
+      SelectedTy = TargetTy;
+  }
+  return SelectedTy;
 }
 
 static bool materializeNarrowIntegerConstant(MachineIRBuilder &MIRBuilder,
