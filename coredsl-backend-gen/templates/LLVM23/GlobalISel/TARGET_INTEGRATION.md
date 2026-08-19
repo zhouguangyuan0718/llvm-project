@@ -233,9 +233,12 @@ Inspect that, for native integers `[16, 32]`:
   indirect branches, pointer `G_PHI`/`G_SELECT`, and exact pointer loads/stores
   pass type legalization unchanged and remain covered by instruction selection;
 - an unconditional `G_BR` passes legality unchanged;
-- an `icmp` result uses `i16` rather than `i1`, while already-native `i16` and
-  `i32` results pass directly; integer inputs follow the same promotion policy
-  and pointer inputs remain unchanged;
+- an integer `icmp` result uses the same carrier as its legalized inputs:
+  `(i1, i8)` and `(i1, i16)` become `(i16, i16)`, while `(i1, i32)` becomes
+  `(i32, i32)`; pointer inputs remain unchanged and use an `i16` result;
+- with `ZeroOrOneBooleanContent`, an `icmp -> zext i16 -> store i16` chain
+  contains only `G_ICMP i16` and `G_STORE i16` after artifact combining, with
+  no `G_AND` mask;
 - `G_BRCOND` accepts both `i16` and `i32` conditions directly, and promotes an
   `i1` or `i8` condition to `i16` with LLVM's boolean extension operation;
 - a value wider than `i32` fails closed instead of narrowing.

@@ -79,6 +79,33 @@ promoteIntegerType(unsigned TypeIdx) {
   };
 }
 
+// Give an integer G_ICMP result the same native carrier selected for its
+// operands. Computing the carrier from the original operand width avoids an
+// intermediate unsupported result type, for example (i1, i8) -> (i16, i8)
+// when i16 is the narrowest native integer.
+static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
+  return [](const LegalityQuery &Query) {
+    if (Query.Types.size() < 2)
+      return false;
+    const LLT ResultTy = Query.Types[0];
+    const LLT InputTy = Query.Types[1];
+    if (!ResultTy.isInteger() || !InputTy.isInteger())
+      return false;
+    const LLT CarrierTy =
+        getNativeIntegerTypeForWidth(InputTy.getScalarSizeInBits());
+    return CarrierTy.isValid() &&
+           ResultTy.getScalarSizeInBits() < CarrierTy.getScalarSizeInBits();
+  };
+}
+
+static LegalizeMutation widenICmpResultToIntegerInputCarrier() {
+  return [](const LegalityQuery &Query) {
+    return std::pair<unsigned, LLT>(
+        0, getNativeIntegerTypeForWidth(
+               Query.Types[1].getScalarSizeInBits()));
+  };
+}
+
 // Generic bitcasting is enabled only for opcodes whose semantics are unchanged
 // by replacing an unsupported floating-point carrier with equal-width integer
 // bits, for example G_SELECT. Numeric floating-point opcodes must not use this.
@@ -584,14 +611,24 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
   assert(CondTy.isValid() && "condition legalization needs an integer type");
 
   auto &ICmpActions = getActionDefinitionsBuilder(G_ICMP);
-  ICmpActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 &&
-           isNativeIntegerType(Query.Types[0]) &&
-           (Query.Types[1].isPointer() ||
-            isNativeIntegerType(Query.Types[1]));
+  ICmpActions.legalIf([CondTy](const LegalityQuery &Query) {
+    if (Query.Types.size() < 2)
+      return false;
+    if (Query.Types[1].isPointer())
+      return hasExactType(Query.Types[0], CondTy);
+    return isNativeIntegerType(Query.Types[1]) &&
+           hasExactType(Query.Types[0], Query.Types[1]);
   });
-  ICmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                            promoteIntegerType(0));
+  ICmpActions.widenScalarIf(icmpResultNeedsIntegerInputCarrier(),
+                            widenICmpResultToIntegerInputCarrier());
+  ICmpActions.widenScalarIf(
+      [CondTy](const LegalityQuery &Query) {
+        return Query.Types.size() > 1 && Query.Types[1].isPointer() &&
+               Query.Types[0].isInteger() &&
+               Query.Types[0].getScalarSizeInBits() <
+                   CondTy.getScalarSizeInBits();
+      },
+      changeTo(0, CondTy));
   ICmpActions.widenScalarIf(integerTypeNeedsPromotion(1),
                             promoteIntegerType(1));
 

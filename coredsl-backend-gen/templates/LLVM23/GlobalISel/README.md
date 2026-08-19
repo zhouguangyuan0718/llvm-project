@@ -152,15 +152,26 @@ The following scalar and pointer-carrier rules are always emitted:
 - plain non-atomic scalar memory: `G_LOAD`, `G_STORE`;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
-The smallest native integer is the default condition carrier for a missing
-result width. `G_ICMP` accepts every native integer result directly and promotes
-missing result and integer-input widths to the narrowest sufficiently wide
-native integers. Pointer inputs are accepted without changing their pointer
-type. Non-integer results, non-integer/non-pointer inputs, and widths exceeding
-every native integer fail closed. `G_FCMP` promotes only its result and accepts
-only native floating-point inputs. The condition input of `G_SELECT` uses the
-smallest condition carrier. Pointer values are also accepted by `G_SELECT` and
-`G_PHI`.
+The smallest native integer is the default condition carrier where there is no
+integer value type to follow. For integer `G_ICMP`, the result uses the same
+native carrier as the legalized inputs: with native integers `[16, 32]`, both
+`G_ICMP (i1, i8)` and `G_ICMP (i1, i16)` become `G_ICMP (i16, i16)`, while
+`G_ICMP (i1, i32)` becomes `G_ICMP (i32, i32)`. The result carrier is computed
+from the original input width so a missing input width does not first become an
+unsupported result width. Pointer inputs cannot be used as a result type and
+therefore retain the smallest native integer result while their pointer type is
+unchanged. Non-integer results, non-integer/non-pointer inputs, result types
+wider than the required carrier, and widths exceeding every native integer fail
+closed. `G_FCMP` promotes only its result and accepts only native floating-point
+inputs. The condition input of `G_SELECT` uses the smallest condition carrier.
+Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+
+When the target declares `ZeroOrOneBooleanContent`, legalization artifacts from
+an original `icmp -> zext -> store` chain can be combined away after widening.
+For an input and store carrier of `i16`, the legal form is one `G_ICMP i16`
+followed by `G_STORE i16`; no mask with constant one is required. Other boolean
+content conventions cannot make that promise because the mask may be needed to
+preserve the original zero-extension semantics.
 
 `G_BRCOND` accepts every native integer condition directly. A condition whose
 integer width is missing is promoted to the narrowest native integer at least
