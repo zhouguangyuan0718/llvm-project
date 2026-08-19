@@ -342,30 +342,10 @@ static bool isGeneratedFloatTruncation(const LegalityQuery &Query) {
   return isNativeFloatType(SrcTy) && !isNativeFloatType(DstTy);
 }
 
-static bool isSupportedIntegerMemoryType(LLT Ty) {
-  if (!Ty.isInteger())
-    return false;
-{{#memory_types.integer_widths}}
-  if (hasExactType(Ty, LLT::integer({{.}})))
-    return true;
-{{/memory_types.integer_widths}}
-  return false;
-}
-
-static bool isSupportedFloatMemoryType(LLT Ty) {
-  if (!Ty.isFloat())
-    return false;
-{{#memory_types.floating_point_widths}}
-  if (hasExactType(Ty, LLT::floatIEEE({{.}})))
-    return true;
-{{/memory_types.floating_point_widths}}
-  return false;
-}
-
 // The built-in memory policy only handles an ordinary, non-atomic scalar value
 // and one MMO whose value and memory types are identical. Integer and floating-
-// point values use the configured memory capabilities; pointer values are
-// directly legal. Indexed, atomic, vector, and multi-MMO operations remain
+// point values use the G_LOAD/G_STORE opcode type constraints; pointer values
+// are directly legal. Indexed, atomic, vector, and multi-MMO operations remain
 // target-specific.
 static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
@@ -391,11 +371,10 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
 
   const LLT ValueTy = Query.Types[0];
   if (ValueTy.isInteger())
-    return isNativeIntegerType(ValueTy) &&
-           isSupportedIntegerMemoryType(ValueTy);
+    return isOpcodeIntegerType(Query, 0);
   if (ValueTy.isPointer())
     return true;
-  return isNativeFloatType(ValueTy) && isSupportedFloatMemoryType(ValueTy);
+  return isOpcodeFloatType(Query, 0);
 }
 
 static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
@@ -409,8 +388,10 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
 
     const LLT IntegerTy =
         LLT::integer(ValueTy.getScalarSizeInBits());
-    return isNativeIntegerType(IntegerTy) &&
-           isSupportedIntegerMemoryType(IntegerTy);
+    return hasExactType(
+        IntegerTy,
+        getOpcodeIntegerTypeForWidth(Query.Opcode, 0,
+                                     IntegerTy.getScalarSizeInBits()));
   };
 }
 

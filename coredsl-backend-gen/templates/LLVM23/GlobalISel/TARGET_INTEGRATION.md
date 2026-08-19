@@ -8,8 +8,8 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 ## 1. Construct the renderer input
 
 The generator supplies only the target name, native scalar types, optional
-per-opcode type constraints, the common plain load/store types, and intrinsic
-scalar input argument index/type rules:
+per-opcode type constraints, and intrinsic scalar input argument index/type
+rules:
 
 ```cpp
 llvm::json::Object Root;
@@ -20,10 +20,18 @@ NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
 NativeTypes["floating_point_widths"] = llvm::json::Array{32};
 Root["native_types"] = std::move(NativeTypes);
 
-llvm::json::Object MemoryTypes;
-MemoryTypes["integer_widths"] = llvm::json::Array{16, 32};
-MemoryTypes["floating_point_widths"] = llvm::json::Array{};
-Root["memory_types"] = std::move(MemoryTypes);
+auto MakeMemoryConstraint = [](llvm::StringRef Opcode) {
+  llvm::json::Object ValueTypeIndex;
+  ValueTypeIndex["index"] = 0;
+  ValueTypeIndex["integer_widths"] = llvm::json::Array{16, 32};
+  ValueTypeIndex["floating_point_widths"] = llvm::json::Array{};
+
+  llvm::json::Object Constraint;
+  Constraint["opcode_cpp"] = Opcode;
+  Constraint["type_indices"] = llvm::json::Array{
+      llvm::json::Value(std::move(ValueTypeIndex))};
+  return Constraint;
+};
 
 llvm::json::Object MulTypeIndex;
 MulTypeIndex["index"] = 0;
@@ -44,6 +52,8 @@ FDivConstraint["type_indices"] = llvm::json::Array{
     llvm::json::Value(std::move(FDivTypeIndex))};
 
 Root["opcode_type_constraints"] = llvm::json::Array{
+    llvm::json::Value(MakeMemoryConstraint("G_LOAD")),
+    llvm::json::Value(MakeMemoryConstraint("G_STORE")),
     llvm::json::Value(std::move(MulConstraint)),
     llvm::json::Value(std::move(FDivConstraint))};
 
@@ -276,8 +286,8 @@ Inspect that, for native integers `[16, 32]`:
   unchanged;
 - an `i8` load/store remains unsupported rather than being changed into a
   mismatched `value i16, memory i8` operation;
-- a native register type omitted from `memory_types` is not directly legal for
-  load/store;
+- a native register type omitted from the corresponding `G_LOAD` or `G_STORE`
+  index-0 constraint is not directly legal for that memory opcode;
 - `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
   signed extension;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,

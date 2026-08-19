@@ -4,10 +4,40 @@
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
   },
-  "memory_types": {
-    "integer_widths": [16, 32],
-    "floating_point_widths": [32]
-  },
+  "opcode_type_constraints": [
+    {
+      "opcode_cpp": "G_LOAD",
+      "type_indices": [
+        {
+          "index": 0,
+          "integer_widths": [16, 32],
+          "floating_point_widths": [32]
+        }
+      ]
+    },
+    {
+      "opcode_cpp": "G_STORE",
+      "type_indices": [
+        {
+          "index": 0,
+          "integer_widths": [16, 32],
+          "floating_point_widths": [32]
+        }
+      ]
+    },
+    {
+      "opcode_cpp": "G_MUL",
+      "type_indices": [
+        { "index": 0, "integer_widths": [16] }
+      ]
+    },
+    {
+      "opcode_cpp": "G_FDIV",
+      "type_indices": [
+        { "index": 0, "floating_point_widths": [32] }
+      ]
+    }
+  ],
   "intrinsics": [
     {
       "id_cpp": "Intrinsic::example_f16_op",

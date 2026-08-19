@@ -2,9 +2,8 @@
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
 input contains one target name, target-native scalar types, optional per-opcode
-type constraints, the scalar types supported by ordinary load/store
-instructions, and intrinsic scalar argument index/type rules. File names, the
-class name, the include guard, the `llvm` namespace, and all legalization
+type constraints, and intrinsic scalar argument index/type rules. File names,
+the class name, the include guard, the `llvm` namespace, and all legalization
 policies are derived or built into the templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
@@ -23,11 +22,27 @@ The complete input shape is:
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
   },
-  "memory_types": {
-    "integer_widths": [16, 32],
-    "floating_point_widths": [32]
-  },
   "opcode_type_constraints": [
+    {
+      "opcode_cpp": "G_LOAD",
+      "type_indices": [
+        {
+          "index": 0,
+          "integer_widths": [16, 32],
+          "floating_point_widths": [32]
+        }
+      ]
+    },
+    {
+      "opcode_cpp": "G_STORE",
+      "type_indices": [
+        {
+          "index": 0,
+          "integer_widths": [16, 32],
+          "floating_point_widths": [32]
+        }
+      ]
+    },
     {
       "opcode_cpp": "G_MUL",
       "type_indices": [
@@ -103,20 +118,27 @@ dynamic rounding-mode equivalence, or strict avoidance of double rounding.
 `opcode_type_constraints` optionally narrows the native type set for a built-in
 opcode rule. Each entry contains one `opcode_cpp`, such as `G_MUL`, and a
 non-empty `type_indices` array. An index is a `LegalityQuery::Types` index, not
-a MachineInstr operand index. It contains exactly one non-empty, strictly
-increasing list:
+a MachineInstr operand index. It contains at least one non-empty, strictly
+increasing type list:
 
 ```json
 { "index": 0, "integer_widths": [16] }
 { "index": 1, "floating_point_widths": [32, 64] }
+{
+  "index": 0,
+  "integer_widths": [16, 32],
+  "floating_point_widths": [32]
+}
 ```
 
 Every listed width must occur in the matching `native_types` list. Opcode names
 and type indices must refer to rules already covered by the built-in policy;
 this input does not define the semantics of a previously unlisted opcode.
-Duplicate opcodes, duplicate indices within an opcode, empty type lists, mixed
-integer/floating-point lists, and unknown opcode/index pairs must be rejected
-by the input producer.
+Duplicate opcodes, duplicate indices within an opcode, entries with no non-empty
+type list, and unknown opcode/index pairs must be rejected by the input
+producer. Integer and floating-point lists may coexist for an index whose
+opcode supports both categories, notably the value/memory index of
+`G_LOAD`/`G_STORE`.
 
 An omitted opcode/type-index pair inherits the full matching `native_types`
 list. A configured pair replaces that list. For example, with native integers
@@ -133,21 +155,23 @@ built-in numeric-promotion action. Multi-type-index instructions can constrain
 each index independently; for example, `G_SHL` uses index 0 for the shifted
 value/result and index 1 for the shift amount.
 
-`memory_types` is the common capability set for plain non-atomic scalar
-`G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
-strict ordering and type spelling rules as `native_types`; every directly legal
-memory type must also be present in the corresponding native-type list. Only
-integer and floating-point capabilities need configuration. Exact pointer-
-valued loads and stores are directly legal without a `memory_types.pointer`
-input. The load/store address operand is also a pointer and is preserved. Value
-and MMO memory types must be identical; the generated policy does not infer
-extending loads or truncating stores.
+Plain non-atomic scalar `G_LOAD` and `G_STORE` use this same mechanism. Type
+index 0 describes both the value type and, under this template's required
+shape, the identical MMO memory type. Configure the two opcodes separately if
+loads and stores have different capabilities, or give them identical lists if
+the target uses one common memory capability set. Every configured width must
+also be globally native. Exact pointer-valued loads and stores remain directly
+legal regardless of the index-0 constraint; their address operand is also a
+pointer and is preserved. The generated policy does not infer extending loads
+or truncating stores.
 
-A floating-point memory operation not listed in
-`memory_types.floating_point_widths` may still be represented by an equal-width
-integer only when that exact integer width is present in both
-`native_types.integer_widths` and `memory_types.integer_widths`. The legalizer
-bitcasts the value and changes the MMO type without changing its bit width.
+A floating-point load/store type absent from that opcode's
+`floating_point_widths` may still use an equal-width integer representation
+when the exact width is present in the same opcode's `integer_widths`. The
+legalizer bitcasts the value and changes the MMO type without changing its bit
+width. For example, a `G_LOAD` constraint containing integer `16` but no float
+`16` accepts an `f16` load through an `i16` carrier. The corresponding
+`G_STORE` behavior depends independently on its own constraint.
 
 These templates assume that the ExtendedLLT reland is cherry-picked onto
 `llvmorg-23-init` and enabled consistently by the integrating target. Integer,
@@ -356,15 +380,16 @@ scalar argument.
 
 Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
 memory types. An integer or floating-point operation is directly legal only
-when its type is present in both the corresponding native-register list and
-the corresponding `memory_types` list. An exact pointer-valued operation is
-directly legal without a separate capability field. The address pointer
-operand, alignment, ordering, and other MMO flags are preserved.
+when its type is globally native and present in that opcode's index-0 type
+constraint (or inherited from `native_types` when no constraint exists). An
+exact pointer-valued operation is directly legal without a separate capability
+field. The address pointer operand, alignment, ordering, and other MMO flags
+are preserved.
 
 When a floating-point type is not directly supported but the exact same-width
-integer is both native and memory-supported, the representation is changed
-without changing the access width. LLVM clears load range metadata because the
-old floating-point range is no longer valid:
+integer is present in that opcode's index-0 constraint, the representation is
+changed without changing the access width. LLVM clears load range metadata
+because the old floating-point range is no longer valid:
 
 ```text
 G_LOAD  fN              -> G_LOAD iN; G_BITCAST iN to fN
