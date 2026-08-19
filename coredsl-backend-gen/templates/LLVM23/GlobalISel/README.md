@@ -3,8 +3,9 @@
 This package generates one target-specific `LegalizerInfo` class. The renderer
 input contains one target name, target-native scalar types, the scalar types
 supported by ordinary load/store instructions, and intrinsic scalar argument
-indices. File names, the class name, the include guard, the `llvm` namespace,
-and all legalization policies are derived or built into the templates.
+index/type rules. File names, the class name, the include guard, the `llvm`
+namespace, and all legalization policies are derived or built into the
+templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
@@ -24,13 +25,17 @@ The complete input shape is:
   },
   "memory_types": {
     "integer_widths": [16, 32],
-    "floating_point_widths": [32],
-    "pointer": true
+    "floating_point_widths": [32]
   },
   "intrinsics": [
     {
       "id_cpp": "Intrinsic::example_f16_op",
-      "scalar_argument_indices": [0]
+      "scalar_arguments": [
+        {
+          "index": 0,
+          "type": { "integer_width": 16 }
+        }
+      ]
     }
   ]
 }
@@ -75,10 +80,12 @@ outside this compact input contract.
 `memory_types` is the common capability set for plain non-atomic scalar
 `G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
 strict ordering and type spelling rules as `native_types`; every directly legal
-memory type must also be present in the corresponding native-type list.
-`pointer: true` accepts exact pointer-valued load/store pairs in every address
-space, while `false` accepts none. Value and MMO memory types must be identical;
-the generated policy does not infer extending loads or truncating stores.
+memory type must also be present in the corresponding native-type list. Only
+integer and floating-point memory values are modeled; pointer-valued loads and
+stores are intentionally outside this compact policy. The load/store address
+operand is still a pointer and is preserved. Value and MMO memory types must be
+identical; the generated policy does not infer extending loads or truncating
+stores.
 
 A floating-point memory operation not listed in
 `memory_types.floating_point_widths` may still be represented by an equal-width
@@ -93,33 +100,58 @@ generated legalizer deliberately uses `LLT::integer(N)` and
 `LLT::floatIEEE(N)`; do not replace them with the generic `LLT::scalar(N)`
 wildcard.
 
-Each intrinsic entry contains only:
+Each intrinsic entry contains:
 
 - `id_cpp`: the C++ intrinsic ID used in the generated `switch`;
-- `scalar_argument_indices`: zero-based explicit input argument indices,
-  excluding definitions and the intrinsic-ID operand.
+- `scalar_arguments`: per-argument rules containing a zero-based explicit
+  input `index` and a required `type`.
+
+The argument index excludes definitions and the intrinsic-ID operand. Its type
+object must contain exactly one of:
+
+```json
+{ "integer_width": 16 }
+{ "floating_point_width": 32 }
+```
+
+The requested type must occur in the corresponding `native_types` list. An
+integer target type enables the carrier conversions below. A floating-point
+target type currently requires the actual argument to have that exact native
+floating-point type; the template does not infer numeric integer/float
+conversions.
 
 For example, argument index `0` is mapped at legalization time to MIR operand
 `MI.getNumExplicitDefs() + 1`. The runtime helper verifies that every listed
-argument is a virtual-register use with an integer or floating-point scalar
-type before changing the instruction. Duplicate intrinsic IDs and duplicate
-argument indices must be rejected by the input producer. Unknown intrinsics
-return `false`.
+argument is a convertible virtual-register use before changing any operand.
+Duplicate intrinsic IDs and duplicate argument indices must be rejected by the
+input producer. Unknown intrinsics return `false`.
 
-For a listed intrinsic argument the generated boundary is:
+For an intrinsic argument whose requested type is `iM`, the generated boundary
+is:
 
 ```text
-nonconstant fN -> G_BITCAST iN  -> G_ANYEXT iM -> intrinsic
-G_FCONSTANT fN -> G_CONSTANT iN -> G_ANYEXT iM -> intrinsic
-iN -----------------------------> G_ANYEXT iM -> intrinsic
+nonconstant fN, N <= M -> G_BITCAST iN  -> G_ANYEXT iM -> intrinsic
+G_FCONSTANT fN, N <= M -> G_CONSTANT iN -> G_ANYEXT iM -> intrinsic
+iN, N < M --------------------------------------> G_ANYEXT iM -> intrinsic
+G_CONSTANT iN, N > M and value fits ------------> G_CONSTANT iM -> intrinsic
 ```
 
-The extension is omitted when `iN` is native. Thus a half constant passed to an
-intrinsic on an `i16` target becomes one `G_CONSTANT i16` whose value is the
+Extensions pass through the narrowest native carrier when needed, so every
+generated artifact remains covered by the built-in extension rules. Thus a
+half constant requested as `i16` becomes one `G_CONSTANT i16` whose value is the
 exact `APFloat::bitcastToAPInt()` result; no `G_BITCAST` is emitted. The original
 `G_FCONSTANT` is removed by normal dead-instruction handling when it has no
 other non-debug users. `G_ANYEXT` preserves only a low-bit payload convention;
-a numerically signed or unsigned argument needs a different semantic rule.
+a numerically signed or unsigned widening needs a different semantic rule.
+
+A wider integer is accepted only when it is defined directly by `G_CONSTANT`
+and its value is representable in the requested width. LLVM integer types are
+signless, so the test accepts a value when truncation can be reversed by either
+zero extension or sign extension. For `i16`, both `65535` and `-1` are accepted
+and materialized as `0xffff`; `65536` and `-32769` are rejected. Nonconstant
+wider integers are never implicitly truncated. The normal bottom-up legalizer
+order rewrites the intrinsic use before visiting its constant definition; an
+original wide constant with no remaining uses is then removed as dead.
 
 ## Built-in opcode policy
 
@@ -230,9 +262,9 @@ multi-result, or opcode-specific rules.
 Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
 memory types. An integer or floating-point operation is directly legal only
 when its type is present in both the corresponding native-register list and
-the corresponding `memory_types` list. Pointer operations additionally require
-`memory_types.pointer`. The pointer operand, alignment, ordering, and other MMO
-flags are preserved.
+the corresponding `memory_types` list. Pointer-valued memory operations are not
+modeled. The address pointer operand, alignment, ordering, and other MMO flags
+are preserved.
 
 When a floating-point type is not directly supported but the exact same-width
 integer is both native and memory-supported, the representation is changed
@@ -253,9 +285,8 @@ constant-carrier rule described above.
 
 This built-in rule is deliberately limited to one-MMO, non-atomic scalar
 operations with exact value/memory type identity. Atomic, indexed, vector,
-multi-MMO, and mismatched value/memory operations fall back to the target's
-other rules rather than being inferred from register types. Enabled pointer
-loads and stores are accepted without changing the pointer or memory type.
+multi-MMO, pointer-valued, and mismatched value/memory operations fall back to
+the target's other rules rather than being inferred from register types.
 
 The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
 `G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
@@ -300,9 +331,11 @@ LLVM-based input producer does not need to serialize through JSON text.
 ## Integration checks
 
 1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
-   all strictly increasing integer-width lists, and all strictly increasing
-   IEEE floating-point lists drawn from `16`, `32`, `64`, and `128`. Direct
-   memory-type lists must be subsets of their corresponding native-type lists.
+   exactly one type variant for every intrinsic argument, and that every
+   requested argument type is native. Also validate all strictly increasing
+   integer-width lists and all strictly increasing IEEE floating-point lists
+   drawn from `16`, `32`, `64`, and `128`. Direct memory-type lists must be
+   subsets of their corresponding native-type lists.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

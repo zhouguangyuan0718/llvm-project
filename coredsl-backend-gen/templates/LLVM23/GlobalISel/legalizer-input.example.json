@@ -6,13 +6,17 @@
   },
   "memory_types": {
     "integer_widths": [16, 32],
-    "floating_point_widths": [32],
-    "pointer": true
+    "floating_point_widths": [32]
   },
   "intrinsics": [
     {
       "id_cpp": "Intrinsic::example_f16_op",
-      "scalar_argument_indices": [0]
+      "scalar_arguments": [
+        {
+          "index": 0,
+          "type": { "integer_width": 16 }
+        }
+      ]
     }
   ]
 }

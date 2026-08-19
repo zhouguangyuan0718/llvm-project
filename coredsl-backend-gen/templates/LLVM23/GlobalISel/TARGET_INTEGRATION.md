@@ -8,7 +8,7 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 ## 1. Construct the renderer input
 
 The generator supplies only the target name, native scalar types, the common
-plain load/store types, and intrinsic scalar input arguments:
+plain load/store types, and intrinsic scalar input argument index/type rules:
 
 ```cpp
 llvm::json::Object Root;
@@ -22,12 +22,19 @@ Root["native_types"] = std::move(NativeTypes);
 llvm::json::Object MemoryTypes;
 MemoryTypes["integer_widths"] = llvm::json::Array{16, 32};
 MemoryTypes["floating_point_widths"] = llvm::json::Array{};
-MemoryTypes["pointer"] = true;
 Root["memory_types"] = std::move(MemoryTypes);
+
+llvm::json::Object ScalarArgumentType;
+ScalarArgumentType["integer_width"] = 16;
+
+llvm::json::Object ScalarArgument;
+ScalarArgument["index"] = 0;
+ScalarArgument["type"] = std::move(ScalarArgumentType);
 
 llvm::json::Object Intrinsic;
 Intrinsic["id_cpp"] = "Intrinsic::toy16_f16_op";
-Intrinsic["scalar_argument_indices"] = llvm::json::Array{0};
+Intrinsic["scalar_arguments"] = llvm::json::Array{
+    llvm::json::Value(std::move(ScalarArgument))};
 Root["intrinsics"] =
     llvm::json::Array{llvm::json::Value(std::move(Intrinsic))};
 ```
@@ -220,6 +227,9 @@ Inspect that, for native integers `[16, 32]`:
 - a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
   while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
   directly, without a `G_BITCAST`;
+- an `i64 G_CONSTANT` intrinsic argument requested as `i16` becomes an
+  `i16 G_CONSTANT` when its value fits either the signed or unsigned `i16`
+  range, while an out-of-range constant and a nonconstant `i64` are rejected;
 - a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
   equal-width `i16` memory carrier, while its MMO width and alignment stay
   unchanged;
@@ -230,8 +240,9 @@ Inspect that, for native integers `[16, 32]`:
 - `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
   signed extension;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
-  indirect branches, pointer `G_PHI`/`G_SELECT`, and exact pointer loads/stores
-  pass type legalization unchanged and remain covered by instruction selection;
+  indirect branches, and pointer `G_PHI`/`G_SELECT` pass type legalization
+  unchanged and remain covered by instruction selection; pointer-valued
+  loads/stores are outside the generated memory policy;
 - an unconditional `G_BR` passes legality unchanged;
 - an integer `icmp` result uses the same carrier as its legalized inputs:
   `(i1, i8)` and `(i1, i16)` become `(i16, i16)`, while `(i1, i32)` becomes

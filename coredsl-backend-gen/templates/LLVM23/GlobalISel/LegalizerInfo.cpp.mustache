@@ -225,20 +225,10 @@ static bool isSupportedFloatMemoryType(LLT Ty) {
   return false;
 }
 
-static bool isSupportedPointerMemoryType(LLT Ty) {
-{{#memory_types.pointer}}
-  return Ty.isPointer();
-{{/memory_types.pointer}}
-{{^memory_types.pointer}}
-  (void)Ty;
-  return false;
-{{/memory_types.pointer}}
-}
-
 // The built-in memory policy only handles an ordinary, non-atomic scalar
-// value and one MMO whose value and memory types are identical. Pointer
-// address spaces and widths are preserved; indexed, atomic, vector, and
-// multi-MMO operations remain target-specific.
+// integer or floating-point value and one MMO whose value and memory types are
+// identical. The address operand remains a pointer; pointer-valued memory,
+// indexed, atomic, vector, and multi-MMO operations remain target-specific.
 static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
     return false;
@@ -246,10 +236,9 @@ static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   const LLT ValueTy = Query.Types[0];
   const LLT PointerTy = Query.Types[1];
   const LegalityQuery::MemDesc &Memory = Query.MMODescrs[0];
-  if ((!ValueTy.isInteger() && !ValueTy.isFloat() && !ValueTy.isPointer()) ||
+  if ((!ValueTy.isInteger() && !ValueTy.isFloat()) ||
       !PointerTy.isPointer() ||
-      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat() &&
-       !Memory.MemoryTy.isPointer()) ||
+      (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat()) ||
       Memory.Ordering != AtomicOrdering::NotAtomic ||
       Memory.FailureOrdering != AtomicOrdering::NotAtomic)
     return false;
@@ -265,9 +254,6 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
   if (ValueTy.isInteger())
     return isNativeIntegerType(ValueTy) &&
            isSupportedIntegerMemoryType(ValueTy);
-  if (ValueTy.isPointer())
-    return isSupportedPointerMemoryType(ValueTy);
-
   return isNativeFloatType(ValueTy) && isSupportedFloatMemoryType(ValueTy);
 }
 
@@ -348,17 +334,10 @@ static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
   return true;
 }
 
-// Listing an intrinsic scalar argument opts it into the integer-carrier
-// convention:
-// integer values are promoted to the next native width. Floating-point
-// constants are rematerialized directly as equal-width integer constants;
-// other floating-point values are bitcast to integer bits. The integer value
-// is then promoted when its width is not native.
-static LLT getIntrinsicCarrierType(LLT Ty) {
-  if (!Ty.isInteger() && !Ty.isFloat())
-    return LLT{};
-  return getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
-}
+struct IntrinsicScalarArgumentRule {
+  unsigned ArgumentIndex;
+  LLT TargetTy;
+};
 
 // Replace a G_FCONSTANT source with a G_CONSTANT carrying the APFloat's exact
 // bit pattern. The old floating-point constant is deliberately left in place:
@@ -387,9 +366,101 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
   return true;
 }
 
+static const APInt *getIntegerConstantValue(MachineRegisterInfo &MRI,
+                                            const MachineOperand &Source) {
+  if (!Source.isReg() || !Source.getReg().isVirtual())
+    return nullptr;
+  MachineInstr *DefMI = MRI.getVRegDef(Source.getReg());
+  if (!DefMI || DefMI->getOpcode() != TargetOpcode::G_CONSTANT ||
+      DefMI->getNumExplicitDefs() != 1 ||
+      DefMI->getNumExplicitOperands() < 2 ||
+      !DefMI->getOperand(1).isCImm())
+    return nullptr;
+  return &DefMI->getOperand(1).getCImm()->getValue();
+}
+
+// LLVM integers are signless. Accept a narrowing constant when truncating it
+// to TargetBits can be reversed by either zero extension or sign extension.
+// This admits both 65535 and -1 as i16, but rejects values outside both ranges.
+static bool integerConstantFits(const APInt &Value, unsigned TargetBits) {
+  return Value.isIntN(TargetBits) || Value.isSignedIntN(TargetBits);
+}
+
+static bool canRewriteIntrinsicScalarArgument(MachineRegisterInfo &MRI,
+                                              const MachineOperand &Source,
+                                              LLT TargetTy) {
+  if (!Source.isReg() || !Source.getReg().isVirtual() || Source.isDef())
+    return false;
+
+  const LLT ActualTy = MRI.getType(Source.getReg());
+  if (TargetTy.isFloat())
+    return isNativeFloatType(TargetTy) && hasExactType(ActualTy, TargetTy);
+  if (!isNativeIntegerType(TargetTy))
+    return false;
+
+  const unsigned TargetBits = TargetTy.getScalarSizeInBits();
+  if (ActualTy.isFloat())
+    return ActualTy.getScalarSizeInBits() <= TargetBits;
+  if (!ActualTy.isInteger())
+    return false;
+
+  const unsigned ActualBits = ActualTy.getScalarSizeInBits();
+  if (ActualBits <= TargetBits)
+    return true;
+  const APInt *Value = getIntegerConstantValue(MRI, Source);
+  return Value && integerConstantFits(*Value, TargetBits);
+}
+
+static bool materializeNarrowIntegerConstant(MachineIRBuilder &MIRBuilder,
+                                             MachineRegisterInfo &MRI,
+                                             MachineInstr &UseMI,
+                                             LLT TargetTy,
+                                             unsigned OperandIndex) {
+  const APInt *Value =
+      getIntegerConstantValue(MRI, UseMI.getOperand(OperandIndex));
+  if (!Value ||
+      !integerConstantFits(*Value, TargetTy.getScalarSizeInBits()))
+    return false;
+
+  const APInt NarrowValue = Value->trunc(TargetTy.getScalarSizeInBits());
+  UseMI.getOperand(OperandIndex)
+      .setReg(MIRBuilder.buildConstant(TargetTy, NarrowValue).getReg(0));
+  return true;
+}
+
+static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
+                                        MachineInstr &MI, LLT CurrentTy,
+                                        LLT TargetTy,
+                                        unsigned OperandIndex) {
+  assert(CurrentTy.isInteger() && TargetTy.isInteger());
+  assert(CurrentTy.getScalarSizeInBits() <
+         TargetTy.getScalarSizeInBits());
+
+  // Preserve the ordinary artifact policy when the source width is not
+  // native: first reach its canonical carrier, then extend between native
+  // types if the intrinsic requests a still wider target type.
+  if (!isNativeIntegerType(CurrentTy)) {
+    const LLT CarrierTy =
+        getNativeIntegerTypeForWidth(CurrentTy.getScalarSizeInBits());
+    assert(CarrierTy.isValid() &&
+           CarrierTy.getScalarSizeInBits() <=
+               TargetTy.getScalarSizeInBits());
+    Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+    Helper.widenScalarSrc(MI, CarrierTy, OperandIndex,
+                          TargetOpcode::G_ANYEXT);
+    CurrentTy = CarrierTy;
+  }
+
+  if (!hasExactType(CurrentTy, TargetTy)) {
+    Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+    Helper.widenScalarSrc(MI, TargetTy, OperandIndex,
+                          TargetOpcode::G_ANYEXT);
+  }
+}
+
 [[maybe_unused]] static bool applyIntrinsicCarrierRewrites(
     LegalizerHelper &Helper, MachineInstr &MI,
-    ArrayRef<unsigned> ScalarArgumentIndices) {
+    ArrayRef<IntrinsicScalarArgumentRule> ScalarArguments) {
   MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
   const unsigned FirstArgumentOperand = MI.getNumExplicitDefs() + 1;
   const unsigned NumExplicitOperands = MI.getNumExplicitOperands();
@@ -397,20 +468,18 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
 
   // Validate the complete rewrite before changing MI, so malformed generated
   // data cannot leave an instruction partially legalized.
-  for (unsigned ArgumentIndex : ScalarArgumentIndices) {
+  for (const IntrinsicScalarArgumentRule &Rule : ScalarArguments) {
+    const unsigned ArgumentIndex = Rule.ArgumentIndex;
     if (FirstArgumentOperand > NumExplicitOperands ||
         ArgumentIndex >= NumExplicitOperands - FirstArgumentOperand)
       return false;
     const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
     const MachineOperand &MO = MI.getOperand(OperandIndex);
-    if (!MO.isReg() || !MO.getReg().isVirtual() || MO.isDef())
+    if (!canRewriteIntrinsicScalarArgument(MRI, MO, Rule.TargetTy))
       return false;
 
     const LLT ActualTy = MRI.getType(MO.getReg());
-    const LLT CarrierTy = getIntrinsicCarrierType(ActualTy);
-    if (!CarrierTy.isValid())
-      return false;
-    Changed |= !hasExactType(ActualTy, CarrierTy);
+    Changed |= !hasExactType(ActualTy, Rule.TargetTy);
   }
 
   if (!Changed)
@@ -418,16 +487,30 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
 
   Helper.Observer.changingInstr(MI);
 
-  // Sources are materialized before MI. G_ANYEXT deliberately preserves only
-  // the low-bit payload contract; an intrinsic needing sign/zero extension
-  // requires a separate semantic rule.
-  for (unsigned ArgumentIndex : ScalarArgumentIndices) {
+  // Sources are materialized before MI. Narrowing is permitted only for a
+  // constant representable in the target width. Widening retains the previous
+  // G_ANYEXT low-bit payload convention.
+  for (const IntrinsicScalarArgumentRule &Rule : ScalarArguments) {
+    const unsigned ArgumentIndex = Rule.ArgumentIndex;
     const unsigned OperandIndex = FirstArgumentOperand + ArgumentIndex;
     const LLT OriginalTy =
         MRI.getType(MI.getOperand(OperandIndex).getReg());
-    const LLT CarrierTy = getIntrinsicCarrierType(OriginalTy);
-    LLT CurrentTy = OriginalTy;
+    const LLT TargetTy = Rule.TargetTy;
+    if (hasExactType(OriginalTy, TargetTy))
+      continue;
 
+    if (OriginalTy.isInteger() &&
+        OriginalTy.getScalarSizeInBits() >
+            TargetTy.getScalarSizeInBits()) {
+      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+      const bool Materialized = materializeNarrowIntegerConstant(
+          Helper.MIRBuilder, MRI, MI, TargetTy, OperandIndex);
+      assert(Materialized && "intrinsic constant validation must be stable");
+      (void)Materialized;
+      continue;
+    }
+
+    LLT CurrentTy = OriginalTy;
     if (OriginalTy.isFloat()) {
       CurrentTy = LLT::integer(OriginalTy.getScalarSizeInBits());
       Helper.MIRBuilder.setInstrAndDebugLoc(MI);
@@ -435,11 +518,9 @@ static bool materializeFConstantAsInteger(MachineIRBuilder &MIRBuilder,
                                          CurrentTy, OperandIndex))
         Helper.bitcastSrc(MI, CurrentTy, OperandIndex);
     }
-    if (!hasExactType(CurrentTy, CarrierTy)) {
-      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      Helper.widenScalarSrc(MI, CarrierTy, OperandIndex,
-                            TargetOpcode::G_ANYEXT);
-    }
+    if (!hasExactType(CurrentTy, TargetTy))
+      widenIntrinsicIntegerSource(Helper, MI, CurrentTy, TargetTy,
+                                  OperandIndex);
   }
 
   Helper.Observer.changedInstr(MI);
@@ -689,12 +770,12 @@ bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
 {{#intrinsics}}
   case {{id_cpp}}: {
-    const unsigned ScalarArgumentIndices[] = {
-{{#scalar_argument_indices}}
-        {{.}},
-{{/scalar_argument_indices}}
+    const IntrinsicScalarArgumentRule ScalarArguments[] = {
+{{#scalar_arguments}}
+        { {{index}}, {{#type.integer_width}}LLT::integer({{.}}){{/type.integer_width}}{{#type.floating_point_width}}LLT::floatIEEE({{.}}){{/type.floating_point_width}} },
+{{/scalar_arguments}}
     };
-    return applyIntrinsicCarrierRewrites(Helper, MI, ScalarArgumentIndices);
+    return applyIntrinsicCarrierRewrites(Helper, MI, ScalarArguments);
   }
 {{/intrinsics}}
   default:

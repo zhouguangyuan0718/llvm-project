@@ -42,15 +42,21 @@ static json::Value makeLegalizerInput() {
   MemoryTypes["integer_widths"] = std::move(MemoryIntegerWidths);
   MemoryTypes["floating_point_widths"] =
       std::move(MemoryFloatingPointWidths);
-  MemoryTypes["pointer"] = true;
   Root["memory_types"] = std::move(MemoryTypes);
 
-  json::Array ScalarArgumentIndices;
-  ScalarArgumentIndices.emplace_back(0);
+  json::Object ScalarArgumentType;
+  ScalarArgumentType["integer_width"] = 16;
+
+  json::Object ScalarArgument;
+  ScalarArgument["index"] = 0;
+  ScalarArgument["type"] = std::move(ScalarArgumentType);
+
+  json::Array ScalarArguments;
+  ScalarArguments.emplace_back(std::move(ScalarArgument));
 
   json::Object Intrinsic;
   Intrinsic["id_cpp"] = "Intrinsic::example_f16_op";
-  Intrinsic["scalar_argument_indices"] = std::move(ScalarArgumentIndices);
+  Intrinsic["scalar_arguments"] = std::move(ScalarArguments);
 
   json::Array Intrinsics;
   Intrinsics.emplace_back(std::move(Intrinsic));
