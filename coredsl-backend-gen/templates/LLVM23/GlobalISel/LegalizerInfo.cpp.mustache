@@ -15,6 +15,7 @@
 #include "llvm/IR/Intrinsics{{target}}.h"
 
 #include <cassert>
+#include <initializer_list>
 
 namespace llvm {
 
@@ -581,29 +582,52 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   using namespace LegalityPredicates;
   using namespace LegalizeMutations;
 
+  constexpr unsigned FirstGenericOpcode = PRE_ISEL_GENERIC_OPCODE_START;
+  constexpr unsigned LastGenericOpcode = PRE_ISEL_GENERIC_OPCODE_END;
+  bool CoveredOpcodes[LastGenericOpcode - FirstGenericOpcode + 1] = {};
+
+  // Record every opcode for which this generated policy defines type rules.
+  // Opcodes never requested through these helpers are made legal below.
+  auto GetActions = [this, &CoveredOpcodes](unsigned Opcode)
+      -> LegalizeRuleSet & {
+    assert(isPreISelGenericOpcode(Opcode));
+    CoveredOpcodes[Opcode - PRE_ISEL_GENERIC_OPCODE_START] = true;
+    return getActionDefinitionsBuilder(Opcode);
+  };
+  auto GetActionsFor = [this, &CoveredOpcodes](
+                           std::initializer_list<unsigned> Opcodes)
+      -> LegalizeRuleSet & {
+    assert(Opcodes.size() >= 2);
+    for (unsigned Opcode : Opcodes) {
+      assert(isPreISelGenericOpcode(Opcode));
+      CoveredOpcodes[Opcode - PRE_ISEL_GENERIC_OPCODE_START] = true;
+    }
+    return getActionDefinitionsBuilder(Opcodes);
+  };
+
   auto &ExtActions =
-      getActionDefinitionsBuilder({G_ANYEXT, G_ZEXT, G_SEXT});
+      GetActionsFor({G_ANYEXT, G_ZEXT, G_SEXT});
   ExtActions.legalIf([](const LegalityQuery &Query) {
     return isGeneratedIntegerExtension(Query) ||
            isNativeIntegerExtension(Query);
   });
 
-  auto &TruncActions = getActionDefinitionsBuilder(G_TRUNC);
+  auto &TruncActions = GetActions(G_TRUNC);
   TruncActions.legalIf([](const LegalityQuery &Query) {
     return isGeneratedIntegerTruncation(Query) ||
            isNativeIntegerTruncation(Query);
   });
 
-  auto &BitcastActions = getActionDefinitionsBuilder(G_BITCAST);
+  auto &BitcastActions = GetActions(G_BITCAST);
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
 
-  auto &MemoryActions = getActionDefinitionsBuilder({G_LOAD, G_STORE});
+  auto &MemoryActions = GetActionsFor({G_LOAD, G_STORE});
   MemoryActions.legalIf(isLegalPlainScalarMemoryValue);
   MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
                           bitcastFloatToSameWidthInteger(0));
   MemoryActions.fallback();
 
-  auto &PointerAddActions = getActionDefinitionsBuilder(G_PTR_ADD);
+  auto &PointerAddActions = GetActions(G_PTR_ADD);
   PointerAddActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
            isNativeIntegerType(Query.Types[1]);
@@ -612,7 +636,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                   promoteIntegerType(1));
   PointerAddActions.fallback();
 
-  auto &IntToPtrActions = getActionDefinitionsBuilder(G_INTTOPTR);
+  auto &IntToPtrActions = GetActions(G_INTTOPTR);
   IntToPtrActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
            isNativeIntegerType(Query.Types[1]);
@@ -621,7 +645,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                 promoteIntegerType(1));
   IntToPtrActions.fallback();
 
-  auto &PtrToIntActions = getActionDefinitionsBuilder(G_PTRTOINT);
+  auto &PtrToIntActions = GetActions(G_PTRTOINT);
   PtrToIntActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
            Query.Types[1].isPointer();
@@ -630,7 +654,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                 promoteIntegerType(0));
   PtrToIntActions.fallback();
 
-  auto &PointerCarrierActions = getActionDefinitionsBuilder(
+  auto &PointerCarrierActions = GetActionsFor(
       {G_FRAME_INDEX, G_GLOBAL_VALUE, G_CONSTANT_POOL, G_BLOCK_ADDR,
        G_JUMP_TABLE, G_BRINDIRECT});
   PointerCarrierActions.legalIf([](const LegalityQuery &Query) {
@@ -638,10 +662,10 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   });
   PointerCarrierActions.fallback();
 
-  getActionDefinitionsBuilder(G_BR).alwaysLegal();
+  GetActions(G_BR).alwaysLegal();
 
   auto &ScalarCarrierActions =
-      getActionDefinitionsBuilder(
+      GetActionsFor(
           {G_IMPLICIT_DEF, G_FREEZE, G_CONSTANT_FOLD_BARRIER});
   ScalarCarrierActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
@@ -649,7 +673,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   ScalarCarrierActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                      promoteIntegerType(0));
 
-  auto &ConstantActions = getActionDefinitionsBuilder(G_CONSTANT);
+  auto &ConstantActions = GetActions(G_CONSTANT);
   ConstantActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() &&
            (Query.Types[0].isPointer() ||
@@ -658,7 +682,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   ConstantActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                 promoteIntegerType(0));
 
-  auto &IntegerActions = getActionDefinitionsBuilder({
+  auto &IntegerActions = GetActionsFor({
       G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_UREM, G_AND, G_OR,
       G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS, G_SEXT_INREG, G_BSWAP,
       G_BITREVERSE});
@@ -669,7 +693,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                promoteIntegerType(0));
 
   auto &ShiftActions =
-      getActionDefinitionsBuilder({G_SHL, G_LSHR, G_ASHR});
+      GetActionsFor({G_SHL, G_LSHR, G_ASHR});
   ShiftActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
            isNativeIntegerType(Query.Types[1]);
@@ -679,7 +703,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   ShiftActions.widenScalarIf(integerTypeNeedsPromotion(1),
                              promoteIntegerType(1));
 
-  auto &BitCountActions = getActionDefinitionsBuilder(
+  auto &BitCountActions = GetActionsFor(
       {G_CTLZ, G_CTLZ_ZERO_UNDEF, G_CTTZ, G_CTTZ_ZERO_UNDEF, G_CTPOP});
   BitCountActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
@@ -690,13 +714,13 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   BitCountActions.widenScalarIf(integerTypeNeedsPromotion(1),
                                 promoteIntegerType(1));
 
-  auto &FConstantActions = getActionDefinitionsBuilder(G_FCONSTANT);
+  auto &FConstantActions = GetActions(G_FCONSTANT);
   FConstantActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
   });
   FConstantActions.customIf(floatTypeNeedsIntegerBitcast(0));
 
-  auto &FloatActions = getActionDefinitionsBuilder({
+  auto &FloatActions = GetActionsFor({
       G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FREM, G_FMA, G_FMAD, G_FNEG,
       G_FABS, G_FCANONICALIZE, G_FMINNUM, G_FMAXNUM, G_FMINNUM_IEEE,
       G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM, G_FMINIMUMNUM,
@@ -706,20 +730,20 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
   });
 
-  auto &FCopySignActions = getActionDefinitionsBuilder(G_FCOPYSIGN);
+  auto &FCopySignActions = GetActions(G_FCOPYSIGN);
   FCopySignActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
            isNativeFloatType(Query.Types[1]);
   });
 
-  auto &FPExtActions = getActionDefinitionsBuilder(G_FPEXT);
+  auto &FPExtActions = GetActions(G_FPEXT);
   FPExtActions.legalIf(isNativeFloatExtension);
 
-  auto &FPTruncActions = getActionDefinitionsBuilder(G_FPTRUNC);
+  auto &FPTruncActions = GetActions(G_FPTRUNC);
   FPTruncActions.legalIf(isNativeFloatTruncation);
 
   auto &IntToFPActions =
-      getActionDefinitionsBuilder({G_SITOFP, G_UITOFP});
+      GetActionsFor({G_SITOFP, G_UITOFP});
   IntToFPActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
            isNativeIntegerType(Query.Types[1]);
@@ -728,7 +752,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                promoteIntegerType(1));
 
   auto &FPToIntActions =
-      getActionDefinitionsBuilder({G_FPTOSI, G_FPTOUI});
+      GetActionsFor({G_FPTOSI, G_FPTOUI});
   FPToIntActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
            isNativeFloatType(Query.Types[1]);
@@ -739,7 +763,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   const LLT CondTy = getNativeIntegerTypeForWidth(1);
   assert(CondTy.isValid() && "condition legalization needs an integer type");
 
-  auto &ICmpActions = getActionDefinitionsBuilder(G_ICMP);
+  auto &ICmpActions = GetActions(G_ICMP);
   ICmpActions.legalIf([CondTy](const LegalityQuery &Query) {
     if (Query.Types.size() < 2)
       return false;
@@ -761,7 +785,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   ICmpActions.widenScalarIf(integerTypeNeedsPromotion(1),
                             promoteIntegerType(1));
 
-  auto &FCmpActions = getActionDefinitionsBuilder(G_FCMP);
+  auto &FCmpActions = GetActions(G_FCMP);
   FCmpActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
            isNativeFloatType(Query.Types[1]);
@@ -769,14 +793,14 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   FCmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
                             promoteIntegerType(0));
 
-  auto &BrCondActions = getActionDefinitionsBuilder(G_BRCOND);
+  auto &BrCondActions = GetActions(G_BRCOND);
   BrCondActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
   BrCondActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
 
-  auto &SelectActions = getActionDefinitionsBuilder(G_SELECT);
+  auto &SelectActions = GetActions(G_SELECT);
   SelectActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isNativeValueType(Query.Types[0]) &&
            hasExactType(Query.Types[1], CondTy);
@@ -788,16 +812,24 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
 
-  auto &PhiActions = getActionDefinitionsBuilder(G_PHI);
+  auto &PhiActions = GetActions(G_PHI);
   PhiActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
   });
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));
 
-  // llvmorg-23-init still falls back to LegacyLegalizerInfo for opcodes that
-  // have no matching rule above. Its lookup tables must be finalized even
-  // when this target does not add any target-specific legacy actions.
+  // This simplified policy intentionally leaves completely unlisted generic
+  // opcodes unchanged. Rules for a listed opcode still fail closed when none
+  // of that opcode's predicates or transformations match.
+  for (unsigned Opcode = FirstGenericOpcode; Opcode <= LastGenericOpcode;
+       ++Opcode) {
+    if (!CoveredOpcodes[Opcode - FirstGenericOpcode])
+      getActionDefinitionsBuilder(Opcode).alwaysLegal();
+  }
+
+  // Some explicitly listed rules above use fallback(), so llvmorg-23-init may
+  // still query LegacyLegalizerInfo. Finalize its empty lookup tables too.
   getLegacyLegalizerInfo().computeTables();
 }
 
@@ -834,7 +866,10 @@ bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
   }
 {{/intrinsics}}
   default:
-    return false;
+    // Intrinsics bypass the ordinary opcode legality query. Leave intrinsics
+    // absent from the generated input unchanged, matching the default-legal
+    // policy for unlisted generic opcodes.
+    return true;
   }
 }
 

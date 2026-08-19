@@ -117,9 +117,10 @@ dependent legality is intentionally outside this simplified policy.
 
 The generated constructor also finalizes the embedded legacy tables required
 by `llvmorg-23-init`. Do not remove its
-`getLegacyLegalizerInfo().computeTables()` call: an opcode not covered by the
-built-in rules can still reach the legacy fallback, even if the target defines
-no legacy actions itself.
+`getLegacyLegalizerInfo().computeTables()` call: explicitly configured pointer
+and memory rules ending in `fallback()` can still reach the legacy legalizer,
+even if the target defines no legacy actions itself. Completely unlisted
+pre-isel generic opcodes instead pass type legalization unchanged.
 
 ## 4. Expose it from the Subtarget
 

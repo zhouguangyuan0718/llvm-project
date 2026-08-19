@@ -272,9 +272,17 @@ for selection and is not applied to numerical floating-point operations.
 The templates also mark the artifacts introduced by this policy as legal:
 integer extensions to a native carrier, the inverse truncations, and equal-width
 integer/floating-point bitcasts. Native integer and floating-point conversion
-pairs listed above are legal as well. No generated rule ends in a catch-all
-`unsupported()`, so a surrounding target may add pointer, vector, memory,
-multi-result, or opcode-specific rules.
+pairs listed above are legal as well.
+
+A pre-isel generic opcode not listed by this generated policy is marked
+`alwaysLegal()` and passes type legalization unchanged. An opcode that is
+listed remains governed by its exact rules: a type combination that matches
+neither a legality predicate nor a transformation is still rejected (or uses
+an explicit `fallback()` where present). This default only skips legalization;
+it does not imply that instruction selection or lowering supports the opcode.
+Intrinsics absent from the `intrinsics` input similarly pass unchanged, while
+listed intrinsics must satisfy one candidate type rule for every configured
+scalar argument.
 
 Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
 memory types. An integer or floating-point operation is directly legal only
@@ -313,11 +321,12 @@ derived from `native_types`. Optimization hints such as `G_ASSERT_ZEXT`,
 `G_ASSERT_SEXT`, and `G_ASSERT_ALIGN` are outside the normal pre-isel generic
 opcode legality range and are eliminated later; they need no generated rule.
 
-At `llvmorg-23-init`, `LegalizerInfo` still falls back to its embedded
-`LegacyLegalizerInfo` when no modern rule matches. The generated constructor
-therefore finishes with `getLegacyLegalizerInfo().computeTables()`. This is
-required even when the target adds no legacy actions; omitting it triggers the
-`TablesInitialized` assertion on the first fallback query.
+At `llvmorg-23-init`, the explicitly configured pointer and memory rules that
+end in `fallback()` can still query the embedded `LegacyLegalizerInfo`. The
+generated constructor therefore finishes with
+`getLegacyLegalizerInfo().computeTables()`. This is required even when the
+target adds no legacy actions; omitting it triggers the `TablesInitialized`
+assertion on the first such query.
 
 Declaring a native type does not prove instruction-selector coverage. Every
 built-in opcode that can reach legalization must still be selected, lowered,
@@ -362,3 +371,6 @@ LLVM-based input producer does not need to serialize through JSON text.
    unsupported floating-point types, and a width above the largest integer.
 7. Inspect post-legalization MIR and run instruction selection for every
    generated artifact, intrinsic, comparison, and consumer.
+8. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
+   pass legalization unchanged, then independently confirm that the target can
+   select, lower, or eliminate them.
