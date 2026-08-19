@@ -7,8 +7,9 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 
 ## 1. Construct the renderer input
 
-The generator supplies only the target name, native scalar types, the common
-plain load/store types, and intrinsic scalar input argument index/type rules:
+The generator supplies only the target name, native scalar types, optional
+per-opcode type constraints, the common plain load/store types, and intrinsic
+scalar input argument index/type rules:
 
 ```cpp
 llvm::json::Object Root;
@@ -23,6 +24,28 @@ llvm::json::Object MemoryTypes;
 MemoryTypes["integer_widths"] = llvm::json::Array{16, 32};
 MemoryTypes["floating_point_widths"] = llvm::json::Array{};
 Root["memory_types"] = std::move(MemoryTypes);
+
+llvm::json::Object MulTypeIndex;
+MulTypeIndex["index"] = 0;
+MulTypeIndex["integer_widths"] = llvm::json::Array{16};
+
+llvm::json::Object MulConstraint;
+MulConstraint["opcode_cpp"] = "G_MUL";
+MulConstraint["type_indices"] = llvm::json::Array{
+    llvm::json::Value(std::move(MulTypeIndex))};
+
+llvm::json::Object FDivTypeIndex;
+FDivTypeIndex["index"] = 0;
+FDivTypeIndex["floating_point_widths"] = llvm::json::Array{32};
+
+llvm::json::Object FDivConstraint;
+FDivConstraint["opcode_cpp"] = "G_FDIV";
+FDivConstraint["type_indices"] = llvm::json::Array{
+    llvm::json::Value(std::move(FDivTypeIndex))};
+
+Root["opcode_type_constraints"] = llvm::json::Array{
+    llvm::json::Value(std::move(MulConstraint)),
+    llvm::json::Value(std::move(FDivConstraint))};
 
 llvm::json::Object ScalarArgumentI16;
 ScalarArgumentI16["integer_width"] = 16;
@@ -228,11 +251,16 @@ Inspect that, for native integers `[16, 32]`:
 - an `i8 G_CONSTANT` is promoted to the `i16` carrier while `i16` remains legal;
 - `i1` and `i8` integer operations are promoted to `i16`;
 - an `i24` integer operation is promoted to `i32`;
+- the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
+  `i32` instead of treating every native integer type as legal;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
   remaining `G_BITCAST` when `f16` is not native;
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
   `f32` and truncated back to `f16`, and an `f16 G_FCMP` compares exactly
   extended `f32` inputs;
+- the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
+  wider global native float without listing it for `G_FDIV` does not make that
+  type legal for division;
 - an `f16 G_FCONSTANT` feeding one of those promoted operations is folded with
   its `G_FPEXT` into an exact `f32 G_FCONSTANT`, leaving no low-precision
   constant definition on that path;

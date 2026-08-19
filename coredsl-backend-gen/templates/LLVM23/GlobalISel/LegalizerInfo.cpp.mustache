@@ -65,6 +65,79 @@ static LLT getNativeFloatTypeForWidth(unsigned Bits) {
   return LLT{};
 }
 
+// An opcode/type-index constraint replaces the corresponding global native
+// type list. Unmentioned opcode/type-index pairs inherit native_types.
+static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                        unsigned Bits) {
+  (void)Opcode;
+  (void)TypeIdx;
+  (void)Bits;
+  switch (Opcode) {
+{{#opcode_type_constraints}}
+  case TargetOpcode::{{opcode_cpp}}:
+{{#type_indices}}
+    if (TypeIdx == {{index}}) {
+{{#integer_widths}}
+      if (Bits <= {{.}})
+        return LLT::integer({{.}});
+{{/integer_widths}}
+      return LLT{};
+    }
+{{/type_indices}}
+    break;
+{{/opcode_type_constraints}}
+  default:
+    break;
+  }
+  return getNativeIntegerTypeForWidth(Bits);
+}
+
+static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                      unsigned Bits) {
+  (void)Opcode;
+  (void)TypeIdx;
+  (void)Bits;
+  switch (Opcode) {
+{{#opcode_type_constraints}}
+  case TargetOpcode::{{opcode_cpp}}:
+{{#type_indices}}
+    if (TypeIdx == {{index}}) {
+{{#floating_point_widths}}
+      if (Bits <= {{.}})
+        return LLT::floatIEEE({{.}});
+{{/floating_point_widths}}
+      return LLT{};
+    }
+{{/type_indices}}
+    break;
+{{/opcode_type_constraints}}
+  default:
+    break;
+  }
+  return getNativeFloatTypeForWidth(Bits);
+}
+
+static bool isOpcodeIntegerType(const LegalityQuery &Query,
+                                unsigned TypeIdx) {
+  if (Query.Types.size() <= TypeIdx)
+    return false;
+  const LLT Ty = Query.Types[TypeIdx];
+  return Ty.isInteger() &&
+         hasExactType(Ty, getOpcodeIntegerTypeForWidth(
+                              Query.Opcode, TypeIdx,
+                              Ty.getScalarSizeInBits()));
+}
+
+static bool isOpcodeFloatType(const LegalityQuery &Query, unsigned TypeIdx) {
+  if (Query.Types.size() <= TypeIdx)
+    return false;
+  const LLT Ty = Query.Types[TypeIdx];
+  return Ty.isFloat() &&
+         hasExactType(Ty, getOpcodeFloatTypeForWidth(
+                              Query.Opcode, TypeIdx,
+                              Ty.getScalarSizeInBits()));
+}
+
 [[maybe_unused]] static bool isNativeValueType(LLT Ty) {
   return Ty.isPointer() || isNativeIntegerType(Ty) || isNativeFloatType(Ty);
 }
@@ -77,8 +150,8 @@ integerTypeNeedsPromotion(unsigned TypeIdx) {
     const LLT Ty = Query.Types[TypeIdx];
     if (!Ty.isInteger())
       return false;
-    const LLT CarrierTy =
-        getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
+    const LLT CarrierTy = getOpcodeIntegerTypeForWidth(
+        Query.Opcode, TypeIdx, Ty.getScalarSizeInBits());
     return CarrierTy.isValid() && !hasExactType(Ty, CarrierTy);
   };
 }
@@ -88,7 +161,8 @@ promoteIntegerType(unsigned TypeIdx) {
   return [TypeIdx](const LegalityQuery &Query) {
     const LLT Ty = Query.Types[TypeIdx];
     return std::pair<unsigned, LLT>(
-        TypeIdx, getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()));
+        TypeIdx, getOpcodeIntegerTypeForWidth(
+                     Query.Opcode, TypeIdx, Ty.getScalarSizeInBits()));
   };
 }
 
@@ -98,10 +172,10 @@ floatTypeNeedsPromotion(unsigned TypeIdx) {
     if (Query.Types.size() <= TypeIdx)
       return false;
     const LLT Ty = Query.Types[TypeIdx];
-    if (!Ty.isFloat() || isNativeFloatType(Ty))
+    if (!Ty.isFloat() || isOpcodeFloatType(Query, TypeIdx))
       return false;
-    const LLT PromotedTy =
-        getNativeFloatTypeForWidth(Ty.getScalarSizeInBits());
+    const LLT PromotedTy = getOpcodeFloatTypeForWidth(
+        Query.Opcode, TypeIdx, Ty.getScalarSizeInBits());
     return PromotedTy.isValid() &&
            PromotedTy.getScalarSizeInBits() > Ty.getScalarSizeInBits();
   };
@@ -111,7 +185,8 @@ floatTypeNeedsPromotion(unsigned TypeIdx) {
 promoteFloatType(unsigned TypeIdx) {
   return [TypeIdx](const LegalityQuery &Query) {
     return std::pair<unsigned, LLT>(
-        TypeIdx, getNativeFloatTypeForWidth(
+        TypeIdx, getOpcodeFloatTypeForWidth(
+                     Query.Opcode, TypeIdx,
                      Query.Types[TypeIdx].getScalarSizeInBits()));
   };
 }
@@ -128,8 +203,8 @@ static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
     const LLT InputTy = Query.Types[1];
     if (!ResultTy.isInteger() || !InputTy.isInteger())
       return false;
-    const LLT CarrierTy =
-        getNativeIntegerTypeForWidth(InputTy.getScalarSizeInBits());
+    const LLT CarrierTy = getOpcodeIntegerTypeForWidth(
+        Query.Opcode, 1, InputTy.getScalarSizeInBits());
     return CarrierTy.isValid() &&
            ResultTy.getScalarSizeInBits() < CarrierTy.getScalarSizeInBits();
   };
@@ -138,7 +213,8 @@ static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
 static LegalizeMutation widenICmpResultToIntegerInputCarrier() {
   return [](const LegalityQuery &Query) {
     return std::pair<unsigned, LLT>(
-        0, getNativeIntegerTypeForWidth(
+        0, getOpcodeIntegerTypeForWidth(
+               Query.Opcode, 1,
                Query.Types[1].getScalarSizeInBits()));
   };
 }
@@ -176,8 +252,7 @@ static bool isGeneratedIntegerExtension(const LegalityQuery &Query) {
   if (!DstTy.isInteger() || !SrcTy.isInteger() ||
       DstTy.getScalarSizeInBits() <= SrcTy.getScalarSizeInBits())
     return false;
-  return hasExactType(
-      DstTy, getNativeIntegerTypeForWidth(SrcTy.getScalarSizeInBits()));
+  return isNativeIntegerType(DstTy) && !isNativeIntegerType(SrcTy);
 }
 
 static bool isGeneratedIntegerTruncation(const LegalityQuery &Query) {
@@ -188,8 +263,7 @@ static bool isGeneratedIntegerTruncation(const LegalityQuery &Query) {
   if (!DstTy.isInteger() || !SrcTy.isInteger() ||
       DstTy.getScalarSizeInBits() >= SrcTy.getScalarSizeInBits())
     return false;
-  return hasExactType(
-      SrcTy, getNativeIntegerTypeForWidth(DstTy.getScalarSizeInBits()));
+  return isNativeIntegerType(SrcTy) && !isNativeIntegerType(DstTy);
 }
 
 static bool isGeneratedRepresentationBitcast(const LegalityQuery &Query) {
@@ -234,7 +308,9 @@ static bool isNativeFloatExtension(const LegalityQuery &Query) {
 }
 
 // These are the G_FPEXT/G_FPTRUNC artifacts introduced when an unsupported
-// low-precision operation is evaluated in its narrowest native IEEE type.
+// low-precision operation is evaluated in one of the target's native IEEE
+// types. The originating opcode may select a wider type than the global
+// narrowest carrier through opcode_type_constraints.
 static bool isGeneratedFloatExtension(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
@@ -243,8 +319,7 @@ static bool isGeneratedFloatExtension(const LegalityQuery &Query) {
   if (!DstTy.isFloat() || !SrcTy.isFloat() ||
       DstTy.getScalarSizeInBits() <= SrcTy.getScalarSizeInBits())
     return false;
-  return hasExactType(
-      DstTy, getNativeFloatTypeForWidth(SrcTy.getScalarSizeInBits()));
+  return isNativeFloatType(DstTy) && !isNativeFloatType(SrcTy);
 }
 
 static bool isNativeFloatTruncation(const LegalityQuery &Query) {
@@ -264,8 +339,7 @@ static bool isGeneratedFloatTruncation(const LegalityQuery &Query) {
   if (!DstTy.isFloat() || !SrcTy.isFloat() ||
       DstTy.getScalarSizeInBits() >= SrcTy.getScalarSizeInBits())
     return false;
-  return hasExactType(
-      SrcTy, getNativeFloatTypeForWidth(DstTy.getScalarSizeInBits()));
+  return isNativeFloatType(SrcTy) && !isNativeFloatType(DstTy);
 }
 
 static bool isSupportedIntegerMemoryType(LLT Ty) {
@@ -386,9 +460,8 @@ static bool applyFConstantRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
     }
 
     if (UseMI.getOpcode() == TargetOpcode::G_FPEXT &&
-        hasExactType(UseDstTy,
-                     getNativeFloatTypeForWidth(
-                         FloatTy.getScalarSizeInBits()))) {
+        isNativeFloatType(UseDstTy) &&
+        UseDstTy.getScalarSizeInBits() > FloatTy.getScalarSizeInBits()) {
       Extensions.push_back(&UseMI);
       continue;
     }
@@ -728,7 +801,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &PointerAddActions = GetActions(G_PTR_ADD);
   PointerAddActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
-           isNativeIntegerType(Query.Types[1]);
+           isOpcodeIntegerType(Query, 1);
   });
   PointerAddActions.widenScalarIf(integerTypeNeedsPromotion(1),
                                   promoteIntegerType(1));
@@ -737,7 +810,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &IntToPtrActions = GetActions(G_INTTOPTR);
   IntToPtrActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
-           isNativeIntegerType(Query.Types[1]);
+           isOpcodeIntegerType(Query, 1);
   });
   IntToPtrActions.widenScalarIf(integerTypeNeedsPromotion(1),
                                 promoteIntegerType(1));
@@ -745,7 +818,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &PtrToIntActions = GetActions(G_PTRTOINT);
   PtrToIntActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
+    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            Query.Types[1].isPointer();
   });
   PtrToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
@@ -766,7 +839,9 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
       GetActionsFor(
           {G_IMPLICIT_DEF, G_FREEZE, G_CONSTANT_FOLD_BARRIER});
   ScalarCarrierActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
+    return !Query.Types.empty() &&
+           (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
+            isOpcodeFloatType(Query, 0));
   });
   ScalarCarrierActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                      promoteIntegerType(0));
@@ -785,7 +860,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
       G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS, G_SEXT_INREG, G_BSWAP,
       G_BITREVERSE});
   IntegerActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
+    return isOpcodeIntegerType(Query, 0);
   });
   IntegerActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                promoteIntegerType(0));
@@ -793,8 +868,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &ShiftActions =
       GetActionsFor({G_SHL, G_LSHR, G_ASHR});
   ShiftActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
-           isNativeIntegerType(Query.Types[1]);
+    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
+           isOpcodeIntegerType(Query, 1);
   });
   ShiftActions.widenScalarIf(integerTypeNeedsPromotion(0),
                              promoteIntegerType(0));
@@ -804,8 +879,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &BitCountActions = GetActionsFor(
       {G_CTLZ, G_CTLZ_ZERO_UNDEF, G_CTTZ, G_CTTZ_ZERO_UNDEF, G_CTPOP});
   BitCountActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
-           isNativeIntegerType(Query.Types[1]);
+    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
+           isOpcodeIntegerType(Query, 1);
   });
   BitCountActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                 promoteIntegerType(0));
@@ -829,7 +904,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &PromotableFloatActions =
       GetActionsFor({G_FADD, G_FSUB, G_FMUL, G_FDIV});
   PromotableFloatActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+    return isOpcodeFloatType(Query, 0);
   });
   PromotableFloatActions.widenScalarIf(floatTypeNeedsPromotion(0),
                                        promoteFloatType(0));
@@ -840,13 +915,13 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
       G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
       G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+    return isOpcodeFloatType(Query, 0);
   });
 
   auto &FCopySignActions = GetActions(G_FCOPYSIGN);
   FCopySignActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
-           isNativeFloatType(Query.Types[1]);
+    return Query.Types.size() > 1 && isOpcodeFloatType(Query, 0) &&
+           isOpcodeFloatType(Query, 1);
   });
 
   auto &FPExtActions = GetActions(G_FPEXT);
@@ -864,8 +939,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &IntToFPActions =
       GetActionsFor({G_SITOFP, G_UITOFP});
   IntToFPActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeFloatType(Query.Types[0]) &&
-           isNativeIntegerType(Query.Types[1]);
+    return Query.Types.size() > 1 && isOpcodeFloatType(Query, 0) &&
+           isOpcodeIntegerType(Query, 1);
   });
   IntToFPActions.widenScalarIf(integerTypeNeedsPromotion(1),
                                promoteIntegerType(1));
@@ -873,8 +948,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &FPToIntActions =
       GetActionsFor({G_FPTOSI, G_FPTOUI});
   FPToIntActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeIntegerType(Query.Types[0]) &&
-           isNativeFloatType(Query.Types[1]);
+    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
+           isOpcodeFloatType(Query, 1);
   });
   FPToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                promoteIntegerType(0));
@@ -888,7 +963,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
       return false;
     if (Query.Types[1].isPointer())
       return hasExactType(Query.Types[0], CondTy);
-    return isNativeIntegerType(Query.Types[1]) &&
+    return isOpcodeIntegerType(Query, 1) &&
            hasExactType(Query.Types[0], Query.Types[1]);
   });
   ICmpActions.widenScalarIf(icmpResultNeedsIntegerInputCarrier(),
@@ -907,7 +982,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &FCmpActions = GetActions(G_FCMP);
   FCmpActions.legalIf([CondTy](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
-           isNativeFloatType(Query.Types[1]);
+           isOpcodeFloatType(Query, 1);
   });
   FCmpActions.widenScalarIf(floatTypeNeedsPromotion(1),
                             promoteFloatType(1));
@@ -916,15 +991,17 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &BrCondActions = GetActions(G_BRCOND);
   BrCondActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
+    return isOpcodeIntegerType(Query, 0);
   });
   BrCondActions.widenScalarIf(integerTypeNeedsPromotion(0),
                               promoteIntegerType(0));
 
   auto &SelectActions = GetActions(G_SELECT);
-  SelectActions.legalIf([CondTy](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isNativeValueType(Query.Types[0]) &&
-           hasExactType(Query.Types[1], CondTy);
+  SelectActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 &&
+           (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
+            isOpcodeFloatType(Query, 0)) &&
+           isOpcodeIntegerType(Query, 1);
   });
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(1),
                               promoteIntegerType(1));
@@ -935,7 +1012,9 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &PhiActions = GetActions(G_PHI);
   PhiActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeValueType(Query.Types[0]);
+    return !Query.Types.empty() &&
+           (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
+            isOpcodeFloatType(Query, 0));
   });
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));

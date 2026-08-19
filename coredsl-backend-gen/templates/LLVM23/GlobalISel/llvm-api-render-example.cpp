@@ -43,6 +43,40 @@ static json::Value makeLegalizerInput() {
       std::move(MemoryFloatingPointWidths);
   Root["memory_types"] = std::move(MemoryTypes);
 
+  json::Array MulIntegerWidths;
+  MulIntegerWidths.emplace_back(16);
+
+  json::Object MulTypeIndex;
+  MulTypeIndex["index"] = 0;
+  MulTypeIndex["integer_widths"] = std::move(MulIntegerWidths);
+
+  json::Array MulTypeIndices;
+  MulTypeIndices.emplace_back(std::move(MulTypeIndex));
+
+  json::Object MulConstraint;
+  MulConstraint["opcode_cpp"] = "G_MUL";
+  MulConstraint["type_indices"] = std::move(MulTypeIndices);
+
+  json::Array FDivFloatingPointWidths;
+  FDivFloatingPointWidths.emplace_back(32);
+
+  json::Object FDivTypeIndex;
+  FDivTypeIndex["index"] = 0;
+  FDivTypeIndex["floating_point_widths"] =
+      std::move(FDivFloatingPointWidths);
+
+  json::Array FDivTypeIndices;
+  FDivTypeIndices.emplace_back(std::move(FDivTypeIndex));
+
+  json::Object FDivConstraint;
+  FDivConstraint["opcode_cpp"] = "G_FDIV";
+  FDivConstraint["type_indices"] = std::move(FDivTypeIndices);
+
+  json::Array OpcodeTypeConstraints;
+  OpcodeTypeConstraints.emplace_back(std::move(MulConstraint));
+  OpcodeTypeConstraints.emplace_back(std::move(FDivConstraint));
+  Root["opcode_type_constraints"] = std::move(OpcodeTypeConstraints);
+
   json::Object ScalarArgumentI16;
   ScalarArgumentI16["integer_width"] = 16;
 

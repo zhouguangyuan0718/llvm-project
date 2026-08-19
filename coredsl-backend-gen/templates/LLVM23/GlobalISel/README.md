@@ -1,11 +1,11 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
-input contains one target name, target-native scalar types, the scalar types
-supported by ordinary load/store instructions, and intrinsic scalar argument
-index/type rules. File names, the class name, the include guard, the `llvm`
-namespace, and all legalization policies are derived or built into the
-templates.
+input contains one target name, target-native scalar types, optional per-opcode
+type constraints, the scalar types supported by ordinary load/store
+instructions, and intrinsic scalar argument index/type rules. File names, the
+class name, the include guard, the `llvm` namespace, and all legalization
+policies are derived or built into the templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
@@ -27,6 +27,20 @@ The complete input shape is:
     "integer_widths": [16, 32],
     "floating_point_widths": [32]
   },
+  "opcode_type_constraints": [
+    {
+      "opcode_cpp": "G_MUL",
+      "type_indices": [
+        { "index": 0, "integer_widths": [16] }
+      ]
+    },
+    {
+      "opcode_cpp": "G_FDIV",
+      "type_indices": [
+        { "index": 0, "floating_point_widths": [32] }
+      ]
+    }
+  ],
   "intrinsics": [
     {
       "id_cpp": "Intrinsic::example_f16_op",
@@ -85,6 +99,39 @@ are intentionally outside this compact input contract.
 This numeric promotion policy is for ordinary, non-constrained GMIR floating-
 point operations. It does not promise constrained-FP exception behavior,
 dynamic rounding-mode equivalence, or strict avoidance of double rounding.
+
+`opcode_type_constraints` optionally narrows the native type set for a built-in
+opcode rule. Each entry contains one `opcode_cpp`, such as `G_MUL`, and a
+non-empty `type_indices` array. An index is a `LegalityQuery::Types` index, not
+a MachineInstr operand index. It contains exactly one non-empty, strictly
+increasing list:
+
+```json
+{ "index": 0, "integer_widths": [16] }
+{ "index": 1, "floating_point_widths": [32, 64] }
+```
+
+Every listed width must occur in the matching `native_types` list. Opcode names
+and type indices must refer to rules already covered by the built-in policy;
+this input does not define the semantics of a previously unlisted opcode.
+Duplicate opcodes, duplicate indices within an opcode, empty type lists, mixed
+integer/floating-point lists, and unknown opcode/index pairs must be rejected
+by the input producer.
+
+An omitted opcode/type-index pair inherits the full matching `native_types`
+list. A configured pair replaces that list. For example, with native integers
+`[16, 32]`, constraining `G_MUL` type index 0 to `[16]` makes `G_MUL i16`
+legal but not `G_MUL i32`; an `i8` multiply still widens to `i16`. Conversely,
+constraining it to `[32]` widens both `i8` and `i16` multiplies to `i32`.
+The policy never narrows an input merely because a smaller opcode-specific type
+is available.
+
+Opcode-specific floating-point sets use the same promotion boundary as their
+built-in opcode rule. Thus `G_FDIV` constrained to `[32]` promotes `f16` to
+`f32`, while an unsupported `G_FMA` remains unsupported because `G_FMA` has no
+built-in numeric-promotion action. Multi-type-index instructions can constrain
+each index independently; for example, `G_SHL` uses index 0 for the shifted
+value/result and index 1 for the shift amount.
 
 `memory_types` is the common capability set for plain non-atomic scalar
 `G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
