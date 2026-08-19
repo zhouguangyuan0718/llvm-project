@@ -74,11 +74,17 @@ splits integers.
 
 `floating_point_widths` must contain only the supported IEEE widths `16`, `32`,
 `64`, and `128`; entries must be unique and strictly increasing. Each width is
-converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`. Only listed
-types are accepted by numerical floating-point opcodes. An empty array
-represents a target without floating-point register types. Non-IEEE formats
-such as `bf16`, x87 extended precision, and PPC double-double are intentionally
-outside this compact input contract.
+converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`. Listed types
+are directly legal. An unlisted IEEE type used by `G_FADD`, `G_FSUB`, `G_FMUL`,
+`G_FDIV`, or as the input of `G_FCMP` is promoted to the narrowest listed type
+with a greater width. A type wider than every listed type is not handled. An
+empty array represents a target without floating-point register types.
+Non-IEEE formats such as `bf16`, x87 extended precision, and PPC double-double
+are intentionally outside this compact input contract.
+
+This numeric promotion policy is for ordinary, non-constrained GMIR floating-
+point operations. It does not promise constrained-FP exception behavior,
+dynamic rounding-mode equivalence, or strict avoidance of double rounding.
 
 `memory_types` is the common capability set for plain non-atomic scalar
 `G_LOAD` and `G_STORE`. Its integer and floating-point widths use the same
@@ -185,11 +191,12 @@ The following scalar and pointer-carrier rules are always emitted:
 - integer type indices 0 and 1: `G_SHL`, `G_LSHR`, `G_ASHR`;
 - integer result and input types: `G_CTLZ`, `G_CTLZ_ZERO_UNDEF`, `G_CTTZ`,
   `G_CTTZ_ZERO_UNDEF`, `G_CTPOP`;
-- floating-point constants and native floating-point operations:
-  `G_FCONSTANT`, `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
+- floating-point constants and operations: `G_FCONSTANT`; native forms of
+  `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
   `G_FMAD`, `G_FNEG`, `G_FABS`, `G_FCANONICALIZE`, all standard
   `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FCEIL`, `G_FFLOOR`, `G_FRINT`,
-  `G_FNEARBYINT`, `G_FCOPYSIGN`;
+  `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-native promotion for unsupported
+  `G_FADD`, `G_FSUB`, `G_FMUL`, and `G_FDIV` types;
 - scalar casts: native integer `G_ANYEXT`/`G_ZEXT`/`G_SEXT`/`G_TRUNC` pairs,
   native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
   `G_FPTOUI` when their floating-point side is native;
@@ -211,9 +218,10 @@ unsupported result width. Pointer inputs cannot be used as a result type and
 therefore retain the smallest native integer result while their pointer type is
 unchanged. Non-integer results, non-integer/non-pointer inputs, result types
 wider than the required carrier, and widths exceeding every native integer fail
-closed. `G_FCMP` promotes only its result and accepts only native floating-point
-inputs. The condition input of `G_SELECT` uses the smallest condition carrier.
-Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+closed. `G_FCMP` promotes an unsupported floating-point input to its narrowest
+wider native type and independently promotes its integer result. The condition
+input of `G_SELECT` uses the smallest condition carrier. Pointer values are
+also accepted by `G_SELECT` and `G_PHI`.
 
 When the target declares `ZeroOrOneBooleanContent`, legalization artifacts from
 an original `icmp -> zext -> store` chain can be combined away after widening.
@@ -247,8 +255,21 @@ block-address, jump-table, and indirect-branch forms.
 legal, while a missing integer width is promoted to the smallest wider native
 integer. LLVM's generic legalizer handles the corresponding constant widening.
 
-A native `G_FCONSTANT` is legal. An unsupported floating-point constant with
-an available integer carrier is folded directly into an integer constant:
+A native `G_FCONSTANT` is legal. An unsupported floating-point constant used
+by a promoted numeric operation is folded with its generated extension into an
+exactly extended native constant:
+
+```text
+%lo:fN = G_FCONSTANT value
+%hi:fM = G_FPEXT %lo
+  ->
+%hi:fM = G_FCONSTANT fpext(value)
+```
+
+Here `fM` is the narrowest native IEEE type wider than `fN`. IEEE widening of
+the constant is exact, and the unsupported `G_FCONSTANT` plus `G_FPEXT` are
+removed. An unsupported constant with an available integer carrier can also be
+folded directly into an integer constant:
 
 ```text
 %dst:fN = G_FCONSTANT value
@@ -257,12 +278,13 @@ an available integer carrier is folded directly into an integer constant:
 %bits:iN = G_CONSTANT bitcast(value)
 ```
 
-The bitcast result register and all of its uses are preserved; the
-`G_FCONSTANT` and `G_BITCAST` are removed. Every non-debug use of the
-unsupported floating-point constant must be an equal-width integer bitcast.
+The result registers and all their uses are preserved. Every non-debug use of
+the unsupported constant must be either one of these generated native
+`G_FPEXT`s or an equal-width integer carrier bitcast; mixed uses are supported.
 The resulting `G_CONSTANT iN` is promoted by the integer-width policy when
-`iN` itself is not native. Unsupported numerical floating-point operations
-still fail closed; they are not reinterpreted as integer arithmetic.
+`iN` itself is not native. Floating-point operations outside the promotion
+list still fail closed for unsupported types; none are reinterpreted as
+integer arithmetic.
 
 `G_SELECT` may bitcast an unsupported floating-point selected value to an
 equal-width integer and then promote that integer. This is representation-safe
@@ -270,9 +292,10 @@ for selection and is not applied to numerical floating-point operations.
 `G_PHI` promotes integer values but does not bitcast unsupported float values.
 
 The templates also mark the artifacts introduced by this policy as legal:
-integer extensions to a native carrier, the inverse truncations, and equal-width
-integer/floating-point bitcasts. Native integer and floating-point conversion
-pairs listed above are legal as well.
+integer extensions to a native carrier, the inverse truncations, equal-width
+integer/floating-point bitcasts, and the `G_FPEXT`/`G_FPTRUNC` pair between an
+unsupported low IEEE type and its selected native computation type. Native
+integer and floating-point conversion pairs listed above are legal as well.
 
 A pre-isel generic opcode not listed by this generated policy is marked
 `alwaysLegal()` and passes type legalization unchanged. An opcode that is

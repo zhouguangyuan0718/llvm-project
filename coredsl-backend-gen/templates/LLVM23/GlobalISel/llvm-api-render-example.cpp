@@ -23,7 +23,6 @@ static json::Value makeLegalizerInput() {
   IntegerWidths.emplace_back(32);
 
   json::Array FloatingPointWidths;
-  FloatingPointWidths.emplace_back(16);
   FloatingPointWidths.emplace_back(32);
 
   json::Object NativeTypes;

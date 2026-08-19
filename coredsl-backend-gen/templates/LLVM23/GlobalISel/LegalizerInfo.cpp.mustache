@@ -6,6 +6,7 @@
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
+#include "llvm/CodeGen/LowLevelTypeUtils.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -53,6 +54,17 @@ static bool isNativeFloatType(LLT Ty) {
   return false;
 }
 
+// Return the narrowest native IEEE floating-point type that can carry Bits
+// bits. The Mustache input must keep floating_point_widths strictly increasing.
+static LLT getNativeFloatTypeForWidth(unsigned Bits) {
+  (void)Bits;
+{{#native_types.floating_point_widths}}
+  if (Bits <= {{.}})
+    return LLT::floatIEEE({{.}});
+{{/native_types.floating_point_widths}}
+  return LLT{};
+}
+
 [[maybe_unused]] static bool isNativeValueType(LLT Ty) {
   return Ty.isPointer() || isNativeIntegerType(Ty) || isNativeFloatType(Ty);
 }
@@ -77,6 +89,30 @@ promoteIntegerType(unsigned TypeIdx) {
     const LLT Ty = Query.Types[TypeIdx];
     return std::pair<unsigned, LLT>(
         TypeIdx, getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()));
+  };
+}
+
+[[maybe_unused]] static LegalityPredicate
+floatTypeNeedsPromotion(unsigned TypeIdx) {
+  return [TypeIdx](const LegalityQuery &Query) {
+    if (Query.Types.size() <= TypeIdx)
+      return false;
+    const LLT Ty = Query.Types[TypeIdx];
+    if (!Ty.isFloat() || isNativeFloatType(Ty))
+      return false;
+    const LLT PromotedTy =
+        getNativeFloatTypeForWidth(Ty.getScalarSizeInBits());
+    return PromotedTy.isValid() &&
+           PromotedTy.getScalarSizeInBits() > Ty.getScalarSizeInBits();
+  };
+}
+
+[[maybe_unused]] static LegalizeMutation
+promoteFloatType(unsigned TypeIdx) {
+  return [TypeIdx](const LegalityQuery &Query) {
+    return std::pair<unsigned, LLT>(
+        TypeIdx, getNativeFloatTypeForWidth(
+                     Query.Types[TypeIdx].getScalarSizeInBits()));
   };
 }
 
@@ -197,6 +233,20 @@ static bool isNativeFloatExtension(const LegalityQuery &Query) {
          DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
 }
 
+// These are the G_FPEXT/G_FPTRUNC artifacts introduced when an unsupported
+// low-precision operation is evaluated in its narrowest native IEEE type.
+static bool isGeneratedFloatExtension(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  if (!DstTy.isFloat() || !SrcTy.isFloat() ||
+      DstTy.getScalarSizeInBits() <= SrcTy.getScalarSizeInBits())
+    return false;
+  return hasExactType(
+      DstTy, getNativeFloatTypeForWidth(SrcTy.getScalarSizeInBits()));
+}
+
 static bool isNativeFloatTruncation(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
@@ -204,6 +254,18 @@ static bool isNativeFloatTruncation(const LegalityQuery &Query) {
   const LLT SrcTy = Query.Types[1];
   return isNativeFloatType(DstTy) && isNativeFloatType(SrcTy) &&
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
+}
+
+static bool isGeneratedFloatTruncation(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2)
+    return false;
+  const LLT DstTy = Query.Types[0];
+  const LLT SrcTy = Query.Types[1];
+  if (!DstTy.isFloat() || !SrcTy.isFloat() ||
+      DstTy.getScalarSizeInBits() >= SrcTy.getScalarSizeInBits())
+    return false;
+  return hasExactType(
+      SrcTy, getNativeFloatTypeForWidth(DstTy.getScalarSizeInBits()));
 }
 
 static bool isSupportedIntegerMemoryType(LLT Ty) {
@@ -278,11 +340,12 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
   };
 }
 
-// Fold every equal-width integer bitcast of an unsupported floating-point
-// constant directly into G_CONSTANT. This preserves the bitcast result
-// registers and lets the ordinary integer policy promote them if necessary.
-static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
-                                         MachineInstr &MI) {
+// Fold every generated use of an unsupported floating-point constant. Integer
+// carrier bitcasts become bit-identical G_CONSTANTs, while numeric promotion
+// extensions become exactly extended native G_FCONSTANTs. This removes the
+// unsupported constant definition instead of leaving it for instruction
+// selection.
+static bool applyFConstantRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::G_FCONSTANT ||
       MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 2)
     return false;
@@ -296,38 +359,73 @@ static bool applyFConstantCarrierRewrite(LegalizerHelper &Helper,
 
   const Register FloatDstReg = Dst.getReg();
   const LLT FloatTy = MRI.getType(FloatDstReg);
-  if (!FloatTy.isFloat() ||
-      !getNativeIntegerTypeForWidth(FloatTy.getScalarSizeInBits()).isValid())
+  if (!FloatTy.isFloat() || isNativeFloatType(FloatTy))
     return false;
 
   const LLT IntegerTy = LLT::integer(FloatTy.getScalarSizeInBits());
-  const APInt Bits = Value.getFPImm()->getValueAPF().bitcastToAPInt();
+  const bool HasIntegerCarrier =
+      getNativeIntegerTypeForWidth(FloatTy.getScalarSizeInBits()).isValid();
+  const APFloat &OriginalValue = Value.getFPImm()->getValueAPF();
+  const APInt Bits = OriginalValue.bitcastToAPInt();
 
   SmallVector<MachineInstr *, 4> Bitcasts;
+  SmallVector<MachineInstr *, 4> Extensions;
   for (MachineInstr &UseMI : MRI.use_nodbg_instructions(FloatDstReg)) {
-    if (UseMI.getOpcode() != TargetOpcode::G_BITCAST ||
-        UseMI.getNumExplicitDefs() != 1 ||
+    if (UseMI.getNumExplicitDefs() != 1 ||
         UseMI.getNumExplicitOperands() < 2 ||
         !UseMI.getOperand(0).isReg() || !UseMI.getOperand(0).isDef() ||
         !UseMI.getOperand(1).isReg() ||
-        UseMI.getOperand(1).getReg() != FloatDstReg ||
-        !hasExactType(MRI.getType(UseMI.getOperand(0).getReg()), IntegerTy))
+        UseMI.getOperand(1).getReg() != FloatDstReg)
       return false;
-    Bitcasts.push_back(&UseMI);
+
+    const LLT UseDstTy = MRI.getType(UseMI.getOperand(0).getReg());
+    if (UseMI.getOpcode() == TargetOpcode::G_BITCAST && HasIntegerCarrier &&
+        hasExactType(UseDstTy, IntegerTy)) {
+      Bitcasts.push_back(&UseMI);
+      continue;
+    }
+
+    if (UseMI.getOpcode() == TargetOpcode::G_FPEXT &&
+        hasExactType(UseDstTy,
+                     getNativeFloatTypeForWidth(
+                         FloatTy.getScalarSizeInBits()))) {
+      Extensions.push_back(&UseMI);
+      continue;
+    }
+
+    return false;
   }
-  if (Bitcasts.empty())
+  if (Bitcasts.empty() && Extensions.empty())
     return false;
 
-  const Register DebugReg = Bitcasts.front()->getOperand(0).getReg();
+  Register DebugReg;
   for (MachineInstr *Bitcast : Bitcasts) {
     const Register IntegerDstReg = Bitcast->getOperand(0).getReg();
+    if (!DebugReg.isValid())
+      DebugReg = IntegerDstReg;
     Helper.MIRBuilder.setInstrAndDebugLoc(*Bitcast);
     Helper.MIRBuilder.buildConstant(IntegerDstReg, Bits);
     Bitcast->eraseFromParent();
   }
 
-  // Debug users can refer to any folded result: each constant has the same
-  // bits as the original floating-point value.
+  for (MachineInstr *Extension : Extensions) {
+    const Register ExtendedDstReg = Extension->getOperand(0).getReg();
+    const LLT ExtendedTy = MRI.getType(ExtendedDstReg);
+    APFloat ExtendedValue = OriginalValue;
+    bool LosesInfo = false;
+    (void)ExtendedValue.convert(getFltSemanticForLLT(ExtendedTy),
+                                APFloat::rmNearestTiesToEven, &LosesInfo);
+    assert(!LosesInfo && "widening an IEEE constant must be exact");
+
+    if (!DebugReg.isValid())
+      DebugReg = ExtendedDstReg;
+    Helper.MIRBuilder.setInstrAndDebugLoc(*Extension);
+    Helper.MIRBuilder.buildFConstant(ExtendedDstReg, ExtendedValue);
+    Extension->eraseFromParent();
+  }
+
+  // Debug users can refer to any folded result. Integer replacements preserve
+  // the original bits; floating-point replacements preserve the exact value.
   SmallVector<MachineOperand *, 4> DebugUses;
   for (MachineOperand &Use : MRI.use_operands(FloatDstReg))
     if (Use.getParent()->isDebugInstr())
@@ -718,13 +816,28 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   FConstantActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
   });
-  FConstantActions.customIf(floatTypeNeedsIntegerBitcast(0));
+  FConstantActions.customIf([](const LegalityQuery &Query) {
+    if (Query.Types.empty())
+      return false;
+    const LLT Ty = Query.Types[0];
+    if (!Ty.isFloat() || isNativeFloatType(Ty))
+      return false;
+    return getNativeFloatTypeForWidth(Ty.getScalarSizeInBits()).isValid() ||
+           getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()).isValid();
+  });
+
+  auto &PromotableFloatActions =
+      GetActionsFor({G_FADD, G_FSUB, G_FMUL, G_FDIV});
+  PromotableFloatActions.legalIf([](const LegalityQuery &Query) {
+    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+  });
+  PromotableFloatActions.widenScalarIf(floatTypeNeedsPromotion(0),
+                                       promoteFloatType(0));
 
   auto &FloatActions = GetActionsFor({
-      G_FADD, G_FSUB, G_FMUL, G_FDIV, G_FREM, G_FMA, G_FMAD, G_FNEG,
-      G_FABS, G_FCANONICALIZE, G_FMINNUM, G_FMAXNUM, G_FMINNUM_IEEE,
-      G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM, G_FMINIMUMNUM,
-      G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
+      G_FREM, G_FMA, G_FMAD, G_FNEG, G_FABS, G_FCANONICALIZE, G_FMINNUM,
+      G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM,
+      G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
       G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
@@ -737,10 +850,16 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   });
 
   auto &FPExtActions = GetActions(G_FPEXT);
-  FPExtActions.legalIf(isNativeFloatExtension);
+  FPExtActions.legalIf([](const LegalityQuery &Query) {
+    return isNativeFloatExtension(Query) ||
+           isGeneratedFloatExtension(Query);
+  });
 
   auto &FPTruncActions = GetActions(G_FPTRUNC);
-  FPTruncActions.legalIf(isNativeFloatTruncation);
+  FPTruncActions.legalIf([](const LegalityQuery &Query) {
+    return isNativeFloatTruncation(Query) ||
+           isGeneratedFloatTruncation(Query);
+  });
 
   auto &IntToFPActions =
       GetActionsFor({G_SITOFP, G_UITOFP});
@@ -790,6 +909,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
            isNativeFloatType(Query.Types[1]);
   });
+  FCmpActions.widenScalarIf(floatTypeNeedsPromotion(1),
+                            promoteFloatType(1));
   FCmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
                             promoteIntegerType(0));
 
@@ -839,7 +960,7 @@ bool {{target}}LegalizerInfo::legalizeCustom(
   (void)LocObserver;
   switch (MI.getOpcode()) {
   case TargetOpcode::G_FCONSTANT:
-    return applyFConstantCarrierRewrite(Helper, MI);
+    return applyFConstantRewrite(Helper, MI);
   default:
     return false;
   }

@@ -16,7 +16,7 @@ Root["target"] = "Toy16";
 
 llvm::json::Object NativeTypes;
 NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
-NativeTypes["floating_point_widths"] = llvm::json::Array{16};
+NativeTypes["floating_point_widths"] = llvm::json::Array{32};
 Root["native_types"] = std::move(NativeTypes);
 
 llvm::json::Object MemoryTypes;
@@ -230,6 +230,12 @@ Inspect that, for native integers `[16, 32]`:
 - an `i24` integer operation is promoted to `i32`;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
   remaining `G_BITCAST` when `f16` is not native;
+- an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
+  `f32` and truncated back to `f16`, and an `f16 G_FCMP` compares exactly
+  extended `f32` inputs;
+- an `f16 G_FCONSTANT` feeding one of those promoted operations is folded with
+  its `G_FPEXT` into an exact `f32 G_FCONSTANT`, leaving no low-precision
+  constant definition on that path;
 - a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
   while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
   directly, without a `G_BITCAST`;
@@ -269,6 +275,7 @@ Then run through instruction selection:
 ```
 
 The target selector or lowering must cover every built-in opcode that can reach
-it, as well as `G_BITCAST`, extension, and truncation artifacts introduced by
-the policy. Successfully constructing `Toy16LegalizerInfo` alone does not make
-those operations selectable.
+it, as well as `G_BITCAST`, integer extension/truncation, and the generated
+floating-point extension/truncation artifacts introduced by the policy.
+Successfully constructing `Toy16LegalizerInfo` alone does not make those
+operations selectable.
