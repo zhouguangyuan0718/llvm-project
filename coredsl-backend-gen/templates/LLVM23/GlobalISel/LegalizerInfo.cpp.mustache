@@ -73,19 +73,23 @@ static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   (void)TypeIdx;
   (void)Bits;
   switch (Opcode) {
-{{#opcode_type_constraints}}
-  case TargetOpcode::{{opcode_cpp}}:
-{{#type_indices}}
+{{#operation_type_constraints}}
+{{#opcode_cpp}}
+  case TargetOpcode::{{.}}:
+{{#scalar_types}}
     if (TypeIdx == {{index}}) {
-{{#integer_widths}}
+{{#types}}
+{{#integer_width}}
       if (Bits <= {{.}})
         return LLT::integer({{.}});
-{{/integer_widths}}
+{{/integer_width}}
+{{/types}}
       return LLT{};
     }
-{{/type_indices}}
+{{/scalar_types}}
     break;
-{{/opcode_type_constraints}}
+{{/opcode_cpp}}
+{{/operation_type_constraints}}
   default:
     break;
   }
@@ -98,19 +102,23 @@ static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   (void)TypeIdx;
   (void)Bits;
   switch (Opcode) {
-{{#opcode_type_constraints}}
-  case TargetOpcode::{{opcode_cpp}}:
-{{#type_indices}}
+{{#operation_type_constraints}}
+{{#opcode_cpp}}
+  case TargetOpcode::{{.}}:
+{{#scalar_types}}
     if (TypeIdx == {{index}}) {
-{{#floating_point_widths}}
+{{#types}}
+{{#floating_point_width}}
       if (Bits <= {{.}})
         return LLT::floatIEEE({{.}});
-{{/floating_point_widths}}
+{{/floating_point_width}}
+{{/types}}
       return LLT{};
     }
-{{/type_indices}}
+{{/scalar_types}}
     break;
-{{/opcode_type_constraints}}
+{{/opcode_cpp}}
+{{/operation_type_constraints}}
   default:
     break;
   }
@@ -310,7 +318,7 @@ static bool isNativeFloatExtension(const LegalityQuery &Query) {
 // These are the G_FPEXT/G_FPTRUNC artifacts introduced when an unsupported
 // low-precision operation is evaluated in one of the target's native IEEE
 // types. The originating opcode may select a wider type than the global
-// narrowest carrier through opcode_type_constraints.
+// narrowest carrier through operation_type_constraints.
 static bool isGeneratedFloatExtension(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
@@ -1029,23 +1037,25 @@ bool {{target}}LegalizerInfo::legalizeCustom(
 bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
                                                 MachineInstr &MI) const {
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
-{{#intrinsics}}
-  case {{id_cpp}}: {
-{{#scalar_arguments}}
+{{#operation_type_constraints}}
+{{#intrinsic_id_cpp}}
+  case {{.}}: {
+{{#scalar_types}}
     const LLT ScalarArgumentTypes{{index}}[] = {
 {{#types}}
         {{#integer_width}}LLT::integer({{.}}){{/integer_width}}{{#floating_point_width}}LLT::floatIEEE({{.}}){{/floating_point_width}},
 {{/types}}
     };
-{{/scalar_arguments}}
+{{/scalar_types}}
     const IntrinsicScalarArgumentRule ScalarArguments[] = {
-{{#scalar_arguments}}
+{{#scalar_types}}
         { {{index}}, ScalarArgumentTypes{{index}} },
-{{/scalar_arguments}}
+{{/scalar_types}}
     };
     return applyIntrinsicCarrierRewrites(Helper, MI, ScalarArguments);
   }
-{{/intrinsics}}
+{{/intrinsic_id_cpp}}
+{{/operation_type_constraints}}
   default:
     // Intrinsics bypass the ordinary opcode legality query. Leave intrinsics
     // absent from the generated input unchanged, matching the default-legal

@@ -4,44 +4,54 @@
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
   },
-  "opcode_type_constraints": [
+  "operation_type_constraints": [
     {
       "opcode_cpp": "G_LOAD",
-      "type_indices": [
+      "scalar_types": [
         {
           "index": 0,
-          "integer_widths": [16, 32],
-          "floating_point_widths": [32]
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 },
+            { "floating_point_width": 32 }
+          ]
         }
       ]
     },
     {
       "opcode_cpp": "G_STORE",
-      "type_indices": [
+      "scalar_types": [
         {
           "index": 0,
-          "integer_widths": [16, 32],
-          "floating_point_widths": [32]
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 },
+            { "floating_point_width": 32 }
+          ]
         }
       ]
     },
     {
       "opcode_cpp": "G_MUL",
-      "type_indices": [
-        { "index": 0, "integer_widths": [16] }
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [{ "integer_width": 16 }]
+        }
       ]
     },
     {
       "opcode_cpp": "G_FDIV",
-      "type_indices": [
-        { "index": 0, "floating_point_widths": [32] }
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [{ "floating_point_width": 32 }]
+        }
       ]
-    }
-  ],
-  "intrinsics": [
+    },
     {
-      "id_cpp": "Intrinsic::example_f16_op",
-      "scalar_arguments": [
+      "intrinsic_id_cpp": "Intrinsic::example_f16_op",
+      "scalar_types": [
         {
           "index": 0,
           "types": [

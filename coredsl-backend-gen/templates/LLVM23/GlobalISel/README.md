@@ -1,9 +1,9 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
-input contains one target name, target-native scalar types, optional per-opcode
-type constraints, and intrinsic scalar argument index/type rules. File names,
-the class name, the include guard, the `llvm` namespace, and all legalization
+input contains one target name, target-native scalar types, and one operation
+type-constraint table shared by generic opcodes and intrinsics. File names, the
+class name, the include guard, the `llvm` namespace, and all legalization
 policies are derived or built into the templates.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
@@ -22,44 +22,54 @@ The complete input shape is:
     "integer_widths": [16, 32],
     "floating_point_widths": [16, 32]
   },
-  "opcode_type_constraints": [
+  "operation_type_constraints": [
     {
       "opcode_cpp": "G_LOAD",
-      "type_indices": [
+      "scalar_types": [
         {
           "index": 0,
-          "integer_widths": [16, 32],
-          "floating_point_widths": [32]
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 },
+            { "floating_point_width": 32 }
+          ]
         }
       ]
     },
     {
       "opcode_cpp": "G_STORE",
-      "type_indices": [
+      "scalar_types": [
         {
           "index": 0,
-          "integer_widths": [16, 32],
-          "floating_point_widths": [32]
+          "types": [
+            { "integer_width": 16 },
+            { "integer_width": 32 },
+            { "floating_point_width": 32 }
+          ]
         }
       ]
     },
     {
       "opcode_cpp": "G_MUL",
-      "type_indices": [
-        { "index": 0, "integer_widths": [16] }
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [{ "integer_width": 16 }]
+        }
       ]
     },
     {
       "opcode_cpp": "G_FDIV",
-      "type_indices": [
-        { "index": 0, "floating_point_widths": [32] }
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [{ "floating_point_width": 32 }]
+        }
       ]
-    }
-  ],
-  "intrinsics": [
+    },
     {
-      "id_cpp": "Intrinsic::example_f16_op",
-      "scalar_arguments": [
+      "intrinsic_id_cpp": "Intrinsic::example_f16_op",
+      "scalar_types": [
         {
           "index": 0,
           "types": [
@@ -115,30 +125,36 @@ This numeric promotion policy is for ordinary, non-constrained GMIR floating-
 point operations. It does not promise constrained-FP exception behavior,
 dynamic rounding-mode equivalence, or strict avoidance of double rounding.
 
-`opcode_type_constraints` optionally narrows the native type set for a built-in
-opcode rule. Each entry contains one `opcode_cpp`, such as `G_MUL`, and a
-non-empty `type_indices` array. An index is a `LegalityQuery::Types` index, not
-a MachineInstr operand index. It contains at least one non-empty, strictly
-increasing type list:
+`operation_type_constraints` is the common capability table. Every entry must
+contain exactly one operation identifier:
 
 ```json
-{ "index": 0, "integer_widths": [16] }
-{ "index": 1, "floating_point_widths": [32, 64] }
-{
-  "index": 0,
-  "integer_widths": [16, 32],
-  "floating_point_widths": [32]
-}
+{ "opcode_cpp": "G_MUL", ... }
+{ "intrinsic_id_cpp": "Intrinsic::example_f16_op", ... }
 ```
 
-Every listed width must occur in the matching `native_types` list. Opcode names
-and type indices must refer to rules already covered by the built-in policy;
-this input does not define the semantics of a previously unlisted opcode.
-Duplicate opcodes, duplicate indices within an opcode, entries with no non-empty
-type list, and unknown opcode/index pairs must be rejected by the input
-producer. Integer and floating-point lists may coexist for an index whose
-opcode supports both categories, notably the value/memory index of
-`G_LOAD`/`G_STORE`.
+Both forms contain a non-empty `scalar_types` array. Each scalar position has
+an `index` and a non-empty ordered `types` array. Every candidate contains
+exactly one type spelling:
+
+```json
+{ "integer_width": 16 }
+{ "floating_point_width": 32 }
+```
+
+Every candidate must occur in the matching `native_types` list. Duplicate
+operation identifiers, duplicate indices within one operation, duplicate
+candidate types, entries containing both/neither identifiers, and empty arrays
+must be rejected by the input producer.
+
+For `opcode_cpp`, `index` is a `LegalityQuery::Types` index, not a MachineInstr
+operand index. Opcode names and indices must already be covered by the built-in
+policy; this input supplies capabilities, not the semantics of a previously
+unlisted opcode. Within the `types` list, integer candidates must be strictly
+increasing relative to other integer candidates, and floating-point candidates
+must be strictly increasing relative to other floating-point candidates. The
+two categories may coexist for an index whose opcode supports both, notably
+the value/memory index of `G_LOAD`/`G_STORE`.
 
 An omitted opcode/type-index pair inherits the full matching `native_types`
 list. A configured pair replaces that list. For example, with native integers
@@ -166,12 +182,12 @@ pointer and is preserved. The generated policy does not infer extending loads
 or truncating stores.
 
 A floating-point load/store type absent from that opcode's
-`floating_point_widths` may still use an equal-width integer representation
-when the exact width is present in the same opcode's `integer_widths`. The
+floating-point candidates may still use an equal-width integer representation
+when the exact width occurs among the same opcode's integer candidates. The
 legalizer bitcasts the value and changes the MMO type without changing its bit
-width. For example, a `G_LOAD` constraint containing integer `16` but no float
-`16` accepts an `f16` load through an `i16` carrier. The corresponding
-`G_STORE` behavior depends independently on its own constraint.
+width. For example, a `G_LOAD` constraint containing `integer_width: 16` but no
+`floating_point_width: 16` accepts an `f16` load through an `i16` carrier. The
+corresponding `G_STORE` behavior depends independently on its own constraint.
 
 These templates assume that the ExtendedLLT reland is cherry-picked onto
 `llvmorg-23-init` and enabled consistently by the integrating target. Integer,
@@ -180,25 +196,13 @@ generated legalizer deliberately uses `LLT::integer(N)` and
 `LLT::floatIEEE(N)`; do not replace them with the generic `LLT::scalar(N)`
 wildcard.
 
-Each intrinsic entry contains:
-
-- `id_cpp`: the C++ intrinsic ID used in the generated `switch`;
-- `scalar_arguments`: per-argument rules containing a zero-based explicit
-  input `index` and a non-empty ordered `types` list.
-
-The argument index excludes definitions and the intrinsic-ID operand. Every
-entry in `types` must contain exactly one of:
-
-```json
-{ "integer_width": 16 }
-{ "floating_point_width": 32 }
-```
-
-Every candidate type must occur in the corresponding `native_types` list. An
-integer candidate enables the carrier conversions below. A floating-point
-candidate currently matches only an actual argument with that exact native
-floating-point type; the template does not infer numeric integer/float
-conversions.
+For `intrinsic_id_cpp`, `index` is a zero-based explicit input argument index;
+it excludes definitions and the intrinsic-ID operand. Integer candidates enable
+the carrier conversions below. A floating-point candidate currently matches
+only an actual argument with that exact native floating-point type; the
+template does not infer numeric integer/float conversions. Unlike an opcode
+entry, intrinsic candidate order is a conversion priority after exact-match
+and equal-width carrier preferences.
 
 Candidate selection is deterministic:
 
@@ -216,7 +220,8 @@ For example, argument index `0` is mapped at legalization time to MIR operand
 argument is a convertible virtual-register use before changing any operand.
 Duplicate intrinsic IDs and duplicate argument indices must be rejected by the
 input producer. Empty candidate lists and duplicate candidate types must also
-be rejected. Unknown intrinsics return `false`.
+be rejected. Intrinsics absent from `operation_type_constraints` pass through
+unchanged.
 
 For an intrinsic argument whose selected type is `iM`, the generated boundary
 is:
@@ -374,9 +379,9 @@ listed remains governed by its exact rules: a type combination that matches
 neither a legality predicate nor a transformation is still rejected (or uses
 an explicit `fallback()` where present). This default only skips legalization;
 it does not imply that instruction selection or lowering supports the opcode.
-Intrinsics absent from the `intrinsics` input similarly pass unchanged, while
-listed intrinsics must satisfy one candidate type rule for every configured
-scalar argument.
+Intrinsics absent from `operation_type_constraints` similarly pass unchanged,
+while listed intrinsics must satisfy one candidate type rule for every
+configured scalar argument.
 
 Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
 memory types. An integer or floating-point operation is directly legal only
@@ -451,12 +456,12 @@ LLVM-based input producer does not need to serialize through JSON text.
 
 ## Integration checks
 
-1. Validate the target spelling, duplicate intrinsic IDs and argument indices,
-   non-empty candidate lists, duplicate candidates, exactly one type variant
-   for every candidate, and that every candidate type is native. Also validate
-   all strictly increasing integer-width lists and all strictly increasing IEEE
-   floating-point lists drawn from `16`, `32`, `64`, and `128`. Direct
-   memory-type lists must be subsets of their corresponding native-type lists.
+1. Validate the target spelling; exactly one operation identifier per entry;
+   duplicate opcode/intrinsic IDs and indices; non-empty `scalar_types` and
+   candidate lists; duplicate candidates; exactly one type variant per
+   candidate; and that every candidate type is native. For opcode entries,
+   also validate strictly increasing integer and IEEE floating-point candidate
+   subsequences, with floating widths drawn from `16`, `32`, `64`, and `128`.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.

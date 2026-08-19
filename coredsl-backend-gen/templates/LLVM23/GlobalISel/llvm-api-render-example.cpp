@@ -30,81 +30,61 @@ static json::Value makeLegalizerInput() {
   NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
   Root["native_types"] = std::move(NativeTypes);
 
-  auto MakeMemoryConstraint = [](StringRef Opcode) {
-    json::Object ValueTypeIndex;
-    ValueTypeIndex["index"] = 0;
-    ValueTypeIndex["integer_widths"] = json::Array{16, 32};
-    ValueTypeIndex["floating_point_widths"] = json::Array{32};
+  auto IntegerType = [](unsigned Width) {
+    json::Object Type;
+    Type["integer_width"] = Width;
+    return Type;
+  };
+  auto FloatType = [](unsigned Width) {
+    json::Object Type;
+    Type["floating_point_width"] = Width;
+    return Type;
+  };
+  auto MakeOperation = [](StringRef IdKey, StringRef Id, unsigned Index,
+                          json::Array Types) {
+    json::Object ScalarType;
+    ScalarType["index"] = Index;
+    ScalarType["types"] = std::move(Types);
 
-    json::Array TypeIndices;
-    TypeIndices.emplace_back(std::move(ValueTypeIndex));
+    json::Array ScalarTypes;
+    ScalarTypes.emplace_back(std::move(ScalarType));
 
-    json::Object Constraint;
-    Constraint["opcode_cpp"] = Opcode;
-    Constraint["type_indices"] = std::move(TypeIndices);
-    return Constraint;
+    json::Object Operation;
+    Operation[IdKey] = Id;
+    Operation["scalar_types"] = std::move(ScalarTypes);
+    return Operation;
+  };
+  auto MemoryTypes = [&]() {
+    json::Array Types;
+    Types.emplace_back(IntegerType(16));
+    Types.emplace_back(IntegerType(32));
+    Types.emplace_back(FloatType(32));
+    return Types;
   };
 
-  json::Array MulIntegerWidths;
-  MulIntegerWidths.emplace_back(16);
+  json::Array MulTypes;
+  MulTypes.emplace_back(IntegerType(16));
 
-  json::Object MulTypeIndex;
-  MulTypeIndex["index"] = 0;
-  MulTypeIndex["integer_widths"] = std::move(MulIntegerWidths);
+  json::Array FDivTypes;
+  FDivTypes.emplace_back(FloatType(32));
 
-  json::Array MulTypeIndices;
-  MulTypeIndices.emplace_back(std::move(MulTypeIndex));
+  json::Array IntrinsicTypes;
+  IntrinsicTypes.emplace_back(IntegerType(16));
+  IntrinsicTypes.emplace_back(IntegerType(32));
 
-  json::Object MulConstraint;
-  MulConstraint["opcode_cpp"] = "G_MUL";
-  MulConstraint["type_indices"] = std::move(MulTypeIndices);
-
-  json::Array FDivFloatingPointWidths;
-  FDivFloatingPointWidths.emplace_back(32);
-
-  json::Object FDivTypeIndex;
-  FDivTypeIndex["index"] = 0;
-  FDivTypeIndex["floating_point_widths"] =
-      std::move(FDivFloatingPointWidths);
-
-  json::Array FDivTypeIndices;
-  FDivTypeIndices.emplace_back(std::move(FDivTypeIndex));
-
-  json::Object FDivConstraint;
-  FDivConstraint["opcode_cpp"] = "G_FDIV";
-  FDivConstraint["type_indices"] = std::move(FDivTypeIndices);
-
-  json::Array OpcodeTypeConstraints;
-  OpcodeTypeConstraints.emplace_back(MakeMemoryConstraint("G_LOAD"));
-  OpcodeTypeConstraints.emplace_back(MakeMemoryConstraint("G_STORE"));
-  OpcodeTypeConstraints.emplace_back(std::move(MulConstraint));
-  OpcodeTypeConstraints.emplace_back(std::move(FDivConstraint));
-  Root["opcode_type_constraints"] = std::move(OpcodeTypeConstraints);
-
-  json::Object ScalarArgumentI16;
-  ScalarArgumentI16["integer_width"] = 16;
-
-  json::Object ScalarArgumentI32;
-  ScalarArgumentI32["integer_width"] = 32;
-
-  json::Array ScalarArgumentTypes;
-  ScalarArgumentTypes.emplace_back(std::move(ScalarArgumentI16));
-  ScalarArgumentTypes.emplace_back(std::move(ScalarArgumentI32));
-
-  json::Object ScalarArgument;
-  ScalarArgument["index"] = 0;
-  ScalarArgument["types"] = std::move(ScalarArgumentTypes);
-
-  json::Array ScalarArguments;
-  ScalarArguments.emplace_back(std::move(ScalarArgument));
-
-  json::Object Intrinsic;
-  Intrinsic["id_cpp"] = "Intrinsic::example_f16_op";
-  Intrinsic["scalar_arguments"] = std::move(ScalarArguments);
-
-  json::Array Intrinsics;
-  Intrinsics.emplace_back(std::move(Intrinsic));
-  Root["intrinsics"] = std::move(Intrinsics);
+  json::Array OperationTypeConstraints;
+  OperationTypeConstraints.emplace_back(
+      MakeOperation("opcode_cpp", "G_LOAD", 0, MemoryTypes()));
+  OperationTypeConstraints.emplace_back(
+      MakeOperation("opcode_cpp", "G_STORE", 0, MemoryTypes()));
+  OperationTypeConstraints.emplace_back(
+      MakeOperation("opcode_cpp", "G_MUL", 0, std::move(MulTypes)));
+  OperationTypeConstraints.emplace_back(
+      MakeOperation("opcode_cpp", "G_FDIV", 0, std::move(FDivTypes)));
+  OperationTypeConstraints.emplace_back(
+      MakeOperation("intrinsic_id_cpp", "Intrinsic::example_f16_op", 0,
+                    std::move(IntrinsicTypes)));
+  Root["operation_type_constraints"] = std::move(OperationTypeConstraints);
 
   return json::Value(std::move(Root));
 }

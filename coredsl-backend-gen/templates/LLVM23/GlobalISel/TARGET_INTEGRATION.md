@@ -7,9 +7,8 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 
 ## 1. Construct the renderer input
 
-The generator supplies only the target name, native scalar types, optional
-per-opcode type constraints, and intrinsic scalar input argument index/type
-rules:
+The generator supplies only the target name, native scalar types, and one
+operation type-constraint table shared by generic opcodes and intrinsics:
 
 ```cpp
 llvm::json::Object Root;
@@ -20,61 +19,57 @@ NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
 NativeTypes["floating_point_widths"] = llvm::json::Array{32};
 Root["native_types"] = std::move(NativeTypes);
 
-auto MakeMemoryConstraint = [](llvm::StringRef Opcode) {
-  llvm::json::Object ValueTypeIndex;
-  ValueTypeIndex["index"] = 0;
-  ValueTypeIndex["integer_widths"] = llvm::json::Array{16, 32};
-  ValueTypeIndex["floating_point_widths"] = llvm::json::Array{};
+auto IntegerType = [](unsigned Width) {
+  llvm::json::Object Type;
+  Type["integer_width"] = Width;
+  return Type;
+};
+auto FloatType = [](unsigned Width) {
+  llvm::json::Object Type;
+  Type["floating_point_width"] = Width;
+  return Type;
+};
+auto MakeOperation = [](llvm::StringRef IdKey, llvm::StringRef Id,
+                        unsigned Index, llvm::json::Array Types) {
+  llvm::json::Object ScalarType;
+  ScalarType["index"] = Index;
+  ScalarType["types"] = std::move(Types);
 
-  llvm::json::Object Constraint;
-  Constraint["opcode_cpp"] = Opcode;
-  Constraint["type_indices"] = llvm::json::Array{
-      llvm::json::Value(std::move(ValueTypeIndex))};
-  return Constraint;
+  llvm::json::Object Operation;
+  Operation[IdKey] = Id;
+  Operation["scalar_types"] = llvm::json::Array{
+      llvm::json::Value(std::move(ScalarType))};
+  return Operation;
+};
+auto MemoryTypes = [&]() {
+  llvm::json::Array Types;
+  Types.emplace_back(IntegerType(16));
+  Types.emplace_back(IntegerType(32));
+  return Types;
 };
 
-llvm::json::Object MulTypeIndex;
-MulTypeIndex["index"] = 0;
-MulTypeIndex["integer_widths"] = llvm::json::Array{16};
+llvm::json::Array MulTypes;
+MulTypes.emplace_back(IntegerType(16));
 
-llvm::json::Object MulConstraint;
-MulConstraint["opcode_cpp"] = "G_MUL";
-MulConstraint["type_indices"] = llvm::json::Array{
-    llvm::json::Value(std::move(MulTypeIndex))};
+llvm::json::Array FDivTypes;
+FDivTypes.emplace_back(FloatType(32));
 
-llvm::json::Object FDivTypeIndex;
-FDivTypeIndex["index"] = 0;
-FDivTypeIndex["floating_point_widths"] = llvm::json::Array{32};
+llvm::json::Array IntrinsicTypes;
+IntrinsicTypes.emplace_back(IntegerType(16));
+IntrinsicTypes.emplace_back(IntegerType(32));
 
-llvm::json::Object FDivConstraint;
-FDivConstraint["opcode_cpp"] = "G_FDIV";
-FDivConstraint["type_indices"] = llvm::json::Array{
-    llvm::json::Value(std::move(FDivTypeIndex))};
-
-Root["opcode_type_constraints"] = llvm::json::Array{
-    llvm::json::Value(MakeMemoryConstraint("G_LOAD")),
-    llvm::json::Value(MakeMemoryConstraint("G_STORE")),
-    llvm::json::Value(std::move(MulConstraint)),
-    llvm::json::Value(std::move(FDivConstraint))};
-
-llvm::json::Object ScalarArgumentI16;
-ScalarArgumentI16["integer_width"] = 16;
-
-llvm::json::Object ScalarArgumentI32;
-ScalarArgumentI32["integer_width"] = 32;
-
-llvm::json::Object ScalarArgument;
-ScalarArgument["index"] = 0;
-ScalarArgument["types"] = llvm::json::Array{
-    llvm::json::Value(std::move(ScalarArgumentI16)),
-    llvm::json::Value(std::move(ScalarArgumentI32))};
-
-llvm::json::Object Intrinsic;
-Intrinsic["id_cpp"] = "Intrinsic::toy16_f16_op";
-Intrinsic["scalar_arguments"] = llvm::json::Array{
-    llvm::json::Value(std::move(ScalarArgument))};
-Root["intrinsics"] =
-    llvm::json::Array{llvm::json::Value(std::move(Intrinsic))};
+Root["operation_type_constraints"] = llvm::json::Array{
+    llvm::json::Value(
+        MakeOperation("opcode_cpp", "G_LOAD", 0, MemoryTypes())),
+    llvm::json::Value(
+        MakeOperation("opcode_cpp", "G_STORE", 0, MemoryTypes())),
+    llvm::json::Value(MakeOperation("opcode_cpp", "G_MUL", 0,
+                                    std::move(MulTypes))),
+    llvm::json::Value(MakeOperation("opcode_cpp", "G_FDIV", 0,
+                                    std::move(FDivTypes))),
+    llvm::json::Value(MakeOperation(
+        "intrinsic_id_cpp", "Intrinsic::toy16_f16_op", 0,
+        std::move(IntrinsicTypes)))};
 ```
 
 Register the `target_upper` lambda as shown in
@@ -96,7 +91,7 @@ The source includes `llvm/IR/IntrinsicsToy16.h`. If the target uses the custom
 intrinsic in this example, add its `.td` file to `llvm/IR/Intrinsics.td` and add
 the corresponding `-gen-intrinsic-enums` entry to
 `llvm/include/llvm/IR/CMakeLists.txt`, following the existing target intrinsic
-headers. The `id_cpp` spelling must match the generated enum.
+headers. The `intrinsic_id_cpp` spelling must match the generated enum.
 
 ## 2. Enable ExtendedLLT consistently
 
