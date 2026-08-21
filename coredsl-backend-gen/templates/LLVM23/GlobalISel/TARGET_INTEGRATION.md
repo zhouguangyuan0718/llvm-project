@@ -328,6 +328,8 @@ Inspect that, for native integers `[16, 32]`:
   no `G_AND` mask;
 - `G_BRCOND` accepts both `i16` and `i32` conditions directly, and promotes an
   `i1` or `i8` condition to `i16` with LLVM's boolean extension operation;
+  this always uses the complete native integer list rather than an
+  opcode-specific capability subset;
 - a value wider than `i32` fails closed instead of narrowing.
 
 Then run through instruction selection:

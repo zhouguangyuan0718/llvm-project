@@ -179,6 +179,30 @@ promoteIntegerType(unsigned TypeIdx) {
   };
 }
 
+// Some structural users, notably G_BRCOND, can consume every target-native
+// integer register type and therefore must not inherit an opcode-specific
+// capability subset.
+static LegalityPredicate nativeIntegerTypeNeedsPromotion(unsigned TypeIdx) {
+  return [TypeIdx](const LegalityQuery &Query) {
+    if (Query.Types.size() <= TypeIdx)
+      return false;
+    const LLT Ty = Query.Types[TypeIdx];
+    if (!Ty.isInteger())
+      return false;
+    const LLT CarrierTy =
+        getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
+    return CarrierTy.isValid() && !hasExactType(Ty, CarrierTy);
+  };
+}
+
+static LegalizeMutation promoteToNativeIntegerType(unsigned TypeIdx) {
+  return [TypeIdx](const LegalityQuery &Query) {
+    return std::pair<unsigned, LLT>(
+        TypeIdx, getNativeIntegerTypeForWidth(
+                     Query.Types[TypeIdx].getScalarSizeInBits()));
+  };
+}
+
 [[maybe_unused]] static LegalityPredicate
 floatTypeNeedsPromotion(unsigned TypeIdx) {
   return [TypeIdx](const LegalityQuery &Query) {
@@ -992,10 +1016,10 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &BrCondActions = GetActions(G_BRCOND);
   BrCondActions.legalIf([](const LegalityQuery &Query) {
-    return isOpcodeIntegerType(Query, 0);
+    return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
-  BrCondActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                              promoteIntegerType(0));
+  BrCondActions.widenScalarIf(nativeIntegerTypeNeedsPromotion(0),
+                              promoteToNativeIntegerType(0));
 
   auto &SelectActions = GetActions(G_SELECT);
   SelectActions.legalIf([](const LegalityQuery &Query) {

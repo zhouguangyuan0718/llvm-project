@@ -181,6 +181,11 @@ constraining it to `[32]` widens both `i8` and `i16` multiplies to `i32`.
 The policy never narrows an input merely because a smaller opcode-specific type
 is available.
 
+`G_BRCOND` is intentionally exempt from opcode-specific subsets: every integer
+type in `native_types.integer_widths` is a legal condition register. Do not add
+a `G_BRCOND` entry to `operation_type_constraints`; missing integer widths are
+promoted against the complete native integer set.
+
 Opcode-specific floating-point sets use the same promotion boundary as their
 built-in opcode rule. Thus `G_FDIV` constrained to `[32]` promotes `f16` to
 `f32`, while an unsupported `G_FMA` remains unsupported because `G_FMA` has no
@@ -329,6 +334,7 @@ as wide as the original condition; LLVM's generic legalizer uses its boolean
 extension operation for this rewrite. This covers both the usual promoted `i1`
 condition and branches driven by an already-native wider integer. Non-integer
 conditions and integer conditions wider than every native type fail closed.
+Opcode-specific capability constraints do not restrict this rule.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
 promoted to the narrowest native integer with the generic legalizer's signed
