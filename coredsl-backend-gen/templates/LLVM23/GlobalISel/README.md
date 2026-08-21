@@ -336,6 +336,14 @@ condition and branches driven by an already-native wider integer. Non-integer
 conditions and integer conditions wider than every native type fail closed.
 Opcode-specific capability constraints do not restrict this rule.
 
+When a missing-width condition is defined by `G_ICMP` or `G_FCMP` (possibly
+through copies or integer casts), branch legalization predicts the compare's
+eventual result carrier instead of selecting the smallest carrier in
+isolation. This compensates for LLVM's bottom-up legalization order. With an
+`i64` integer comparison, the artifact combiner can therefore reduce the
+temporary `G_TRUNC`/boolean-extension chain to `G_ICMP i64` followed directly
+by `G_BRCOND i64` rather than retaining an `i64`-to-`i16` conversion.
+
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
 promoted to the narrowest native integer with the generic legalizer's signed
 extension, matching pointer-offset semantics. `G_INTTOPTR` similarly promotes

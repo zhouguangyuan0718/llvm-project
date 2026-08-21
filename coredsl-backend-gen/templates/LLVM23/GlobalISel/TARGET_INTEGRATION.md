@@ -326,10 +326,13 @@ Inspect that, for native integers `[16, 32]`:
 - with `ZeroOrOneBooleanContent`, an `icmp -> zext i16 -> store i16` chain
   contains only `G_ICMP i16` and `G_STORE i16` after artifact combining, with
   no `G_AND` mask;
-- `G_BRCOND` accepts both `i16` and `i32` conditions directly, and promotes an
-  `i1` or `i8` condition to `i16` with LLVM's boolean extension operation;
-  this always uses the complete native integer list rather than an
+- `G_BRCOND` accepts both `i16` and `i32` conditions directly; a standalone
+  `i1` or `i8` condition is promoted to `i16` with LLVM's boolean extension
+  operation, using the complete native integer list rather than an
   opcode-specific capability subset;
+- a branch using an integer `G_ICMP` result chooses the same predicted carrier
+  as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an
+  intervening conversion after artifact combining;
 - a value wider than `i32` fails closed instead of narrowing.
 
 Then run through instruction selection:

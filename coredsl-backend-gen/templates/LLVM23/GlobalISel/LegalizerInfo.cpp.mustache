@@ -195,14 +195,6 @@ static LegalityPredicate nativeIntegerTypeNeedsPromotion(unsigned TypeIdx) {
   };
 }
 
-static LegalizeMutation promoteToNativeIntegerType(unsigned TypeIdx) {
-  return [TypeIdx](const LegalityQuery &Query) {
-    return std::pair<unsigned, LLT>(
-        TypeIdx, getNativeIntegerTypeForWidth(
-                     Query.Types[TypeIdx].getScalarSizeInBits()));
-  };
-}
-
 [[maybe_unused]] static LegalityPredicate
 floatTypeNeedsPromotion(unsigned TypeIdx) {
   return [TypeIdx](const LegalityQuery &Query) {
@@ -430,6 +422,85 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
         getOpcodeIntegerTypeForWidth(Query.Opcode, 0,
                                      IntegerTy.getScalarSizeInBits()));
   };
+}
+
+// Legalization visits ordinary instructions bottom-up, so G_BRCOND normally
+// chooses a carrier before its defining compare is widened. Predict the
+// compare's eventual result carrier to keep both instructions on one type and
+// let the artifact combiner remove the temporary trunc/extension pair.
+static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
+                                   Register ConditionReg) {
+  constexpr unsigned MaxLookThroughDepth = 8;
+  for (unsigned Depth = 0; Depth != MaxLookThroughDepth; ++Depth) {
+    if (!ConditionReg.isVirtual())
+      return LLT{};
+    MachineInstr *DefMI = MRI.getVRegDef(ConditionReg);
+    if (!DefMI)
+      return LLT{};
+
+    switch (DefMI->getOpcode()) {
+    case TargetOpcode::G_ICMP: {
+      if (DefMI->getNumExplicitDefs() != 1 ||
+          DefMI->getNumExplicitOperands() < 4 ||
+          !DefMI->getOperand(2).isReg())
+        return LLT{};
+      const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
+      if (InputTy.isInteger())
+        return getOpcodeIntegerTypeForWidth(
+            TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
+      if (InputTy.isPointer())
+        return getNativeIntegerTypeForWidth(1);
+      return LLT{};
+    }
+    case TargetOpcode::G_FCMP:
+      return getNativeIntegerTypeForWidth(1);
+    case TargetOpcode::COPY:
+    case TargetOpcode::G_TRUNC:
+    case TargetOpcode::G_ANYEXT:
+    case TargetOpcode::G_ZEXT:
+    case TargetOpcode::G_SEXT:
+      if (DefMI->getNumExplicitOperands() < 2 ||
+          !DefMI->getOperand(1).isReg())
+        return LLT{};
+      ConditionReg = DefMI->getOperand(1).getReg();
+      break;
+    default:
+      return LLT{};
+    }
+  }
+  return LLT{};
+}
+
+static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
+                                      MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_BRCOND ||
+      MI.getNumExplicitOperands() < 1 || !MI.getOperand(0).isReg() ||
+      !MI.getOperand(0).getReg().isVirtual())
+    return false;
+
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const Register ConditionReg = MI.getOperand(0).getReg();
+  const LLT ConditionTy = MRI.getType(ConditionReg);
+  if (!ConditionTy.isInteger())
+    return false;
+  if (isNativeIntegerType(ConditionTy))
+    return true;
+
+  LLT CarrierTy = getBrCondCompareCarrier(MRI, ConditionReg);
+  if (!CarrierTy.isValid() ||
+      CarrierTy.getScalarSizeInBits() < ConditionTy.getScalarSizeInBits())
+    CarrierTy = getNativeIntegerTypeForWidth(
+        ConditionTy.getScalarSizeInBits());
+  if (!CarrierTy.isValid() || hasExactType(ConditionTy, CarrierTy))
+    return false;
+
+  Helper.Observer.changingInstr(MI);
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+  Helper.widenScalarSrc(
+      MI, CarrierTy, 0,
+      Helper.MIRBuilder.getBoolExtOp(/*IsVec=*/false, /*IsFP=*/false));
+  Helper.Observer.changedInstr(MI);
+  return true;
 }
 
 // Fold every generated use of an unsupported floating-point constant. Integer
@@ -1018,8 +1089,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   BrCondActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
-  BrCondActions.widenScalarIf(nativeIntegerTypeNeedsPromotion(0),
-                              promoteToNativeIntegerType(0));
+  BrCondActions.customIf(nativeIntegerTypeNeedsPromotion(0));
 
   auto &SelectActions = GetActions(G_SELECT);
   SelectActions.legalIf([](const LegalityQuery &Query) {
@@ -1063,6 +1133,8 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_BRCOND:
+    return applyBrCondCarrierRewrite(Helper, MI);
   case TargetOpcode::G_FCONSTANT:
     return applyFConstantRewrite(Helper, MI);
   default:
