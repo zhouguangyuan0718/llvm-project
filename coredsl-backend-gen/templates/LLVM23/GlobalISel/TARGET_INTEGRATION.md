@@ -309,6 +309,10 @@ Inspect that, for native integers `[16, 32]`:
 - a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
   equal-width `i16` memory carrier, while its MMO width and alignment stay
   unchanged;
+- a plain non-atomic, non-volatile `G_LOAD/G_STORE i1` uses one complete slot
+  of the narrowest native integer (`i16` in this example), changing both value
+  and MMO types to `i16`; with `ZeroOrOneBooleanContent`, a load/store round
+  trip leaves no `G_AND 1` after artifact combining;
 - an `i8` load/store remains unsupported rather than being changed into a
   mismatched `value i16, memory i8` operation;
 - a native register type omitted from the corresponding `G_LOAD` or `G_STORE`

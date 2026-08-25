@@ -422,6 +422,25 @@ exact pointer-valued operation is directly legal without a separate capability
 field. The address pointer operand, alignment, ordering, and other MMO flags
 are preserved.
 
+Scalar `i1` is the one built-in exception during legalization. It occupies one
+complete slot of the narrowest type in `native_types.integer_widths`, provided
+that exact type is also available to the corresponding `G_LOAD` or `G_STORE`
+constraint. Both the value and MMO type are changed to that storage type. For
+example, a target whose narrowest native integer is `i8` gets one byte per
+boolean rather than packing eight booleans into one byte:
+
+```text
+G_LOAD  i1, memory i1  -> G_LOAD  i8, memory i8
+G_STORE i1, memory i1  -> G_STORE i8, memory i8
+```
+
+This policy assumes the target ABI allocates and aligns every scalar `i1`
+object as that complete integer slot, and that stored boolean carriers obey
+`ZeroOrOneBooleanContent`. The generated load records that zero-extension
+fact with `G_ASSERT_ZEXT`; the artifact combiner can consequently remove the
+temporary `i1` trunc/extension pair without generating `G_AND 1`. Atomic,
+volatile, vector, and multi-MMO boolean memory operations are not rewritten.
+
 When a floating-point type is not directly supported but the exact same-width
 integer is present in that opcode's index-0 constraint, the representation is
 changed without changing the access width. LLVM clears load range metadata
@@ -432,8 +451,9 @@ G_LOAD  fN              -> G_LOAD iN; G_BITCAST iN to fN
 G_STORE fN              -> G_BITCAST fN to iN; G_STORE iN
 ```
 
-Here `fN` and `iN` have identical bit widths. There is deliberately no integer
-widening rule for memory operations: an unsupported `G_LOAD/G_STORE i8` does
+Here `fN` and `iN` have identical bit widths. Except for the scalar `i1`
+storage rule above, there is deliberately no integer widening rule for memory
+operations: an unsupported `G_LOAD/G_STORE i8` does
 not become a mismatched `value i16, memory i8` operation. When `fN` is also not
 a native floating-point register type, a stored `G_FCONSTANT` can subsequently
 fold with its generated bitcast into a `G_CONSTANT`, using the same

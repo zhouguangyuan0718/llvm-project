@@ -424,6 +424,88 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
   };
 }
 
+// Scalar i1 objects occupy one complete slot of the target's narrowest native
+// integer type. G_LOAD/G_STORE must both support that type so the storage
+// representation is independent of opcode-specific candidate ordering.
+static LLT getI1MemoryStorageType() {
+  const LLT StorageTy = getNativeIntegerTypeForWidth(1);
+  if (!StorageTy.isValid())
+    return LLT{};
+  const unsigned StorageBits = StorageTy.getScalarSizeInBits();
+  const LLT LoadTy = getOpcodeIntegerTypeForWidth(
+      TargetOpcode::G_LOAD, 0, StorageBits);
+  const LLT StoreTy = getOpcodeIntegerTypeForWidth(
+      TargetOpcode::G_STORE, 0, StorageBits);
+  if (!hasExactType(StorageTy, LoadTy) ||
+      !hasExactType(StorageTy, StoreTy))
+    return LLT{};
+  return StorageTy;
+}
+
+static LegalityPredicate plainI1MemoryNeedsStoragePromotion() {
+  return [](const LegalityQuery &Query) {
+    if (!hasPlainScalarMemoryShape(Query))
+      return false;
+    const LLT ValueTy = Query.Types[0];
+    return ValueTy.isInteger(1) && getI1MemoryStorageType().isValid();
+  };
+}
+
+// ZeroOrOneBooleanContent is a target contract for every boolean carrier, and
+// the widened memory representation stores that complete carrier. Assert the
+// same invariant after a load so later artifact combining can remove the
+// temporary i1 trunc/extension pair without introducing G_AND 1.
+static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
+                                        MachineInstr &MI) {
+  if ((MI.getOpcode() != TargetOpcode::G_LOAD &&
+       MI.getOpcode() != TargetOpcode::G_STORE) ||
+      MI.getNumExplicitOperands() < 2 || MI.memoperands().size() != 1)
+    return false;
+
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  MachineMemOperand &MMO = **MI.memoperands_begin();
+  if (MMO.isAtomic() || MMO.isVolatile() ||
+      !MMO.getMemoryType().isInteger(1))
+    return false;
+
+  const LLT StorageTy = getI1MemoryStorageType();
+  if (!StorageTy.isValid())
+    return false;
+
+  MachineFunction &MF = Helper.MIRBuilder.getMF();
+  MachineMemOperand *StorageMMO = MF.getMachineMemOperand(
+      &MMO, MMO.getPointerInfo(), StorageTy);
+  StorageMMO->clearRanges();
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+
+  if (MI.getOpcode() == TargetOpcode::G_LOAD) {
+    const Register OldDstReg = MI.getOperand(0).getReg();
+    const Register PointerReg = MI.getOperand(1).getReg();
+    if (!OldDstReg.isVirtual() || !PointerReg.isValid() ||
+        !MRI.getType(OldDstReg).isInteger(1))
+      return false;
+
+    auto StorageLoad =
+        Helper.MIRBuilder.buildLoad(StorageTy, PointerReg, *StorageMMO);
+    auto Asserted = Helper.MIRBuilder.buildAssertZExt(
+        StorageTy, StorageLoad, /*Size=*/1);
+    Helper.MIRBuilder.buildTrunc(OldDstReg, Asserted);
+  } else {
+    const Register OldValueReg = MI.getOperand(0).getReg();
+    const Register PointerReg = MI.getOperand(1).getReg();
+    if (!OldValueReg.isVirtual() || !PointerReg.isValid() ||
+        !MRI.getType(OldValueReg).isInteger(1))
+      return false;
+
+    auto StorageValue =
+        Helper.MIRBuilder.buildZExt(StorageTy, OldValueReg);
+    Helper.MIRBuilder.buildStore(StorageValue, PointerReg, *StorageMMO);
+  }
+
+  MI.eraseFromParent();
+  return true;
+}
+
 // Legalization visits ordinary instructions bottom-up, so G_BRCOND normally
 // chooses a carrier before its defining compare is widened. Predict the
 // compare's eventual result carrier to keep both instructions on one type and
@@ -890,6 +972,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &MemoryActions = GetActionsFor({G_LOAD, G_STORE});
   MemoryActions.legalIf(isLegalPlainScalarMemoryValue);
+  MemoryActions.customIf(plainI1MemoryNeedsStoragePromotion());
   MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
                           bitcastFloatToSameWidthInteger(0));
   MemoryActions.fallback();
@@ -1133,6 +1216,9 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_LOAD:
+  case TargetOpcode::G_STORE:
+    return applyI1MemoryStorageRewrite(Helper, MI);
   case TargetOpcode::G_BRCOND:
     return applyBrCondCarrierRewrite(Helper, MI);
   case TargetOpcode::G_FCONSTANT:
