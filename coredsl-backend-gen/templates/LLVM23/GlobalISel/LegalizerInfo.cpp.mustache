@@ -12,6 +12,7 @@
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/Constants.h"
@@ -330,6 +331,22 @@ static bool isNativeIntegerTruncation(const LegalityQuery &Query) {
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
+// This target policy deliberately treats the high bits of an integer
+// extension as unspecified. Keep the original source and destination types,
+// but normalize the semantic G_ZEXT/G_SEXT opcodes to G_ANYEXT before
+// instruction selection.
+static bool applyIntegerAnyExtensionRewrite(LegalizerHelper &Helper,
+                                            MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_ZEXT &&
+      MI.getOpcode() != TargetOpcode::G_SEXT)
+    return false;
+
+  Helper.Observer.changingInstr(MI);
+  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_ANYEXT));
+  Helper.Observer.changedInstr(MI);
+  return true;
+}
+
 static bool isNativeFloatExtension(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
@@ -501,7 +518,7 @@ static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
       return false;
 
     auto StorageValue =
-        Helper.MIRBuilder.buildZExt(StorageTy, OldValueReg);
+        Helper.MIRBuilder.buildAnyExt(StorageTy, OldValueReg);
     Helper.MIRBuilder.buildStore(StorageValue, PointerReg, *StorageMMO);
   }
 
@@ -581,9 +598,7 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
 
   Helper.Observer.changingInstr(MI);
   Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-  Helper.widenScalarSrc(
-      MI, CarrierTy, 0,
-      Helper.MIRBuilder.getBoolExtOp(/*IsVec=*/false, /*IsFP=*/false));
+  Helper.widenScalarSrc(MI, CarrierTy, 0, TargetOpcode::G_ANYEXT);
   Helper.Observer.changedInstr(MI);
   return true;
 }
@@ -1124,12 +1139,14 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return getActionDefinitionsBuilder(Opcodes);
   };
 
-  auto &ExtActions =
-      GetActionsFor({G_ANYEXT, G_ZEXT, G_SEXT});
-  ExtActions.legalIf([](const LegalityQuery &Query) {
+  auto IsSupportedIntegerExtension = [](const LegalityQuery &Query) {
     return isGeneratedIntegerExtension(Query) ||
            isNativeIntegerExtension(Query);
-  });
+  };
+  auto &AnyExtActions = GetActions(G_ANYEXT);
+  AnyExtActions.legalIf(IsSupportedIntegerExtension);
+  auto &DefinedExtActions = GetActionsFor({G_ZEXT, G_SEXT});
+  DefinedExtActions.customIf(IsSupportedIntegerExtension);
 
   auto &TruncActions = GetActions(G_TRUNC);
   TruncActions.legalIf([](const LegalityQuery &Query) {
@@ -1393,6 +1410,9 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_ZEXT:
+  case TargetOpcode::G_SEXT:
+    return applyIntegerAnyExtensionRewrite(Helper, MI);
   case TargetOpcode::G_LOAD:
   case TargetOpcode::G_STORE:
     return applyI1MemoryStorageRewrite(Helper, MI);

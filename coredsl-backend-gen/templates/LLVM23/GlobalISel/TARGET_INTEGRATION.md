@@ -317,8 +317,8 @@ Inspect that, for native integers `[16, 32]`:
   mismatched `value i16, memory i8` operation;
 - a native register type omitted from the corresponding `G_LOAD` or `G_STORE`
   index-0 constraint is not directly legal for that memory opcode;
-- `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
-  signed extension;
+- `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16`; any
+  generated signed extension is normalized to `G_ANYEXT`;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
   indirect branches, pointer `G_PHI`, and exact pointer-valued loads/stores
   pass type legalization unchanged and remain covered by instruction
@@ -336,8 +336,8 @@ Inspect that, for native integers `[16, 32]`:
   contains only `G_ICMP i16` and `G_STORE i16` after artifact combining, with
   no `G_AND` mask;
 - `G_BRCOND` accepts both `i16` and `i32` conditions directly; a standalone
-  `i1` or `i8` condition is promoted to `i16` with LLVM's boolean extension
-  operation, using the complete native integer list rather than an
+  `i1` or `i8` condition is promoted to `i16` with `G_ANYEXT`, using the
+  complete native integer list rather than an
   opcode-specific capability subset;
 - a branch using an integer `G_ICMP` result chooses the same predicted carrier
   as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an
@@ -353,9 +353,10 @@ Then run through instruction selection:
 
 The target selector or lowering must cover every built-in opcode that can reach
 it, including `G_FCMP`, `G_ICMP`, `G_BRCOND`, `G_BR`, and `G_PHI`, as well as
-`G_BITCAST`, integer extension/truncation, and the generated floating-point
-extension/truncation artifacts introduced by the policy. It does not need a
-selector pattern for `G_FMAXIMUM` or scalar `G_SELECT` because generated
+`G_BITCAST`, `G_ANYEXT`, integer truncation, and the generated floating-point
+extension/truncation artifacts introduced by the policy. `G_ZEXT` and `G_SEXT`
+do not reach the selector for supported integer extension pairs. It does not
+need a selector pattern for `G_FMAXIMUM` or scalar `G_SELECT` because generated
 legalization eliminates both.
 Successfully constructing `Toy16LegalizerInfo` alone does not make those
 operations selectable.

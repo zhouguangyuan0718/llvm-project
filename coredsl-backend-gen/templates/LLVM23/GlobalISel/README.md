@@ -295,8 +295,9 @@ The following scalar and pointer-carrier rules are always emitted:
   `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FCEIL`, `G_FFLOOR`, `G_FRINT`,
   `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-native promotion for unsupported
   `G_FADD`, `G_FSUB`, `G_FMUL`, and `G_FDIV` types;
-- scalar casts: native integer `G_ANYEXT`/`G_ZEXT`/`G_SEXT`/`G_TRUNC` pairs,
-  native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
+- scalar casts: supported integer `G_ANYEXT` pairs and `G_TRUNC`; `G_ZEXT` and
+  `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`; native
+  `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
   `G_FPTOUI` when their floating-point side is native;
 - pointer representation: `G_PTR_ADD`, `G_INTTOPTR`, `G_PTRTOINT`; their
   integer operand or result follows the native integer-width policy;
@@ -339,17 +340,26 @@ patterns with zero and therefore requires an integer carrier at least as wide
 as the floating-point value. Every generated `G_SELECT` then takes the same CFG
 path above, so neither `G_FMAXIMUM` nor `G_SELECT` reaches the selector.
 
+The integer extension policy deliberately discards the high-bit guarantee of
+`G_ZEXT` and `G_SEXT`: once their source/destination pair is supported, custom
+legalization changes only the opcode to `G_ANYEXT`. This is appropriate only
+when those high bits are unobservable, or when the target independently
+guarantees the required register contents. It also applies to extensions
+introduced by generic widening, not only to casts originating directly in IR.
+LLVM may first fold an extension that participates in a legalization-artifact
+chain; only an extension that survives those semantics-preserving combines
+reaches this custom opcode rewrite.
+
 When the target declares `ZeroOrOneBooleanContent`, legalization artifacts from
 an original `icmp -> zext -> store` chain can be combined away after widening.
 For an input and store carrier of `i16`, the legal form is one `G_ICMP i16`
 followed by `G_STORE i16`; no mask with constant one is required. Other boolean
-content conventions cannot make that promise because the mask may be needed to
-preserve the original zero-extension semantics.
+content conventions do not satisfy the generated boolean-memory contract.
 
 `G_BRCOND` accepts every native integer condition directly. A condition whose
 integer width is missing is promoted to the narrowest native integer at least
-as wide as the original condition; LLVM's generic legalizer uses its boolean
-extension operation for this rewrite. This covers both the usual promoted `i1`
+as wide as the original condition; the custom branch rewrite uses `G_ANYEXT`
+for this carrier conversion. This covers both the usual promoted `i1`
 condition and branches driven by an already-native wider integer. Non-integer
 conditions and integer conditions wider than every native type fail closed.
 Opcode-specific capability constraints do not restrict this rule.
@@ -363,10 +373,13 @@ temporary `G_TRUNC`/boolean-extension chain to `G_ICMP i64` followed directly
 by `G_BRCOND i64` rather than retaining an `i64`-to-`i16` conversion.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
-promoted to the narrowest native integer with the generic legalizer's signed
-extension, matching pointer-offset semantics. `G_INTTOPTR` similarly promotes
-its integer input, using zero extension; `G_PTRTOINT` promotes a missing integer
-result width and leaves a truncation for users of the original result.
+promoted to the narrowest native integer; the generic legalizer may first
+create a signed extension, but this policy normalizes it to `G_ANYEXT`.
+`G_INTTOPTR` promotion is normalized in the same way. `G_PTRTOINT` promotes a
+missing integer result width and leaves a truncation for users of the original
+result. Targets relying on signed pointer offsets or zero-filled pointer bits
+must not use this relaxed extension policy without an equivalent target-side
+guarantee.
 
 The direct pointer-carrier group has no type mutation because pointer types are
 not part of this compact native scalar input. Declaring these GMIR operations
@@ -417,11 +430,12 @@ representation-safe for selection and is not applied to numerical
 floating-point operations.
 `G_PHI` promotes integer values but does not bitcast unsupported float values.
 
-The templates also mark the artifacts introduced by this policy as legal:
-integer extensions to a native carrier, the inverse truncations, equal-width
-integer/floating-point bitcasts, and the `G_FPEXT`/`G_FPTRUNC` pair between an
-unsupported low IEEE type and its selected native computation type. Native
-integer and floating-point conversion pairs listed above are legal as well.
+The templates also cover the artifacts introduced by this policy: integer
+extensions to a native carrier are normalized to `G_ANYEXT`, while inverse
+truncations and equal-width integer/floating-point bitcasts are legal. The
+`G_FPEXT`/`G_FPTRUNC` pair between an unsupported low IEEE type and its selected
+native computation type remains legal, as do the native floating-point
+conversion pairs listed above.
 
 A pre-isel generic opcode not listed by this generated policy is marked
 `alwaysLegal()` and passes type legalization unchanged. An opcode that is
