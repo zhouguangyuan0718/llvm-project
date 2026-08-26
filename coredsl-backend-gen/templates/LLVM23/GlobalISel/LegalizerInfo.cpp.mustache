@@ -7,6 +7,8 @@
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/LowLevelTypeUtils.h"
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineOperand.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -17,6 +19,7 @@
 
 #include <cassert>
 #include <initializer_list>
+#include <iterator>
 
 namespace llvm {
 
@@ -585,6 +588,173 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   return true;
 }
 
+// Expand a scalar select into explicit control flow. The original destination
+// remains in SSA form and is defined by a G_PHI in the merge block:
+//
+//   G_BRCOND %condition, %true
+//   G_BR %false
+// true:
+//   G_BR %merge
+// false:
+//   G_BR %merge
+// merge:
+//   %dst = G_PHI %true-value, %true, %false-value, %false
+//
+// This is deliberately a general G_SELECT legalization. It is also used by
+// the G_FMAXIMUM expansion below, but is not restricted to selects introduced
+// by that expansion.
+static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
+                                          MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_SELECT ||
+      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 4 ||
+      !MI.getOperand(0).isReg() || !MI.getOperand(1).isReg() ||
+      !MI.getOperand(2).isReg() || !MI.getOperand(3).isReg())
+    return false;
+
+  const Register DstReg = MI.getOperand(0).getReg();
+  const Register ConditionReg = MI.getOperand(1).getReg();
+  const Register TrueReg = MI.getOperand(2).getReg();
+  const Register FalseReg = MI.getOperand(3).getReg();
+  if (!DstReg.isVirtual() || !ConditionReg.isVirtual() ||
+      !TrueReg.isValid() || !FalseReg.isValid())
+    return false;
+
+  MachineIRBuilder &Builder = Helper.MIRBuilder;
+  MachineRegisterInfo &MRI = *Builder.getMRI();
+  const LLT DstTy = MRI.getType(DstReg);
+  if (!DstTy.isValid() || !hasExactType(DstTy, MRI.getType(TrueReg)) ||
+      !hasExactType(DstTy, MRI.getType(FalseReg)) ||
+      !MRI.getType(ConditionReg).isInteger())
+    return false;
+
+  MachineBasicBlock &HeadMBB = *MI.getParent();
+  MachineFunction &MF = Builder.getMF();
+  const DebugLoc DL = MI.getDebugLoc();
+
+  // splitAt keeps MI in HeadMBB and moves every following instruction,
+  // including terminators, into MergeMBB. It also transfers the old CFG
+  // successors and repairs their PHIs.
+  MachineBasicBlock *MergeMBB = HeadMBB.splitAt(MI, /*UpdateLiveIns=*/true);
+  if (MergeMBB == &HeadMBB) {
+    MergeMBB = MF.CreateMachineBasicBlock(HeadMBB.getBasicBlock());
+    MF.insert(std::next(HeadMBB.getIterator()), MergeMBB);
+    MergeMBB->transferSuccessorsAndUpdatePHIs(&HeadMBB);
+  } else {
+    HeadMBB.removeSuccessor(MergeMBB);
+  }
+
+  MachineBasicBlock *TrueMBB =
+      MF.CreateMachineBasicBlock(HeadMBB.getBasicBlock());
+  MachineBasicBlock *FalseMBB =
+      MF.CreateMachineBasicBlock(HeadMBB.getBasicBlock());
+  MF.insert(MergeMBB->getIterator(), TrueMBB);
+  MF.insert(MergeMBB->getIterator(), FalseMBB);
+
+  HeadMBB.addSuccessor(TrueMBB);
+  HeadMBB.addSuccessor(FalseMBB);
+  TrueMBB->addSuccessor(MergeMBB);
+  FalseMBB->addSuccessor(MergeMBB);
+
+  MI.eraseFromParent();
+
+  Builder.setInsertPt(HeadMBB, HeadMBB.end());
+  Builder.setDebugLoc(DL);
+  Builder.buildBrCond(ConditionReg, *TrueMBB);
+  Builder.buildBr(*FalseMBB);
+
+  Builder.setInsertPt(*TrueMBB, TrueMBB->end());
+  Builder.buildBr(*MergeMBB);
+  Builder.setInsertPt(*FalseMBB, FalseMBB->end());
+  Builder.buildBr(*MergeMBB);
+
+  Builder.setInsertPt(*MergeMBB, MergeMBB->begin());
+  auto Phi = Builder.buildInstr(TargetOpcode::G_PHI).addDef(DstReg);
+  Phi.addUse(TrueReg).addMBB(TrueMBB);
+  Phi.addUse(FalseReg).addMBB(FalseMBB);
+
+  MF.getProperties().resetNoPHIs();
+  return true;
+}
+
+// Force G_FMAXIMUM through the comparison/select form even when the target
+// happens to declare G_FMAXNUM(_IEEE) legal. The extra selects preserve the
+// llvm.maximum contract: NaNs propagate and +0.0 is greater than -0.0. Fast
+// math flags remove the corresponding repair paths.
+static bool applyFMaximumSelectRewrite(LegalizerHelper &Helper,
+                                       MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_FMAXIMUM ||
+      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 3 ||
+      !MI.getOperand(0).isReg() || !MI.getOperand(1).isReg() ||
+      !MI.getOperand(2).isReg())
+    return false;
+
+  const Register DstReg = MI.getOperand(0).getReg();
+  const Register LHSReg = MI.getOperand(1).getReg();
+  const Register RHSReg = MI.getOperand(2).getReg();
+  if (!DstReg.isVirtual() || !LHSReg.isValid() || !RHSReg.isValid())
+    return false;
+
+  MachineIRBuilder &Builder = Helper.MIRBuilder;
+  MachineRegisterInfo &MRI = *Builder.getMRI();
+  const LLT Ty = MRI.getType(DstReg);
+  const LLT CondTy = getNativeIntegerTypeForWidth(1);
+  if (!Ty.isFloat() || !CondTy.isValid() ||
+      !hasExactType(Ty, MRI.getType(LHSReg)) ||
+      !hasExactType(Ty, MRI.getType(RHSReg)))
+    return false;
+  const LLT BitsCmpTy =
+      getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
+  if (!MI.getFlag(MachineInstr::FmNsz) && !BitsCmpTy.isValid())
+    return false;
+
+  Builder.setInstrAndDebugLoc(MI);
+  const unsigned Flags = MI.getFlags();
+  Register Result =
+      Builder
+          .buildSelect(Ty,
+                       Builder.buildFCmp(CmpInst::FCMP_OGT, CondTy, LHSReg,
+                                         RHSReg),
+                       LHSReg, RHSReg, Flags)
+          .getReg(0);
+
+  if (!MI.getFlag(MachineInstr::FmNoNans)) {
+    auto IsOrdered =
+        Builder.buildFCmp(CmpInst::FCMP_ORD, CondTy, LHSReg, RHSReg);
+    APFloat NaNValue = APFloat::getNaN(getFltSemanticForLLT(Ty));
+    Register NaN = Builder.buildFConstant(Ty, NaNValue).getReg(0);
+    Result = Builder.buildSelect(Ty, IsOrdered, Result, NaN, Flags).getReg(0);
+  }
+
+  if (!MI.getFlag(MachineInstr::FmNsz)) {
+    Register Zero = Builder.buildFConstant(Ty, 0.0).getReg(0);
+    auto ResultIsZero =
+        Builder.buildFCmp(CmpInst::FCMP_OEQ, CondTy, Result, Zero);
+    const LLT BitsTy = LLT::integer(Ty.getScalarSizeInBits());
+    auto LHSBits = Builder.buildBitcast(BitsTy, LHSReg);
+    auto RHSBits = Builder.buildBitcast(BitsTy, RHSReg);
+    auto ZeroBits = Builder.buildConstant(BitsTy, 0);
+    auto LHSIsPositiveZero = Builder.buildICmp(
+        CmpInst::ICMP_EQ, BitsCmpTy, LHSBits, ZeroBits);
+    Register PreferLHS =
+        Builder.buildSelect(Ty, LHSIsPositiveZero, LHSReg, Result, Flags)
+            .getReg(0);
+    auto RHSIsPositiveZero = Builder.buildICmp(
+        CmpInst::ICMP_EQ, BitsCmpTy, RHSBits, ZeroBits);
+    Register PreferPositiveZero =
+        Builder
+            .buildSelect(Ty, RHSIsPositiveZero, RHSReg, PreferLHS, Flags)
+            .getReg(0);
+    Result = Builder
+                 .buildSelect(Ty, ResultIsZero, PreferPositiveZero, Result,
+                              Flags)
+                 .getReg(0);
+  }
+
+  Builder.buildCopy(DstReg, Result);
+  MI.eraseFromParent();
+  return true;
+}
+
 // Fold every generated use of an unsupported floating-point constant. Integer
 // carrier bitcasts become bit-identical G_CONSTANTs, while numeric promotion
 // extensions become exactly extended native G_FCONSTANTs. This removes the
@@ -1090,12 +1260,19 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &FloatActions = GetActionsFor({
       G_FREM, G_FMA, G_FMAD, G_FNEG, G_FABS, G_FCANONICALIZE, G_FMINNUM,
-      G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM,
+      G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM,
       G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
       G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeFloatType(Query, 0);
   });
+
+  auto &FMaximumActions = GetActions(G_FMAXIMUM);
+  FMaximumActions.customIf([](const LegalityQuery &Query) {
+    return isOpcodeFloatType(Query, 0);
+  });
+  FMaximumActions.widenScalarIf(floatTypeNeedsPromotion(0),
+                                promoteFloatType(0));
 
   auto &FCopySignActions = GetActions(G_FCOPYSIGN);
   FCopySignActions.legalIf([](const LegalityQuery &Query) {
@@ -1175,7 +1352,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   BrCondActions.customIf(nativeIntegerTypeNeedsPromotion(0));
 
   auto &SelectActions = GetActions(G_SELECT);
-  SelectActions.legalIf([](const LegalityQuery &Query) {
+  SelectActions.customIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 &&
            (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
             isOpcodeFloatType(Query, 0)) &&
@@ -1221,6 +1398,10 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     return applyI1MemoryStorageRewrite(Helper, MI);
   case TargetOpcode::G_BRCOND:
     return applyBrCondCarrierRewrite(Helper, MI);
+  case TargetOpcode::G_SELECT:
+    return applySelectControlFlowRewrite(Helper, MI);
+  case TargetOpcode::G_FMAXIMUM:
+    return applyFMaximumSelectRewrite(Helper, MI);
   case TargetOpcode::G_FCONSTANT:
     return applyFConstantRewrite(Helper, MI);
   default:

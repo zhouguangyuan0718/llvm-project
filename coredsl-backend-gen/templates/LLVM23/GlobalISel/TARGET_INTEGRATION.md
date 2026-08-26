@@ -320,9 +320,14 @@ Inspect that, for native integers `[16, 32]`:
 - `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16` with
   signed extension;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
-  indirect branches, pointer `G_PHI`/`G_SELECT`, and exact pointer-valued
-  loads/stores pass type legalization unchanged and remain covered by
-  instruction selection;
+  indirect branches, pointer `G_PHI`, and exact pointer-valued loads/stores
+  pass type legalization unchanged and remain covered by instruction
+  selection;
+- every accepted scalar `G_SELECT`, including a pointer-valued one, becomes a
+  `G_BRCOND`/`G_BR` diamond with a `G_PHI` in its merge block;
+- `nnan nsz G_FMAXIMUM f32` becomes one `G_FCMP ogt` followed by that control-
+  flow expansion; strict `G_FMAXIMUM` additionally retains NaN propagation and
+  `+0.0 > -0.0` repair paths, but leaves no `G_FMAXIMUM` or `G_SELECT`;
 - an unconditional `G_BR` passes legality unchanged;
 - an integer `icmp` result uses the same carrier as its legalized inputs:
   `(i1, i8)` and `(i1, i16)` become `(i16, i16)`, while `(i1, i32)` becomes
@@ -347,7 +352,10 @@ Then run through instruction selection:
 ```
 
 The target selector or lowering must cover every built-in opcode that can reach
-it, as well as `G_BITCAST`, integer extension/truncation, and the generated
-floating-point extension/truncation artifacts introduced by the policy.
+it, including `G_FCMP`, `G_ICMP`, `G_BRCOND`, `G_BR`, and `G_PHI`, as well as
+`G_BITCAST`, integer extension/truncation, and the generated floating-point
+extension/truncation artifacts introduced by the policy. It does not need a
+selector pattern for `G_FMAXIMUM` or scalar `G_SELECT` because generated
+legalization eliminates both.
 Successfully constructing `Toy16LegalizerInfo` alone does not make those
 operations selectable.

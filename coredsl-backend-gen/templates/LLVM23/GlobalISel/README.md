@@ -321,6 +321,24 @@ wider native type and independently promotes its integer result. The condition
 input of `G_SELECT` uses the smallest condition carrier. Pointer values are
 also accepted by `G_SELECT` and `G_PHI`.
 
+An accepted scalar `G_SELECT` is not left for instruction selection. Custom
+legalization splits its block into true, false, and merge blocks, emits
+`G_BRCOND`/`G_BR`, and defines the original destination with a `G_PHI` in the
+merge block. This applies to integer, floating-point, and pointer values and to
+all selects, not only selects introduced by another generated rule. Instructions
+after the select and the original CFG successors are moved to the merge block;
+successor PHIs and the machine-function `NoPHIs` property are updated.
+
+`G_FMAXIMUM` is custom-lowered through `G_FCMP` and `G_SELECT`, after promoting
+an unsupported low floating-point type when a wider opcode type is available.
+With `nnan nsz`, the expansion is the direct `ogt` compare/select form. Without
+those flags it adds ordered-NaN and signed-zero repair selects so that NaNs
+propagate and `+0.0` remains greater than `-0.0`, as required by
+`llvm.maximum`. Signed-zero repair compares the equal-width integer bit
+patterns with zero and therefore requires an integer carrier at least as wide
+as the floating-point value. Every generated `G_SELECT` then takes the same CFG
+path above, so neither `G_FMAXIMUM` nor `G_SELECT` reaches the selector.
+
 When the target declares `ZeroOrOneBooleanContent`, legalization artifacts from
 an original `icmp -> zext -> store` chain can be combined away after widening.
 For an input and store carrier of `i16`, the legal form is one `G_ICMP i16`
@@ -393,9 +411,10 @@ The resulting `G_CONSTANT iN` is promoted by the integer-width policy when
 list still fail closed for unsupported types; none are reinterpreted as
 integer arithmetic.
 
-`G_SELECT` may bitcast an unsupported floating-point selected value to an
-equal-width integer and then promote that integer. This is representation-safe
-for selection and is not applied to numerical floating-point operations.
+Before its CFG expansion, `G_SELECT` may bitcast an unsupported floating-point
+selected value to an equal-width integer and then promote that integer. This is
+representation-safe for selection and is not applied to numerical
+floating-point operations.
 `G_PHI` promotes integer values but does not bitcast unsupported float values.
 
 The templates also mark the artifacts introduced by this policy as legal:
@@ -520,7 +539,8 @@ LLVM-based input producer does not need to serialize through JSON text.
 6. Test every native integer, every gap below the largest integer, native and
    unsupported floating-point types, and a width above the largest integer.
 7. Inspect post-legalization MIR and run instruction selection for every
-   generated artifact, intrinsic, comparison, and consumer.
+   generated artifact, intrinsic, comparison, branch, and `G_PHI`; also verify
+   that `G_FMAXIMUM` and `G_SELECT` have been eliminated.
 8. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
    pass legalization unchanged, then independently confirm that the target can
    select, lower, or eliminate them.
