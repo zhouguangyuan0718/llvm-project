@@ -292,7 +292,7 @@ Inspect that, for native integers `[16, 32]`:
   remaining `G_BITCAST` when `f16` is not native;
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
   `f32` and truncated back to `f16`, and an `f16 G_FCMP` compares exactly
-  extended `f32` inputs;
+  extended `f32` inputs and returns `i32`;
 - the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
   wider global native float without listing it for `G_FDIV` does not make that
   type legal for division;
@@ -342,6 +342,8 @@ Inspect that, for native integers `[16, 32]`:
 - a branch using an integer `G_ICMP` result chooses the same predicted carrier
   as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an
   intervening conversion after artifact combining;
+- a branch using an `f32 G_FCMP` result likewise reaches `G_BRCOND i32`; an
+  `f16 G_FCMP` promoted to `f32` also returns and branches on `i32`;
 - a value wider than `i32` fails closed instead of narrowing.
 
 Then run through instruction selection:

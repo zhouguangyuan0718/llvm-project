@@ -155,6 +155,21 @@ static bool isOpcodeFloatType(const LegalityQuery &Query, unsigned TypeIdx) {
                               Ty.getScalarSizeInBits()));
 }
 
+// G_FCMP uses an integer result with exactly the same width as its legalized
+// floating-point inputs. Do not silently promote the result to a different
+// integer width: the target must expose the exact iN carrier for fN compares.
+static LLT getFCmpResultTypeForInput(LLT InputTy) {
+  if (!InputTy.isFloat())
+    return LLT{};
+  const unsigned Bits = InputTy.getScalarSizeInBits();
+  const LLT ResultTy = LLT::integer(Bits);
+  return hasExactType(
+             ResultTy,
+             getOpcodeIntegerTypeForWidth(TargetOpcode::G_FCMP, 0, Bits))
+             ? ResultTy
+             : LLT{};
+}
+
 [[maybe_unused]] static bool isNativeValueType(LLT Ty) {
   return Ty.isPointer() || isNativeIntegerType(Ty) || isNativeFloatType(Ty);
 }
@@ -249,6 +264,25 @@ static LegalizeMutation widenICmpResultToIntegerInputCarrier() {
         0, getOpcodeIntegerTypeForWidth(
                Query.Opcode, 1,
                Query.Types[1].getScalarSizeInBits()));
+  };
+}
+
+static LegalityPredicate fcmpResultNeedsFloatInputWidth() {
+  return [](const LegalityQuery &Query) {
+    if (Query.Types.size() < 2)
+      return false;
+    const LLT ResultTy = Query.Types[0];
+    const LLT RequiredTy = getFCmpResultTypeForInput(Query.Types[1]);
+    return ResultTy.isInteger() && RequiredTy.isValid() &&
+           ResultTy.getScalarSizeInBits() <
+               RequiredTy.getScalarSizeInBits();
+  };
+}
+
+static LegalizeMutation widenFCmpResultToFloatInputWidth() {
+  return [](const LegalityQuery &Query) {
+    return std::pair<unsigned, LLT>(
+        0, getFCmpResultTypeForInput(Query.Types[1]));
   };
 }
 
@@ -554,8 +588,18 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
         return getNativeIntegerTypeForWidth(1);
       return LLT{};
     }
-    case TargetOpcode::G_FCMP:
-      return getNativeIntegerTypeForWidth(1);
+    case TargetOpcode::G_FCMP: {
+      if (DefMI->getNumExplicitDefs() != 1 ||
+          DefMI->getNumExplicitOperands() < 4 ||
+          !DefMI->getOperand(2).isReg())
+        return LLT{};
+      const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
+      if (!InputTy.isFloat())
+        return LLT{};
+      const LLT CarrierTy = getOpcodeFloatTypeForWidth(
+          TargetOpcode::G_FCMP, 1, InputTy.getScalarSizeInBits());
+      return getFCmpResultTypeForInput(CarrierTy);
+    }
     case TargetOpcode::COPY:
     case TargetOpcode::G_TRUNC:
     case TargetOpcode::G_ANYEXT:
@@ -1353,14 +1397,15 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                             promoteIntegerType(1));
 
   auto &FCmpActions = GetActions(G_FCMP);
-  FCmpActions.legalIf([CondTy](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && hasExactType(Query.Types[0], CondTy) &&
-           isOpcodeFloatType(Query, 1);
+  FCmpActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isOpcodeFloatType(Query, 1) &&
+           hasExactType(Query.Types[0],
+                        getFCmpResultTypeForInput(Query.Types[1]));
   });
   FCmpActions.widenScalarIf(floatTypeNeedsPromotion(1),
                             promoteFloatType(1));
-  FCmpActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                            promoteIntegerType(0));
+  FCmpActions.widenScalarIf(fcmpResultNeedsFloatInputWidth(),
+                            widenFCmpResultToFloatInputWidth());
 
   auto &BrCondActions = GetActions(G_BRCOND);
   BrCondActions.legalIf([](const LegalityQuery &Query) {

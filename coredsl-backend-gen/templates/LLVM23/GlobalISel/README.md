@@ -318,9 +318,11 @@ therefore retain the smallest native integer result while their pointer type is
 unchanged. Non-integer results, non-integer/non-pointer inputs, result types
 wider than the required carrier, and widths exceeding every native integer fail
 closed. `G_FCMP` promotes an unsupported floating-point input to its narrowest
-wider native type and independently promotes its integer result. The condition
-input of `G_SELECT` uses the smallest condition carrier. Pointer values are
-also accepted by `G_SELECT` and `G_PHI`.
+wider native type, then gives the comparison result the exact same width as
+that legalized input: `f16 -> i16`, `f32 -> i32`, and so on. The corresponding
+exact integer type must be supported for `G_FCMP`; a merely wider integer does
+not substitute for it. The condition input of `G_SELECT` uses the smallest
+condition carrier. Pointer values are also accepted by `G_SELECT` and `G_PHI`.
 
 An accepted scalar `G_SELECT` is not left for instruction selection. Custom
 legalization splits its block into true, false, and merge blocks, emits
@@ -367,10 +369,13 @@ Opcode-specific capability constraints do not restrict this rule.
 When a missing-width condition is defined by `G_ICMP` or `G_FCMP` (possibly
 through copies or integer casts), branch legalization predicts the compare's
 eventual result carrier instead of selecting the smallest carrier in
-isolation. This compensates for LLVM's bottom-up legalization order. With an
-`i64` integer comparison, the artifact combiner can therefore reduce the
-temporary `G_TRUNC`/boolean-extension chain to `G_ICMP i64` followed directly
-by `G_BRCOND i64` rather than retaining an `i64`-to-`i16` conversion.
+isolation. For `G_FCMP`, that prediction first determines the legalized float
+input and then uses its same-width integer type. This compensates for LLVM's
+bottom-up legalization order. With an `i64` integer comparison, the artifact
+combiner can therefore reduce the temporary `G_TRUNC`/boolean-extension chain
+to `G_ICMP i64` followed directly by `G_BRCOND i64` rather than retaining an
+`i64`-to-`i16` conversion; an `f32` comparison similarly reaches
+`G_BRCOND i32`.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
 promoted to the narrowest native integer; the generic legalizer may first
