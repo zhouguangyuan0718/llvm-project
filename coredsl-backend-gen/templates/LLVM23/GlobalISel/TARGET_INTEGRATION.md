@@ -293,6 +293,9 @@ Inspect that, for native integers `[16, 32]`:
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
   `f32` and truncated back to `f16`, and an `f16 G_FCMP` compares exactly
   extended `f32` inputs and returns `i32`;
+- an exact floating-point vector `G_FADD`, such as `v4f32`, passes legalization
+  unchanged without a vector entry in the scalar capability table; the target
+  selector must support that complete vector operation;
 - the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
   wider global native float without listing it for `G_FDIV` does not make that
   type legal for division;

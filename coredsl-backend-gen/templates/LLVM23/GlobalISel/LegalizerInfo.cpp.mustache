@@ -1314,8 +1314,18 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
            getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()).isValid();
   });
 
+  auto &FAddActions = GetActions(G_FADD);
+  FAddActions.legalIf([](const LegalityQuery &Query) {
+    if (Query.Types.empty())
+      return false;
+    const LLT Ty = Query.Types[0];
+    return Ty.isFloatVector() || isOpcodeFloatType(Query, 0);
+  });
+  FAddActions.widenScalarIf(floatTypeNeedsPromotion(0),
+                            promoteFloatType(0));
+
   auto &PromotableFloatActions =
-      GetActionsFor({G_FADD, G_FSUB, G_FMUL, G_FDIV});
+      GetActionsFor({G_FSUB, G_FMUL, G_FDIV});
   PromotableFloatActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeFloatType(Query, 0);
   });

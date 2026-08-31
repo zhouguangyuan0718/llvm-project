@@ -194,6 +194,12 @@ each index independently; for example, `G_SHL` uses index 0 for the shifted
 value/result and index 1 for the shift amount. The complete input example gives
 index 0 both `i16` and `i32` candidates while restricting index 1 to `i16`.
 
+`G_FADD` additionally accepts an exact floating-point vector type directly.
+This applies to both fixed and scalable vectors and is independent of the
+scalar `native_types` and opcode-specific candidate lists. The template does
+not widen vector elements, change their representation, or split the vector;
+instruction selection must support every vector form that reaches this rule.
+
 Plain non-atomic scalar `G_LOAD` and `G_STORE` use this same mechanism. Type
 index 0 describes both the value type and, under this template's required
 shape, the identical MMO memory type. Configure the two opcodes separately if
@@ -290,12 +296,13 @@ The following scalar and pointer-carrier rules are always emitted:
 - integer type indices 0 and 1: `G_SHL`, `G_LSHR`, `G_ASHR`;
 - integer result and input types: `G_CTLZ`, `G_CTLZ_ZERO_UNDEF`, `G_CTTZ`,
   `G_CTTZ_ZERO_UNDEF`, `G_CTPOP`;
-- floating-point constants and operations: `G_FCONSTANT`; native forms of
-  `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
+- floating-point constants and operations: `G_FCONSTANT`; native scalar forms
+  of `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
   `G_FMAD`, `G_FNEG`, `G_FABS`, `G_FCANONICALIZE`, all standard
   `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FCEIL`, `G_FFLOOR`, `G_FRINT`,
   `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-native promotion for unsupported
-  `G_FADD`, `G_FSUB`, `G_FMUL`, and `G_FDIV` types;
+  scalar `G_FADD`, `G_FSUB`, `G_FMUL`, and `G_FDIV` types; exact
+  floating-point vectors are also directly legal for `G_FADD`;
 - scalar casts: supported integer `G_ANYEXT` pairs and `G_TRUNC`; `G_ZEXT` and
   `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`; native
   `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
