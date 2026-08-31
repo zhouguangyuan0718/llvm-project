@@ -425,22 +425,23 @@ static bool isGeneratedFloatTruncation(const LegalityQuery &Query) {
   return isNativeFloatType(SrcTy) && !isNativeFloatType(DstTy);
 }
 
-// The built-in memory policy only handles an ordinary, non-atomic scalar value
-// and one MMO whose value and memory types are identical. Integer and floating-
-// point values use the G_LOAD/G_STORE opcode type constraints; pointer values
-// are directly legal. Indexed, atomic, vector, and multi-MMO operations remain
-// target-specific.
-static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
+// The built-in memory policy only handles an ordinary, non-atomic value and one
+// MMO whose value and memory types are identical. Scalar integer and floating-
+// point values use the G_LOAD/G_STORE opcode type constraints; scalar pointer
+// values and exact vector values are directly legal. Atomic and multi-MMO
+// operations remain target-specific.
+static bool hasPlainMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
     return false;
 
   const LLT ValueTy = Query.Types[0];
   const LLT PointerTy = Query.Types[1];
   const LegalityQuery::MemDesc &Memory = Query.MMODescrs[0];
-  if ((!ValueTy.isInteger() && !ValueTy.isFloat() && !ValueTy.isPointer()) ||
+  if ((!ValueTy.isInteger() && !ValueTy.isFloat() && !ValueTy.isPointer() &&
+       !ValueTy.isVector()) ||
       !PointerTy.isPointer() ||
       (!Memory.MemoryTy.isInteger() && !Memory.MemoryTy.isFloat() &&
-       !Memory.MemoryTy.isPointer()) ||
+       !Memory.MemoryTy.isPointer() && !Memory.MemoryTy.isVector()) ||
       Memory.Ordering != AtomicOrdering::NotAtomic ||
       Memory.FailureOrdering != AtomicOrdering::NotAtomic)
     return false;
@@ -448,11 +449,13 @@ static bool hasPlainScalarMemoryShape(const LegalityQuery &Query) {
   return hasExactType(ValueTy, Memory.MemoryTy);
 }
 
-static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
-  if (!hasPlainScalarMemoryShape(Query))
+static bool isLegalPlainMemoryValue(const LegalityQuery &Query) {
+  if (!hasPlainMemoryShape(Query))
     return false;
 
   const LLT ValueTy = Query.Types[0];
+  if (ValueTy.isVector())
+    return true;
   if (ValueTy.isInteger())
     return isOpcodeIntegerType(Query, 0);
   if (ValueTy.isPointer())
@@ -462,7 +465,7 @@ static bool isLegalPlainScalarMemoryValue(const LegalityQuery &Query) {
 
 static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
   return [](const LegalityQuery &Query) {
-    if (!hasPlainScalarMemoryShape(Query))
+    if (!hasPlainMemoryShape(Query))
       return false;
 
     const LLT ValueTy = Query.Types[0];
@@ -498,7 +501,7 @@ static LLT getI1MemoryStorageType() {
 
 static LegalityPredicate plainI1MemoryNeedsStoragePromotion() {
   return [](const LegalityQuery &Query) {
-    if (!hasPlainScalarMemoryShape(Query))
+    if (!hasPlainMemoryShape(Query))
       return false;
     const LLT ValueTy = Query.Types[0];
     return ValueTy.isInteger(1) && getI1MemoryStorageType().isValid();
@@ -1202,7 +1205,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   BitcastActions.legalIf(isGeneratedRepresentationBitcast);
 
   auto &MemoryActions = GetActionsFor({G_LOAD, G_STORE});
-  MemoryActions.legalIf(isLegalPlainScalarMemoryValue);
+  MemoryActions.legalIf(isLegalPlainMemoryValue);
   MemoryActions.customIf(plainI1MemoryNeedsStoragePromotion());
   MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
                           bitcastFloatToSameWidthInteger(0));

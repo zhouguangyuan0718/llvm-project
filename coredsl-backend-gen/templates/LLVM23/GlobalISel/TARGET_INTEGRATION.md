@@ -309,6 +309,10 @@ Inspect that, for native integers `[16, 32]`:
 - a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
   equal-width `i16` memory carrier, while its MMO width and alignment stay
   unchanged;
+- a plain non-atomic vector `G_LOAD/G_STORE`, such as `v4i16`, is directly legal
+  when its value type and MMO memory type are identical; vector types do not
+  need entries in the scalar index-0 candidate list and are not widened,
+  bitcast, or split by this template;
 - a plain non-atomic, non-volatile `G_LOAD/G_STORE i1` uses one complete slot
   of the narrowest native integer (`i16` in this example), changing both value
   and MMO types to `i16`; with `ZeroOrOneBooleanContent`, a load/store round

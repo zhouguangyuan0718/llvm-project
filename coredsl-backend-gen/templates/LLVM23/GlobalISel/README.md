@@ -199,10 +199,11 @@ index 0 describes both the value type and, under this template's required
 shape, the identical MMO memory type. Configure the two opcodes separately if
 loads and stores have different capabilities, or give them identical lists if
 the target uses one common memory capability set. Every configured width must
-also be globally native. Exact pointer-valued loads and stores remain directly
-legal regardless of the index-0 constraint; their address operand is also a
-pointer and is preserved. The generated policy does not infer extending loads
-or truncating stores.
+also be globally native. Exact pointer-valued and vector-valued loads and stores
+remain directly legal regardless of the index-0 constraint; their address
+operand is a pointer and is preserved. Vector types are not inferred from the
+scalar candidate lists and are not transformed element-by-element. The
+generated policy does not infer extending loads or truncating stores.
 
 A floating-point load/store type absent from that opcode's
 floating-point candidates may still use an equal-width integer representation
@@ -304,7 +305,7 @@ The following scalar and pointer-carrier rules are always emitted:
 - direct pointer carriers: `G_FRAME_INDEX`, `G_GLOBAL_VALUE`,
   `G_CONSTANT_POOL`, `G_BLOCK_ADDR`, `G_JUMP_TABLE`, `G_BRINDIRECT`;
 - untyped unconditional control flow: `G_BR`;
-- plain non-atomic scalar memory: `G_LOAD`, `G_STORE`;
+- plain non-atomic scalar and exact vector memory: `G_LOAD`, `G_STORE`;
 - condition and consumers: `G_ICMP`, `G_FCMP`, `G_BRCOND`, `G_SELECT`, `G_PHI`.
 
 The smallest native integer is the default condition carrier where there is no
@@ -452,13 +453,14 @@ Intrinsics absent from `operation_type_constraints` similarly pass unchanged,
 while listed intrinsics must satisfy one candidate type rule for every
 configured scalar argument.
 
-Plain non-atomic scalar `G_LOAD` and `G_STORE` require identical value and MMO
-memory types. An integer or floating-point operation is directly legal only
-when its type is globally native and present in that opcode's index-0 type
-constraint (or inherited from `native_types` when no constraint exists). An
-exact pointer-valued operation is directly legal without a separate capability
-field. The address pointer operand, alignment, ordering, and other MMO flags
-are preserved.
+Plain non-atomic `G_LOAD` and `G_STORE` require identical value and MMO memory
+types. A scalar integer or floating-point operation is directly legal only when
+its type is globally native and present in that opcode's index-0 type constraint
+(or inherited from `native_types` when no constraint exists). Exact pointer and
+vector operations are directly legal without a separate capability field. The
+address pointer operand, alignment, ordering, and other MMO flags are preserved.
+This vector rule accepts both fixed and scalable vectors as complete values; it
+does not legalize their element types, split them, or use scalar carrier rules.
 
 Scalar `i1` is the one built-in exception during legalization. It occupies one
 complete slot of the narrowest type in `native_types.integer_widths`, provided
@@ -477,7 +479,9 @@ object as that complete integer slot, and that stored boolean carriers obey
 `ZeroOrOneBooleanContent`. The generated load records that zero-extension
 fact with `G_ASSERT_ZEXT`; the artifact combiner can consequently remove the
 temporary `i1` trunc/extension pair without generating `G_AND 1`. Atomic,
-volatile, vector, and multi-MMO boolean memory operations are not rewritten.
+volatile, and multi-MMO boolean memory operations are not rewritten. Vector
+boolean memory operations follow the exact-vector rule and do not use this
+scalar storage-slot rewrite.
 
 When a floating-point type is not directly supported but the exact same-width
 integer is present in that opcode's index-0 constraint, the representation is
@@ -497,10 +501,11 @@ a native floating-point register type, a stored `G_FCONSTANT` can subsequently
 fold with its generated bitcast into a `G_CONSTANT`, using the same
 constant-carrier rule described above.
 
-This built-in rule is deliberately limited to one-MMO, non-atomic scalar
-operations with exact value/memory type identity. Atomic, indexed, vector,
-multi-MMO, and mismatched value/memory operations fall back to the target's
-other rules rather than being inferred from register types.
+This built-in rule is deliberately limited to one-MMO, non-atomic operations
+with exact value/memory type identity. Scalar values use the configured
+capabilities and carrier rules, while vector values pass unchanged. Atomic,
+indexed, multi-MMO, and mismatched value/memory operations fall back to the
+target's other rules rather than being inferred from register types.
 
 The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
 `G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
