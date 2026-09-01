@@ -316,10 +316,12 @@ Inspect that, for native integers `[16, 32]`:
   when its value type and MMO memory type are identical; vector types do not
   need entries in the scalar index-0 candidate list and are not widened,
   bitcast, or split by this template;
-- a plain non-atomic, non-volatile `G_LOAD/G_STORE i1` uses one complete slot
-  of the narrowest native integer (`i16` in this example), changing both value
-  and MMO types to `i16`; with `ZeroOrOneBooleanContent`, a load/store round
-  trip leaves no `G_AND 1` after artifact combining;
+- a plain non-atomic, non-volatile `G_LOAD/G_STORE i1` still represents one
+  byte in memory; because this example's common load/store access type is
+  `i16`, a load masks the first byte and a store uses an `i16` read/modify/write
+  with `G_AND`/`G_OR` to preserve the adjacent byte; the target must permit the
+  widened access at the original byte alignment and use a little-endian
+  DataLayout;
 - an `i8` load/store remains unsupported rather than being changed into a
   mismatched `value i16, memory i8` operation;
 - a native register type omitted from the corresponding `G_LOAD` or `G_STORE`

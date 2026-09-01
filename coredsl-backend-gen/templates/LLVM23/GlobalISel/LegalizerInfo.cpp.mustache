@@ -481,39 +481,55 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
   };
 }
 
-// Scalar i1 objects occupy one complete slot of the target's narrowest native
-// integer type. G_LOAD/G_STORE must both support that type so the storage
-// representation is independent of opcode-specific candidate ordering.
-static LLT getI1MemoryStorageType() {
-  const LLT StorageTy = getNativeIntegerTypeForWidth(1);
-  if (!StorageTy.isValid())
-    return LLT{};
-  const unsigned StorageBits = StorageTy.getScalarSizeInBits();
-  const LLT LoadTy = getOpcodeIntegerTypeForWidth(
-      TargetOpcode::G_LOAD, 0, StorageBits);
-  const LLT StoreTy = getOpcodeIntegerTypeForWidth(
-      TargetOpcode::G_STORE, 0, StorageBits);
-  if (!hasExactType(StorageTy, LoadTy) ||
-      !hasExactType(StorageTy, StoreTy))
-    return LLT{};
-  return StorageTy;
+// Scalar i1 objects occupy exactly one byte in memory. Select the narrowest
+// byte-sized native integer type supported by both G_LOAD and G_STORE. If the
+// access is wider than one byte, the little-endian read/modify/write sequence
+// also needs mask and merge operations.
+static LLT getI1MemoryAccessType() {
+  unsigned BestWidth = 0;
+{{#native_types.integer_widths}}
+  {
+    constexpr unsigned CandidateWidth = {{.}};
+    const LLT CandidateTy = LLT::integer(CandidateWidth);
+    const bool HasExactMemoryAccess =
+        CandidateWidth >= 8 && CandidateWidth % 8 == 0 &&
+        hasExactType(CandidateTy, getOpcodeIntegerTypeForWidth(
+                                      TargetOpcode::G_LOAD, 0,
+                                      CandidateWidth)) &&
+        hasExactType(CandidateTy, getOpcodeIntegerTypeForWidth(
+                                      TargetOpcode::G_STORE, 0,
+                                      CandidateWidth));
+    const bool HasMask =
+        getOpcodeIntegerTypeForWidth(TargetOpcode::G_AND, 0,
+                                     CandidateWidth).isValid();
+    const bool HasWideMerge =
+        CandidateWidth <= 8 ||
+        (getOpcodeIntegerTypeForWidth(TargetOpcode::G_OR, 0,
+                                      CandidateWidth).isValid());
+    if (HasExactMemoryAccess && HasMask && HasWideMerge &&
+        (BestWidth == 0 || CandidateWidth < BestWidth))
+      BestWidth = CandidateWidth;
+  }
+{{/native_types.integer_widths}}
+  return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
 }
 
-static LegalityPredicate plainI1MemoryNeedsStoragePromotion() {
+static LegalityPredicate plainI1MemoryNeedsByteAccessRewrite() {
   return [](const LegalityQuery &Query) {
     if (!hasPlainMemoryShape(Query))
       return false;
     const LLT ValueTy = Query.Types[0];
-    return ValueTy.isInteger(1) && getI1MemoryStorageType().isValid();
+    return ValueTy.isInteger(1) && getI1MemoryAccessType().isValid();
   };
 }
 
-// ZeroOrOneBooleanContent is a target contract for every boolean carrier, and
-// the widened memory representation stores that complete carrier. Assert the
-// same invariant after a load so later artifact combining can remove the
-// temporary i1 trunc/extension pair without introducing G_AND 1.
-static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
-                                        MachineInstr &MI) {
+// The memory object remains one byte even when the target can only access a
+// wider integer. A widened load extracts the byte's boolean bit. A widened
+// store reads the surrounding bytes, clears the addressed byte, inserts 0 or
+// 1, and writes the complete access unit back. This is deliberately restricted
+// to non-atomic, non-volatile memory.
+static bool applyI1ByteMemoryRewrite(LegalizerHelper &Helper,
+                                     MachineInstr &MI) {
   if ((MI.getOpcode() != TargetOpcode::G_LOAD &&
        MI.getOpcode() != TargetOpcode::G_STORE) ||
       MI.getNumExplicitOperands() < 2 || MI.memoperands().size() != 1)
@@ -525,15 +541,38 @@ static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
       !MMO.getMemoryType().isInteger(1))
     return false;
 
-  const LLT StorageTy = getI1MemoryStorageType();
-  if (!StorageTy.isValid())
+  const LLT AccessTy = getI1MemoryAccessType();
+  if (!AccessTy.isValid())
+    return false;
+  const unsigned AccessBits = AccessTy.getScalarSizeInBits();
+  if (AccessBits < 8 || AccessBits % 8 != 0)
+    return false;
+  if (!Helper.MIRBuilder.getDataLayout().isLittleEndian())
     return false;
 
   MachineFunction &MF = Helper.MIRBuilder.getMF();
-  MachineMemOperand *StorageMMO = MF.getMachineMemOperand(
-      &MMO, MMO.getPointerInfo(), StorageTy);
-  StorageMMO->clearRanges();
   Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+
+  auto MakeAccessMMO = [&](MachineMemOperand::Flags Flags) {
+    if (AccessBits == 8) {
+      MachineMemOperand *AccessMMO = MF.getMachineMemOperand(
+          &MMO, MMO.getPointerInfo(), AccessTy);
+      AccessMMO->clearRanges();
+      return AccessMMO;
+    }
+
+    // Metadata and dereferenceability for the original byte do not describe
+    // the adjacent bytes touched by a widened access.
+    return MF.getMachineMemOperand(MMO.getPointerInfo(), Flags, AccessTy,
+                                   MMO.getBaseAlign());
+  };
+
+  const APInt One(AccessBits, 1);
+
+  auto ExtractBoolean = [&](Register AccessReg) {
+    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
+    return Helper.MIRBuilder.buildAnd(AccessTy, AccessReg, OneReg).getReg(0);
+  };
 
   if (MI.getOpcode() == TargetOpcode::G_LOAD) {
     const Register OldDstReg = MI.getOperand(0).getReg();
@@ -542,10 +581,13 @@ static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
         !MRI.getType(OldDstReg).isInteger(1))
       return false;
 
-    auto StorageLoad =
-        Helper.MIRBuilder.buildLoad(StorageTy, PointerReg, *StorageMMO);
+    MachineMemOperand *LoadMMO =
+        MakeAccessMMO(MachineMemOperand::MOLoad);
+    auto AccessLoad =
+        Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
+    const Register BooleanValue = ExtractBoolean(AccessLoad.getReg(0));
     auto Asserted = Helper.MIRBuilder.buildAssertZExt(
-        StorageTy, StorageLoad, /*Size=*/1);
+        AccessTy, BooleanValue, /*Size=*/1);
     Helper.MIRBuilder.buildTrunc(OldDstReg, Asserted);
   } else {
     const Register OldValueReg = MI.getOperand(0).getReg();
@@ -554,9 +596,33 @@ static bool applyI1MemoryStorageRewrite(LegalizerHelper &Helper,
         !MRI.getType(OldValueReg).isInteger(1))
       return false;
 
-    auto StorageValue =
-        Helper.MIRBuilder.buildAnyExt(StorageTy, OldValueReg);
-    Helper.MIRBuilder.buildStore(StorageValue, PointerReg, *StorageMMO);
+    auto ExtendedValue =
+        Helper.MIRBuilder.buildAnyExt(AccessTy, OldValueReg);
+    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
+    Register BooleanValue =
+        Helper.MIRBuilder
+            .buildAnd(AccessTy, ExtendedValue, OneReg)
+            .getReg(0);
+
+    MachineMemOperand *StoreMMO =
+        MakeAccessMMO(MachineMemOperand::MOStore);
+    if (AccessBits == 8) {
+      Helper.MIRBuilder.buildStore(BooleanValue, PointerReg, *StoreMMO);
+    } else {
+      MachineMemOperand *LoadMMO =
+          MakeAccessMMO(MachineMemOperand::MOLoad);
+      auto OldAccessValue =
+          Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
+
+      const APInt ByteMask = APInt::getLowBitsSet(AccessBits, 8);
+      auto PreserveMask =
+          Helper.MIRBuilder.buildConstant(AccessTy, ~ByteMask);
+      auto PreservedValue = Helper.MIRBuilder.buildAnd(
+          AccessTy, OldAccessValue, PreserveMask);
+      auto MergedValue = Helper.MIRBuilder.buildOr(
+          AccessTy, PreservedValue, BooleanValue);
+      Helper.MIRBuilder.buildStore(MergedValue, PointerReg, *StoreMMO);
+    }
   }
 
   MI.eraseFromParent();
@@ -1206,7 +1272,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &MemoryActions = GetActionsFor({G_LOAD, G_STORE});
   MemoryActions.legalIf(isLegalPlainMemoryValue);
-  MemoryActions.customIf(plainI1MemoryNeedsStoragePromotion());
+  MemoryActions.customIf(plainI1MemoryNeedsByteAccessRewrite());
   MemoryActions.bitcastIf(plainMemoryFloatNeedsIntegerBitcast(),
                           bitcastFloatToSameWidthInteger(0));
   MemoryActions.fallback();
@@ -1473,7 +1539,7 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     return applyIntegerAnyExtensionRewrite(Helper, MI);
   case TargetOpcode::G_LOAD:
   case TargetOpcode::G_STORE:
-    return applyI1MemoryStorageRewrite(Helper, MI);
+    return applyI1ByteMemoryRewrite(Helper, MI);
   case TargetOpcode::G_BRCOND:
     return applyBrCondCarrierRewrite(Helper, MI);
   case TargetOpcode::G_SELECT:

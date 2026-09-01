@@ -209,7 +209,8 @@ also be globally native. Exact pointer-valued and vector-valued loads and stores
 remain directly legal regardless of the index-0 constraint; their address
 operand is a pointer and is preserved. Vector types are not inferred from the
 scalar candidate lists and are not transformed element-by-element. The
-generated policy does not infer extending loads or truncating stores.
+generated policy does not infer extending loads or truncating stores, apart
+from the explicit one-byte scalar `i1` access expansion described below.
 
 A floating-point load/store type absent from that opcode's
 floating-point candidates may still use an equal-width integer representation
@@ -469,26 +470,45 @@ address pointer operand, alignment, ordering, and other MMO flags are preserved.
 This vector rule accepts both fixed and scalable vectors as complete values; it
 does not legalize their element types, split them, or use scalar carrier rules.
 
-Scalar `i1` is the one built-in exception during legalization. It occupies one
-complete slot of the narrowest type in `native_types.integer_widths`, provided
-that exact type is also available to the corresponding `G_LOAD` or `G_STORE`
-constraint. Both the value and MMO type are changed to that storage type. For
-example, a target whose narrowest native integer is `i8` gets one byte per
-boolean rather than packing eight booleans into one byte:
+Scalar `i1` is the one built-in exception during legalization. Its ABI memory
+object always occupies exactly one byte; booleans are not bit-packed. The
+legalizer selects the narrowest byte-sized integer type available to both the
+`G_LOAD` and `G_STORE` index-0 constraints. It also requires legalizable
+`G_AND` and, for an access wider than one byte, `G_OR` carriers. With an `i8`
+access type, the value and MMO are changed to `i8` and a mask canonicalizes the
+stored byte to zero or one:
 
 ```text
-G_LOAD  i1, memory i1  -> G_LOAD  i8, memory i8
-G_STORE i1, memory i1  -> G_STORE i8, memory i8
+G_LOAD  i1, memory i1  -> G_LOAD i8; G_AND 1; G_TRUNC to i1
+G_STORE i1, memory i1  -> G_ANYEXT to i8; G_AND 1; G_STORE i8
 ```
 
-This policy assumes the target ABI allocates and aligns every scalar `i1`
-object as that complete integer slot, and that stored boolean carriers obey
-`ZeroOrOneBooleanContent`. The generated load records that zero-extension
-fact with `G_ASSERT_ZEXT`; the artifact combiner can consequently remove the
-temporary `i1` trunc/extension pair without generating `G_AND 1`. Atomic,
-volatile, and multi-MMO boolean memory operations are not rewritten. Vector
-boolean memory operations follow the exact-vector rule and do not use this
-scalar storage-slot rewrite.
+When the common access type is wider, the address and byte layout do not
+change. A load reads the wider integer and masks the boolean bit from the first
+addressed byte. A store performs a non-atomic read/modify/write: it loads the
+wider integer, clears the first addressed byte, inserts a canonical zero or
+one, and stores the merged value. This compact rule supports little-endian
+targets only; a big-endian DataLayout is rejected. For an `i16` access the
+store is equivalent to:
+
+```text
+old    = G_LOAD i16, memory i16
+bool   = G_AND (G_ANYEXT i1), 0x0001
+keep   = G_AND old, 0xff00
+merged = G_OR keep, bool
+G_STORE merged, memory i16
+```
+
+This expansion assumes a widened access starting at any valid boolean byte
+address is permitted with the original alignment and may touch the adjacent
+bytes. The store preserves those bytes, but the read/modify/write is not safe
+for atomic or volatile memory and is not a synchronization mechanism. Metadata
+that described only the original byte is not copied to widened accesses. The
+generated load records its masked zero-extension fact with `G_ASSERT_ZEXT`.
+`ZeroOrOneBooleanContent` remains the boolean-carrier contract, while the
+explicit store mask makes the in-memory byte canonical. Atomic, volatile, and
+multi-MMO boolean operations are not rewritten. Vector boolean memory follows
+the exact-vector rule and does not use this scalar byte rewrite.
 
 When a floating-point type is not directly supported but the exact same-width
 integer is present in that opcode's index-0 constraint, the representation is
@@ -500,9 +520,9 @@ G_LOAD  fN              -> G_LOAD iN; G_BITCAST iN to fN
 G_STORE fN              -> G_BITCAST fN to iN; G_STORE iN
 ```
 
-Here `fN` and `iN` have identical bit widths. Except for the scalar `i1`
-storage rule above, there is deliberately no integer widening rule for memory
-operations: an unsupported `G_LOAD/G_STORE i8` does
+Here `fN` and `iN` have identical bit widths. Except for the scalar `i1` byte
+access expansion above, there is deliberately no integer widening rule for
+memory operations: an unsupported `G_LOAD/G_STORE i8` does
 not become a mismatched `value i16, memory i8` operation. When `fN` is also not
 a native floating-point register type, a stored `G_FCONSTANT` can subsequently
 fold with its generated bitcast into a `G_CONSTANT`, using the same
