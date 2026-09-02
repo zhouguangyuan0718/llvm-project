@@ -290,9 +290,9 @@ Inspect that, for native integers `[16, 32]`:
   shift amount is rejected;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
   remaining `G_BITCAST` when `f16` is not native;
-- an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, or `G_FDIV` is evaluated as
-  `f32` and truncated back to `f16`, and an `f16 G_FCMP` compares exactly
-  extended `f32` inputs and returns `i32`;
+- an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`,
+  `G_FSQRT`, or `G_FEXP` is evaluated as `f32` and truncated back to `f16`,
+  and an `f16 G_FCMP` compares exactly extended `f32` inputs and returns `i32`;
 - an exact floating-point vector `G_FADD`, such as `v4f32`, passes legalization
   unchanged without a vector entry in the scalar capability table; the target
   selector must support that complete vector operation;

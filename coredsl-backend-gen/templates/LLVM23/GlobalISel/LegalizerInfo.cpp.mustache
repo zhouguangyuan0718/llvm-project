@@ -1391,7 +1391,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                             promoteFloatType(0));
 
   auto &PromotableFloatActions =
-      GetActionsFor({G_FSUB, G_FMUL, G_FDIV});
+      GetActionsFor({G_FSUB, G_FMUL, G_FDIV, G_FNEG, G_FSQRT, G_FEXP});
   PromotableFloatActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeFloatType(Query, 0);
   });
@@ -1399,9 +1399,9 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                        promoteFloatType(0));
 
   auto &FloatActions = GetActionsFor({
-      G_FREM, G_FMA, G_FMAD, G_FNEG, G_FABS, G_FCANONICALIZE, G_FMINNUM,
+      G_FREM, G_FMA, G_FMAD, G_FABS, G_FCANONICALIZE, G_FMINNUM,
       G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM,
-      G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FSQRT, G_FCEIL, G_FFLOOR, G_FRINT,
+      G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FCEIL, G_FFLOOR, G_FRINT,
       G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeFloatType(Query, 0);

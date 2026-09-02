@@ -131,10 +131,10 @@ policy never narrows or splits integers.
 `64`, and `128`; entries must be unique, and their order has no semantic effect.
 Each width is converted to an exact ExtendedLLT type with `LLT::floatIEEE(N)`.
 Listed types are directly legal. An unlisted IEEE type used by `G_FADD`,
-`G_FSUB`, `G_FMUL`, `G_FDIV`, or as the input of `G_FCMP` is promoted to the
-narrowest listed type with a greater width. A type wider than every listed type
-is not handled. An empty array represents a target without floating-point
-register types.
+`G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`, `G_FSQRT`, `G_FEXP`, or as the input
+of `G_FCMP` is promoted to the narrowest listed type with a greater width. A
+type wider than every listed type is not handled. An empty array represents a
+target without floating-point register types.
 Non-IEEE formats such as `bf16`, x87 extended precision, and PPC double-double
 are intentionally outside this compact input contract.
 
@@ -187,12 +187,13 @@ a `G_BRCOND` entry to `operation_type_constraints`; missing integer widths are
 promoted against the complete native integer set.
 
 Opcode-specific floating-point sets use the same promotion boundary as their
-built-in opcode rule. Thus `G_FDIV` constrained to `[32]` promotes `f16` to
-`f32`, while an unsupported `G_FMA` remains unsupported because `G_FMA` has no
-built-in numeric-promotion action. Multi-type-index instructions can constrain
-each index independently; for example, `G_SHL` uses index 0 for the shifted
-value/result and index 1 for the shift amount. The complete input example gives
-index 0 both `i16` and `i32` candidates while restricting index 1 to `i16`.
+built-in opcode rule. Thus `G_FDIV`, `G_FNEG`, `G_FSQRT`, or `G_FEXP`
+constrained to `[32]` promotes `f16` to `f32`, while an unsupported `G_FMA`
+remains unsupported because `G_FMA` has no built-in numeric-promotion action.
+Multi-type-index instructions can constrain each index independently; for
+example, `G_SHL` uses index 0 for the shifted value/result and index 1 for the
+shift amount. The complete input example gives index 0 both `i16` and `i32`
+candidates while restricting index 1 to `i16`.
 
 `G_FADD` additionally accepts an exact floating-point vector type directly.
 This applies to both fixed and scalable vectors and is independent of the
@@ -300,10 +301,11 @@ The following scalar and pointer-carrier rules are always emitted:
 - floating-point constants and operations: `G_FCONSTANT`; native scalar forms
   of `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
   `G_FMAD`, `G_FNEG`, `G_FABS`, `G_FCANONICALIZE`, all standard
-  `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FCEIL`, `G_FFLOOR`, `G_FRINT`,
-  `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-native promotion for unsupported
-  scalar `G_FADD`, `G_FSUB`, `G_FMUL`, and `G_FDIV` types; exact
-  floating-point vectors are also directly legal for `G_FADD`;
+  `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FEXP`, `G_FCEIL`, `G_FFLOOR`,
+  `G_FRINT`, `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-native promotion for
+  unsupported scalar `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`,
+  `G_FSQRT`, and `G_FEXP` types; exact floating-point vectors are also directly
+  legal for `G_FADD`;
 - scalar casts: supported integer `G_ANYEXT` pairs and `G_TRUNC`; `G_ZEXT` and
   `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`; native
   `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
