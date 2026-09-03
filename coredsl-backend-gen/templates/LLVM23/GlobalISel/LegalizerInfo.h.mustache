@@ -2,12 +2,15 @@
 #define LLVM_LIB_TARGET_{{target_upper}}_LEGALIZERINFO_H
 
 #include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
+#include "llvm/IR/DataLayout.h"
 
 namespace llvm {
 
 class {{target}}LegalizerInfo final : public LegalizerInfo {
+  DataLayout DL;
+
 public:
-  {{target}}LegalizerInfo();
+  explicit {{target}}LegalizerInfo(const DataLayout &DL);
 
   bool legalizeCustom(LegalizerHelper &Helper, MachineInstr &MI,
                       LostDebugLocObserver &LocObserver) const override;

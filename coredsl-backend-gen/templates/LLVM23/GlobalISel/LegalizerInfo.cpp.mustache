@@ -155,6 +155,112 @@ static bool isOpcodeFloatType(const LegalityQuery &Query, unsigned TypeIdx) {
                               Ty.getScalarSizeInBits()));
 }
 
+enum class PointerIntegerWidthKind {
+  Representation,
+  Index,
+};
+
+// Pointer LLTs carry the representation width selected by DataLayout, but not
+// its possibly different index width. Normalize the integer side of pointer
+// operations to the width required by the pointer's address space, and reject
+// that normalization when the exact integer carrier is unavailable for the
+// opcode.
+static LLT getPointerIntegerType(const DataLayout &DL,
+                                 const LegalityQuery &Query,
+                                 unsigned PointerTypeIdx,
+                                 unsigned IntegerTypeIdx,
+                                 PointerIntegerWidthKind WidthKind) {
+  if (Query.Types.size() <= PointerTypeIdx ||
+      Query.Types.size() <= IntegerTypeIdx)
+    return LLT{};
+
+  const LLT PointerTy = Query.Types[PointerTypeIdx];
+  const LLT IntegerTy = Query.Types[IntegerTypeIdx];
+  if (!PointerTy.isPointer() || !IntegerTy.isInteger())
+    return LLT{};
+
+  const unsigned AddressSpace = PointerTy.getAddressSpace();
+  const unsigned PointerBits = DL.getPointerSizeInBits(AddressSpace);
+  if (PointerTy.getScalarSizeInBits() != PointerBits)
+    return LLT{};
+
+  const unsigned RequiredBits =
+      WidthKind == PointerIntegerWidthKind::Index
+          ? DL.getIndexSizeInBits(AddressSpace)
+          : PointerBits;
+  const LLT RequiredTy = LLT::integer(RequiredBits);
+  return hasExactType(RequiredTy,
+                      getOpcodeIntegerTypeForWidth(
+                          Query.Opcode, IntegerTypeIdx, RequiredBits))
+             ? RequiredTy
+             : LLT{};
+}
+
+enum class PointerIntegerWidthRelation {
+  Exact,
+  Narrower,
+  Wider,
+};
+
+static LegalityPredicate pointerIntegerTypeMatches(
+    const DataLayout &DL, unsigned PointerTypeIdx, unsigned IntegerTypeIdx,
+    PointerIntegerWidthKind WidthKind,
+    PointerIntegerWidthRelation Relation) {
+  const DataLayout *DLP = &DL;
+  return [DLP, PointerTypeIdx, IntegerTypeIdx,
+          WidthKind, Relation](const LegalityQuery &Query) {
+    const LLT RequiredTy =
+        getPointerIntegerType(*DLP, Query, PointerTypeIdx, IntegerTypeIdx,
+                              WidthKind);
+    if (!RequiredTy.isValid())
+      return false;
+    const LLT ActualTy = Query.Types[IntegerTypeIdx];
+    switch (Relation) {
+    case PointerIntegerWidthRelation::Exact:
+      return hasExactType(ActualTy, RequiredTy);
+    case PointerIntegerWidthRelation::Narrower:
+      return ActualTy.getScalarSizeInBits() < RequiredTy.getScalarSizeInBits();
+    case PointerIntegerWidthRelation::Wider:
+      return ActualTy.getScalarSizeInBits() > RequiredTy.getScalarSizeInBits();
+    }
+    return false;
+  };
+}
+
+static LegalizeMutation
+changeIntegerTypeToPointerWidth(const DataLayout &DL,
+                                unsigned PointerTypeIdx,
+                                unsigned IntegerTypeIdx,
+                                PointerIntegerWidthKind WidthKind) {
+  const DataLayout *DLP = &DL;
+  return [DLP, PointerTypeIdx, IntegerTypeIdx,
+          WidthKind](const LegalityQuery &Query) {
+    return std::pair<unsigned, LLT>(
+        IntegerTypeIdx,
+        getPointerIntegerType(*DLP, Query, PointerTypeIdx, IntegerTypeIdx,
+                              WidthKind));
+  };
+}
+
+static void addPointerIntegerTypeRules(
+    LegalizeRuleSet &Actions, const DataLayout &DL, unsigned PointerTypeIdx,
+    unsigned IntegerTypeIdx, PointerIntegerWidthKind WidthKind) {
+  Actions.legalIf(pointerIntegerTypeMatches(
+      DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
+      PointerIntegerWidthRelation::Exact));
+  Actions.widenScalarIf(
+      pointerIntegerTypeMatches(DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
+                                PointerIntegerWidthRelation::Narrower),
+      changeIntegerTypeToPointerWidth(DL, PointerTypeIdx, IntegerTypeIdx,
+                                      WidthKind));
+  Actions.narrowScalarIf(
+      pointerIntegerTypeMatches(DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
+                                PointerIntegerWidthRelation::Wider),
+      changeIntegerTypeToPointerWidth(DL, PointerTypeIdx, IntegerTypeIdx,
+                                      WidthKind));
+  Actions.fallback();
+}
+
 // G_FCMP uses an integer result with exactly the same width as its legalized
 // floating-point inputs. Do not silently promote the result to a different
 // integer width: the target must expose the exact iN carrier for fN compares.
@@ -374,6 +480,31 @@ static bool applyIntegerAnyExtensionRewrite(LegalizerHelper &Helper,
   if (MI.getOpcode() != TargetOpcode::G_ZEXT &&
       MI.getOpcode() != TargetOpcode::G_SEXT)
     return false;
+
+  // Pointer conversions have defined high-bit semantics. Keep the zero/sign
+  // extension produced while normalizing their integer carrier to the
+  // DataLayout width instead of weakening it to G_ANYEXT.
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  if (MI.getNumExplicitOperands() >= 2 && MI.getOperand(0).isReg() &&
+      MI.getOperand(1).isReg()) {
+    const Register DstReg = MI.getOperand(0).getReg();
+    const Register SrcReg = MI.getOperand(1).getReg();
+    if (DstReg.isVirtual()) {
+      for (const MachineInstr &UseMI : MRI.use_nodbg_instructions(DstReg)) {
+        if ((MI.getOpcode() == TargetOpcode::G_ZEXT &&
+             (UseMI.getOpcode() == TargetOpcode::G_INTTOPTR ||
+              UseMI.getOpcode() == TargetOpcode::G_PTRMASK)) ||
+            (MI.getOpcode() == TargetOpcode::G_SEXT &&
+             UseMI.getOpcode() == TargetOpcode::G_PTR_ADD))
+          return true;
+      }
+    }
+    if (MI.getOpcode() == TargetOpcode::G_ZEXT && SrcReg.isVirtual()) {
+      const MachineInstr *DefMI = MRI.getVRegDef(SrcReg);
+      if (DefMI && DefMI->getOpcode() == TargetOpcode::G_PTRTOINT)
+        return true;
+    }
+  }
 
   Helper.Observer.changingInstr(MI);
   MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_ANYEXT));
@@ -1224,7 +1355,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 }
 } // namespace
 
-{{target}}LegalizerInfo::{{target}}LegalizerInfo() {
+{{target}}LegalizerInfo::{{target}}LegalizerInfo(const DataLayout &DL)
+    : DL(DL) {
   using namespace TargetOpcode;
   using namespace LegalityPredicates;
   using namespace LegalizeMutations;
@@ -1277,32 +1409,14 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                           bitcastFloatToSameWidthInteger(0));
   MemoryActions.fallback();
 
-  auto &PointerAddActions = GetActions(G_PTR_ADD);
-  PointerAddActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
-           isOpcodeIntegerType(Query, 1);
-  });
-  PointerAddActions.widenScalarIf(integerTypeNeedsPromotion(1),
-                                  promoteIntegerType(1));
-  PointerAddActions.fallback();
-
-  auto &IntToPtrActions = GetActions(G_INTTOPTR);
-  IntToPtrActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && Query.Types[0].isPointer() &&
-           isOpcodeIntegerType(Query, 1);
-  });
-  IntToPtrActions.widenScalarIf(integerTypeNeedsPromotion(1),
-                                promoteIntegerType(1));
-  IntToPtrActions.fallback();
-
-  auto &PtrToIntActions = GetActions(G_PTRTOINT);
-  PtrToIntActions.legalIf([](const LegalityQuery &Query) {
-    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
-           Query.Types[1].isPointer();
-  });
-  PtrToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                                promoteIntegerType(0));
-  PtrToIntActions.fallback();
+  addPointerIntegerTypeRules(GetActions(G_PTR_ADD), this->DL, 0, 1,
+                             PointerIntegerWidthKind::Index);
+  addPointerIntegerTypeRules(GetActions(G_INTTOPTR), this->DL, 0, 1,
+                             PointerIntegerWidthKind::Representation);
+  addPointerIntegerTypeRules(GetActions(G_PTRTOINT), this->DL, 1, 0,
+                             PointerIntegerWidthKind::Representation);
+  addPointerIntegerTypeRules(GetActions(G_PTRMASK), this->DL, 0, 1,
+                             PointerIntegerWidthKind::Representation);
 
   auto &PointerCarrierActions = GetActionsFor(
       {G_FRAME_INDEX, G_GLOBAL_VALUE, G_CONSTANT_POOL, G_BLOCK_ADDR,

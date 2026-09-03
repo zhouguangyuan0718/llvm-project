@@ -4,7 +4,9 @@ This package generates one target-specific `LegalizerInfo` class. The renderer
 input contains one target name, target-native scalar types, and one operation
 type-constraint table shared by generic opcodes and intrinsics. File names, the
 class name, the include guard, the `llvm` namespace, and all legalization
-policies are derived or built into the templates.
+policies are derived or built into the templates. Pointer and pointer-index
+widths are read from the target's LLVM `DataLayout`; they are not renderer
+inputs.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
@@ -19,7 +21,7 @@ The complete input shape is:
 {
   "target": "Example",
   "native_types": {
-    "integer_widths": [16, 32],
+    "integer_widths": [16, 32, 64],
     "floating_point_widths": [16, 32]
   },
   "operation_type_constraints": [
@@ -31,6 +33,7 @@ The complete input shape is:
           "types": [
             { "integer_width": 16 },
             { "integer_width": 32 },
+            { "integer_width": 64 },
             { "floating_point_width": 32 }
           ]
         }
@@ -44,6 +47,7 @@ The complete input shape is:
           "types": [
             { "integer_width": 16 },
             { "integer_width": 32 },
+            { "integer_width": 64 },
             { "floating_point_width": 32 }
           ]
         }
@@ -307,11 +311,13 @@ The following scalar and pointer-carrier rules are always emitted:
   `G_FSQRT`, and `G_FEXP` types; exact floating-point vectors are also directly
   legal for `G_FADD`;
 - scalar casts: supported integer `G_ANYEXT` pairs and `G_TRUNC`; `G_ZEXT` and
-  `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`; native
-  `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
+  `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`, except for
+  extensions that implement the defined high bits of a pointer operation;
+  native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
   `G_FPTOUI` when their floating-point side is native;
-- pointer representation: `G_PTR_ADD`, `G_INTTOPTR`, `G_PTRTOINT`; their
-  integer operand or result follows the native integer-width policy;
+- pointer representation: `G_PTR_ADD`, `G_INTTOPTR`, `G_PTRTOINT`, and
+  `G_PTRMASK`; their integer operand or result follows the pointer address
+  space's `DataLayout` width and must have an exact target integer carrier;
 - direct pointer carriers: `G_FRAME_INDEX`, `G_GLOBAL_VALUE`,
   `G_CONSTANT_POOL`, `G_BLOCK_ADDR`, `G_JUMP_TABLE`, `G_BRINDIRECT`;
 - untyped unconditional control flow: `G_BR`;
@@ -388,14 +394,28 @@ to `G_ICMP i64` followed directly by `G_BRCOND i64` rather than retaining an
 `i64`-to-`i16` conversion; an `f32` comparison similarly reaches
 `G_BRCOND i32`.
 
-`G_PTR_ADD` preserves its pointer type. A missing integer offset width is
-promoted to the narrowest native integer; the generic legalizer may first
-create a signed extension, but this policy normalizes it to `G_ANYEXT`.
-`G_INTTOPTR` promotion is normalized in the same way. `G_PTRTOINT` promotes a
-missing integer result width and leaves a truncation for users of the original
-result. Targets relying on signed pointer offsets or zero-filled pointer bits
-must not use this relaxed extension policy without an equivalent target-side
-guarantee.
+The generated constructor receives and stores the target's LLVM `DataLayout`.
+For each pointer operation it reads the address space from the pointer LLT.
+`G_PTR_ADD` normalizes its integer offset to
+`DataLayout::getIndexSizeInBits(AddressSpace)`, while `G_INTTOPTR`,
+`G_PTRTOINT`, and `G_PTRMASK` use
+`DataLayout::getPointerSizeInBits(AddressSpace)`. These values are deliberately
+distinct: a layout such as `p1:64:64:64:32` has a 64-bit pointer
+representation but a 32-bit index.
+
+The exact required integer type must be present in `native_types` or in that
+opcode/index's explicit constraint. The policy never substitutes another
+native width for a DataLayout-required width. Thus a target with `p0:64` but no
+legal `i64` offset cannot use this generic `G_PTR_ADD` rule and needs a
+target-specific split or custom lowering.
+
+Narrow and wide pointer casts retain LLVM's defined conversion semantics.
+`G_INTTOPTR` zero-extends a narrower integer and truncates a wider one;
+`G_PTRTOINT` uses a pointer-width intermediate followed by truncation or zero
+extension to the original result. A narrower `G_PTR_ADD` offset is sign
+extended, and a narrower `G_PTRMASK` mask is zero extended. These extensions
+are the exception to the general `G_ZEXT`/`G_SEXT` to `G_ANYEXT` relaxation,
+because their high bits affect the resulting pointer.
 
 The direct pointer-carrier group has no type mutation because pointer types are
 not part of this compact native scalar input. Declaring these GMIR operations
@@ -536,13 +556,14 @@ capabilities and carrier rules, while vector values pass unchanged. Atomic,
 indexed, multi-MMO, and mismatched value/memory operations fall back to the
 target's other rules rather than being inferred from register types.
 
-The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_PTRMASK`,
-`G_DYN_STACKALLOC`, `G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
+The audit deliberately does not mark `G_ADDRSPACE_CAST`, `G_DYN_STACKALLOC`,
+`G_STACKSAVE`, `G_STACKRESTORE`, `G_BRJT`, atomic memory
 operations, or `G_VAARG`/`G_VASTART` directly legal. Those require address-space,
-pointer-width, stack/ABI, jump-table, atomic, or varargs policy that cannot be
-derived from `native_types`. Optimization hints such as `G_ASSERT_ZEXT`,
-`G_ASSERT_SEXT`, and `G_ASSERT_ALIGN` are outside the normal pre-isel generic
-opcode legality range and are eliminated later; they need no generated rule.
+stack/ABI, jump-table, atomic, or varargs policy beyond the pointer widths that
+the generated rules can obtain from `DataLayout`. Optimization hints such as
+`G_ASSERT_ZEXT`, `G_ASSERT_SEXT`, and `G_ASSERT_ALIGN` are outside the normal
+pre-isel generic opcode legality range and are eliminated later; they need no
+generated rule.
 
 At `llvmorg-23-init`, the explicitly configured pointer and memory rules that
 end in `fallback()` can still query the embedded `LegacyLegalizerInfo`. The
@@ -576,6 +597,12 @@ llvm-api-render-example LegalizerInfo.cpp.mustache > ExampleLegalizerInfo.cpp
 
 The example JSON is only a compact description of the input shape. An
 LLVM-based input producer does not need to serialize through JSON text.
+`DataLayout` is supplied when the rendered legalizer is constructed, so the
+renderer data remains identical for 32-bit and 64-bit pointer targets:
+
+```cpp
+Legalizer = std::make_unique<ExampleLegalizerInfo>(TM.createDataLayout());
+```
 
 ## Integration checks
 
@@ -587,9 +614,11 @@ LLVM-based input producer does not need to serialize through JSON text.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.
-5. Confirm that target TableGen uses `-gisel-extended-llt` and target runtime
+5. Confirm that every DataLayout pointer/index width used by a pointer opcode
+   has an exact integer carrier for that opcode.
+6. Confirm that target TableGen uses `-gisel-extended-llt` and target runtime
    setup calls `LLT::setUseExtended(true)` before GlobalISel creates LLTs.
-6. Test every native integer, every gap below the largest integer, native and
+7. Test every native integer, every gap below the largest integer, native and
    unsupported floating-point types, and a width above the largest integer.
 7. Inspect post-legalization MIR and run instruction selection for every
    generated artifact, intrinsic, comparison, branch, and `G_PHI`; also verify

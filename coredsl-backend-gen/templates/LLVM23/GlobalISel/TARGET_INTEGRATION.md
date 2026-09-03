@@ -168,7 +168,9 @@ add_llvm_target(Toy16CodeGen
 ```
 
 The generated legalizer has no Subtarget constructor argument. CPU or feature
-dependent legality is intentionally outside this simplified policy.
+dependent legality is intentionally outside this simplified policy. It does
+take the target's `DataLayout`, which supplies pointer representation and index
+widths without adding fields to the renderer input.
 
 The generated constructor also finalizes the embedded legacy tables required
 by `llvmorg-23-init`. Do not remove its
@@ -216,8 +218,8 @@ Toy16Subtarget::Toy16Subtarget(const Triple &TT, StringRef CPU, StringRef FS,
                                const TargetMachine &TM)
     : Toy16GenSubtargetInfo(TT, CPU, CPU, FS) {
   // Construct the target's other GlobalISel components here as usual.
-  (void)TM;
-  Legalizer = std::make_unique<Toy16LegalizerInfo>();
+  Legalizer =
+      std::make_unique<Toy16LegalizerInfo>(TM.createDataLayout());
 }
 
 const LegalizerInfo *Toy16Subtarget::getLegalizerInfo() const {
@@ -226,8 +228,10 @@ const LegalizerInfo *Toy16Subtarget::getLegalizerInfo() const {
 ```
 
 If the target already owns a `std::unique_ptr<LegalizerInfo>`, only replace its
-old construction with `std::make_unique<Toy16LegalizerInfo>()`; do not add a
-second legalizer.
+old construction with
+`std::make_unique<Toy16LegalizerInfo>(TM.createDataLayout())`; do not add a
+second legalizer. The generated class stores its own `DataLayout` copy, so the
+temporary returned by `createDataLayout()` is safe.
 
 ## 5. Ensure the GlobalISel pipeline is present
 
@@ -326,8 +330,12 @@ Inspect that, for native integers `[16, 32]`:
   mismatched `value i16, memory i8` operation;
 - a native register type omitted from the corresponding `G_LOAD` or `G_STORE`
   index-0 constraint is not directly legal for that memory opcode;
-- `G_PTR_ADD` keeps its pointer type and promotes an `i8` offset to `i16`; any
-  generated signed extension is normalized to `G_ANYEXT`;
+- assuming Toy16's DataLayout has a 32-bit index, `G_PTR_ADD` keeps its pointer
+  type and promotes an `i8` offset to exactly `i32`; its required signed
+  extension is not weakened to `G_ANYEXT`;
+- `G_INTTOPTR`, `G_PTRTOINT`, and `G_PTRMASK` similarly use the pointer
+  representation width from DataLayout; a layout whose pointer and index
+  widths differ uses the appropriate width for each operation;
 - pointer constants, frame/global/constant-pool/block/jump-table addresses,
   indirect branches, pointer `G_PHI`, and exact pointer-valued loads/stores
   pass type legalization unchanged and remain covered by instruction

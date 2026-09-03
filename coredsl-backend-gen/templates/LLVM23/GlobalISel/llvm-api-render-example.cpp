@@ -21,6 +21,7 @@ static json::Value makeLegalizerInput() {
   json::Array IntegerWidths;
   IntegerWidths.emplace_back(16);
   IntegerWidths.emplace_back(32);
+  IntegerWidths.emplace_back(64);
 
   json::Array FloatingPointWidths;
   FloatingPointWidths.emplace_back(32);
@@ -58,6 +59,7 @@ static json::Value makeLegalizerInput() {
     json::Array Types;
     Types.emplace_back(IntegerType(16));
     Types.emplace_back(IntegerType(32));
+    Types.emplace_back(IntegerType(64));
     Types.emplace_back(FloatType(32));
     return Types;
   };
