@@ -31,78 +31,15 @@ static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
          ActualTy.getUniqueRAWLLTData() == ExpectedTy.getUniqueRAWLLTData();
 }
 
-enum class ScalarOperationKind {
-  Invalid,
-  Opcode,
-  Intrinsic,
-};
-
-enum class ScalarTypeKind {
-  Integer,
-  FloatIEEE,
-};
-
-struct ScalarTypeCapability {
-  ScalarOperationKind OperationKind;
-  unsigned Operation;
-  unsigned TypeIndex;
-  ScalarTypeKind TypeKind;
-  unsigned Width;
-};
-
-// This is the single generated source of scalar target capabilities. The
-// global carrier sets are its integer and floating-point unions; opcode rules
-// filter the same table by opcode and LegalityQuery type index. The sentinel
-// keeps the array valid even when the collected instruction list is empty.
-static constexpr ScalarTypeCapability ScalarTypeCapabilities[] = {
-    {ScalarOperationKind::Invalid, 0, 0, ScalarTypeKind::Integer, 0},
-{{#operation_type_constraints}}
-{{#opcode_cpp}}
-{{#scalar_types}}
-{{#types}}
-{{#integer_width}}
-    {ScalarOperationKind::Opcode,
-     static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
-     ScalarTypeKind::Integer, {{.}}},
-{{/integer_width}}
-{{#floating_point_width}}
-    {ScalarOperationKind::Opcode,
-     static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
-     ScalarTypeKind::FloatIEEE, {{.}}},
-{{/floating_point_width}}
-{{/types}}
-{{/scalar_types}}
-{{/opcode_cpp}}
-{{#intrinsic_id_cpp}}
-{{#scalar_types}}
-{{#types}}
-{{#integer_width}}
-    {ScalarOperationKind::Intrinsic,
-     static_cast<unsigned>({{intrinsic_id_cpp}}), {{index}},
-     ScalarTypeKind::Integer, {{.}}},
-{{/integer_width}}
-{{#floating_point_width}}
-    {ScalarOperationKind::Intrinsic,
-     static_cast<unsigned>({{intrinsic_id_cpp}}), {{index}},
-     ScalarTypeKind::FloatIEEE, {{.}}},
-{{/floating_point_width}}
-{{/types}}
-{{/scalar_types}}
-{{/intrinsic_id_cpp}}
-{{/operation_type_constraints}}
-};
-
-// Return the narrowest collected integer carrier that can carry Bits bits.
-// Capability order and duplicate types have no semantic effect.
+// Return the narrowest native integer type that can carry Bits bits. Input
+// order has no semantic effect.
 static LLT getNativeIntegerTypeForWidth(unsigned Bits) {
+  (void)Bits;
   unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.TypeKind != ScalarTypeKind::Integer ||
-        Bits > Capability.Width)
-      continue;
-    if (BestWidth == 0 || Capability.Width < BestWidth)
-      BestWidth = Capability.Width;
-  }
+{{#native_types.integer_widths}}
+  if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+    BestWidth = {{.}};
+{{/native_types.integer_widths}}
   return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
 }
 
@@ -116,67 +53,84 @@ static bool isNativeIntegerType(LLT Ty) {
 static bool isNativeFloatType(LLT Ty) {
   if (!Ty.isFloat())
     return false;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.TypeKind == ScalarTypeKind::FloatIEEE &&
-        hasExactType(Ty, LLT::floatIEEE(Capability.Width)))
-      return true;
-  }
+{{#native_types.floating_point_widths}}
+  if (hasExactType(Ty, LLT::floatIEEE({{.}})))
+    return true;
+{{/native_types.floating_point_widths}}
   return false;
 }
 
-// Return the narrowest collected IEEE floating-point carrier that can carry
-// Bits bits. Capability order and duplicate types have no semantic effect.
+// Return the narrowest native IEEE floating-point type that can carry Bits
+// bits. Input order has no semantic effect.
 static LLT getNativeFloatTypeForWidth(unsigned Bits) {
+  (void)Bits;
   unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.TypeKind != ScalarTypeKind::FloatIEEE ||
-        Bits > Capability.Width)
-      continue;
-    if (BestWidth == 0 || Capability.Width < BestWidth)
-      BestWidth = Capability.Width;
-  }
+{{#native_types.floating_point_widths}}
+  if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+    BestWidth = {{.}};
+{{/native_types.floating_point_widths}}
   return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
 }
 
-// A collected opcode/type-index constraint replaces the corresponding global
-// carrier union. Unmentioned opcode/type-index pairs inherit that union.
+// A collected opcode/type-index constraint takes priority over the native
+// fallback. Unmentioned opcode/type-index pairs inherit native_types.
 static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
                                         unsigned Bits) {
-  bool HasConstraint = false;
-  unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.OperationKind != ScalarOperationKind::Opcode ||
-        Capability.Operation != Opcode || Capability.TypeIndex != TypeIdx)
-      continue;
-    HasConstraint = true;
-    if (Capability.TypeKind != ScalarTypeKind::Integer ||
-        Bits > Capability.Width)
-      continue;
-    if (BestWidth == 0 || Capability.Width < BestWidth)
-      BestWidth = Capability.Width;
+  (void)Opcode;
+  (void)TypeIdx;
+  (void)Bits;
+  switch (Opcode) {
+{{#operation_type_constraints}}
+{{#opcode_cpp}}
+  case TargetOpcode::{{.}}:
+{{#scalar_types}}
+    if (TypeIdx == {{index}}) {
+      unsigned BestWidth = 0;
+{{#types}}
+{{#integer_width}}
+      if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+        BestWidth = {{.}};
+{{/integer_width}}
+{{/types}}
+      return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
+    }
+{{/scalar_types}}
+    break;
+{{/opcode_cpp}}
+{{/operation_type_constraints}}
+  default:
+    break;
   }
-  if (HasConstraint)
-    return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
   return getNativeIntegerTypeForWidth(Bits);
 }
 
 static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
                                       unsigned Bits) {
-  bool HasConstraint = false;
-  unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.OperationKind != ScalarOperationKind::Opcode ||
-        Capability.Operation != Opcode || Capability.TypeIndex != TypeIdx)
-      continue;
-    HasConstraint = true;
-    if (Capability.TypeKind != ScalarTypeKind::FloatIEEE ||
-        Bits > Capability.Width)
-      continue;
-    if (BestWidth == 0 || Capability.Width < BestWidth)
-      BestWidth = Capability.Width;
+  (void)Opcode;
+  (void)TypeIdx;
+  (void)Bits;
+  switch (Opcode) {
+{{#operation_type_constraints}}
+{{#opcode_cpp}}
+  case TargetOpcode::{{.}}:
+{{#scalar_types}}
+    if (TypeIdx == {{index}}) {
+      unsigned BestWidth = 0;
+{{#types}}
+{{#floating_point_width}}
+      if (Bits <= {{.}} && (BestWidth == 0 || {{.}} < BestWidth))
+        BestWidth = {{.}};
+{{/floating_point_width}}
+{{/types}}
+      return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
+    }
+{{/scalar_types}}
+    break;
+{{/opcode_cpp}}
+{{/operation_type_constraints}}
+  default:
+    break;
   }
-  if (HasConstraint)
-    return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
   return getNativeFloatTypeForWidth(Bits);
 }
 
@@ -659,15 +613,14 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
 }
 
 // Scalar i1 objects occupy exactly one byte in memory. Select the narrowest
-// byte-sized collected integer carrier supported by both G_LOAD and G_STORE.
-// If the access is wider than one byte, the little-endian read/modify/write
-// sequence also needs mask and merge operations.
+// byte-sized native integer type supported by both G_LOAD and G_STORE. If the
+// access is wider than one byte, the little-endian read/modify/write sequence
+// also needs mask and merge operations.
 static LLT getI1MemoryAccessType() {
   unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.TypeKind != ScalarTypeKind::Integer)
-      continue;
-    const unsigned CandidateWidth = Capability.Width;
+{{#native_types.integer_widths}}
+  {
+    constexpr unsigned CandidateWidth = {{.}};
     const LLT CandidateTy = LLT::integer(CandidateWidth);
     const bool HasExactMemoryAccess =
         CandidateWidth >= 8 && CandidateWidth % 8 == 0 &&
@@ -688,6 +641,7 @@ static LLT getI1MemoryAccessType() {
         (BestWidth == 0 || CandidateWidth < BestWidth))
       BestWidth = CandidateWidth;
   }
+{{/native_types.integer_widths}}
   return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
 }
 
