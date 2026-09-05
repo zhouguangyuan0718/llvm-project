@@ -1,9 +1,5 @@
 {
   "target": "Example",
-  "native_types": {
-    "integer_widths": [16, 32, 64],
-    "floating_point_widths": [32]
-  },
   "operation_type_constraints": [
     {
       "opcode_cpp": "G_LOAD",

@@ -7,19 +7,14 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 
 ## 1. Construct the renderer input
 
-The generator supplies the target name, its native scalar register types, and
-one instruction-collected capability table shared by generic opcodes and
-intrinsics. Collected opcode/type-index candidates take priority; native types
-are the fallback for an unmentioned pair and for structural artifacts:
+The generator supplies only the target name and one instruction-collected
+scalar capability table shared by generic opcodes and intrinsics. The generated
+legalizer derives its global integer and floating-point carrier sets from the
+union of these candidates:
 
 ```cpp
 llvm::json::Object Root;
 Root["target"] = "Toy16";
-
-llvm::json::Object NativeTypes;
-NativeTypes["integer_widths"] = llvm::json::Array{16, 32};
-NativeTypes["floating_point_widths"] = llvm::json::Array{32};
-Root["native_types"] = std::move(NativeTypes);
 
 auto IntegerType = [](unsigned Width) {
   llvm::json::Object Type;
@@ -104,10 +99,8 @@ The input producer should obtain these candidates from target instruction
 register results and operands, grouped by the mapped generic opcode or
 intrinsic and scalar index. Do not collect immediate widths, memory-only widths,
 or source IR types that are converted before reaching the target instruction.
-Aggregate alternatives that map to the same operation/index and ensure every
-collected candidate occurs in `native_types`. A configured operation/index does
-not fall back when none of its candidates fit; native fallback applies only when
-that pair is absent.
+Types repeated by different instructions are harmless: the generated table
+derives the global integer and floating-point carrier unions automatically.
 
 Register the `target_upper` lambda as shown in
 `llvm-api-render-example.cpp`, disable HTML escaping, and render:
@@ -292,18 +285,20 @@ cmake --build <llvm-build> --target LLVMToy16CodeGen llc
   -verify-machineinstrs -stop-after=legalizer input.ll -o -
 ```
 
-Inspect that, for native integers `[16, 32]`:
+Inspect that, for the derived integer carriers `[16, 32]`:
 
 - an `i8 G_CONSTANT` is promoted to the `i16` carrier while `i16` remains legal;
 - `i1` and `i8` integer operations are promoted to `i16`;
 - an `i24` integer operation is promoted to `i32`;
 - the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
-  `i32` instead of falling back to the native `i32` type;
+  `i32` instead of treating every derived integer carrier as legal;
+- `G_UREM x, 16` becomes `G_AND x, 15` when both operations support that
+  carrier, while divisors `0`, `12`, and unknown values remain `G_UREM`;
 - the multi-index `G_SHL` accepts `i16` or `i32` at type index 0 but only
   `i16` at type index 1; an `i8` shift amount widens to `i16`, while an `i32`
   shift amount is rejected;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
-  remaining `G_BITCAST` when `f16` is not native;
+  remaining `G_BITCAST` when `f16` is not collected;
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`,
   `G_FSQRT`, or `G_FEXP` is evaluated as `f32` and truncated back to `f16`,
   and an `f16 G_FCMP` compares exactly extended `f32` inputs and returns `i32`;
@@ -311,7 +306,7 @@ Inspect that, for native integers `[16, 32]`:
   unchanged without a vector entry in the scalar capability table; the target
   selector must support that complete vector operation;
 - the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
-  wider native float without listing it for `G_FDIV` does not make that
+  wider global float carrier without listing it for `G_FDIV` does not make that
   type legal for division;
 - an `f16 G_FCONSTANT` feeding one of those promoted operations is folded with
   its `G_FPEXT` into an exact `f32 G_FCONSTANT`, leaving no low-precision
@@ -338,7 +333,7 @@ Inspect that, for native integers `[16, 32]`:
   DataLayout;
 - an `i8` load/store remains unsupported rather than being changed into a
   mismatched `value i16, memory i8` operation;
-- a native register type omitted from the corresponding `G_LOAD` or
+- a derived register carrier omitted from the corresponding `G_LOAD` or
   `G_STORE` index-0 constraint is not directly legal for that memory opcode;
 - assuming Toy16's DataLayout has a 32-bit index, `G_PTR_ADD` keeps its pointer
   type and promotes an `i8` offset to exactly `i32`; its required signed
@@ -364,7 +359,7 @@ Inspect that, for native integers `[16, 32]`:
   no `G_AND` mask;
 - `G_BRCOND` accepts both `i16` and `i32` conditions directly; a standalone
   `i1` or `i8` condition is promoted to `i16` with `G_ANYEXT`, using the
-  complete native integer list rather than an
+  complete derived integer carrier list rather than an
   opcode-specific capability subset;
 - a branch using an integer `G_ICMP` result chooses the same predicted carrier
   as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an

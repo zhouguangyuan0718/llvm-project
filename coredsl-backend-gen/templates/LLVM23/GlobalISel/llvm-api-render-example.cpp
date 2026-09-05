@@ -18,19 +18,6 @@ static json::Value makeLegalizerInput() {
   json::Object Root;
   Root["target"] = "Example";
 
-  json::Array IntegerWidths;
-  IntegerWidths.emplace_back(16);
-  IntegerWidths.emplace_back(32);
-  IntegerWidths.emplace_back(64);
-
-  json::Array FloatingPointWidths;
-  FloatingPointWidths.emplace_back(32);
-
-  json::Object NativeTypes;
-  NativeTypes["integer_widths"] = std::move(IntegerWidths);
-  NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
-  Root["native_types"] = std::move(NativeTypes);
-
   auto IntegerType = [](unsigned Width) {
     json::Object Type;
     Type["integer_width"] = Width;
