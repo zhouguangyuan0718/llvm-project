@@ -60,6 +60,15 @@ The complete input shape is:
       ]
     },
     {
+      "opcode_cpp": "G_XOR",
+      "scalar_types": [
+        {
+          "index": 0,
+          "types": [{ "integer_width": 32 }]
+        }
+      ]
+    },
+    {
       "opcode_cpp": "G_FDIV",
       "scalar_types": [
         {
@@ -180,6 +189,21 @@ scans the complete set and chooses the narrowest type capable of carrying the
 original width. Integer and floating-point candidates may coexist for an index
 whose opcode supports both categories, notably the value/memory index of
 `G_LOAD`/`G_STORE`.
+
+For a missing-width integer result with exactly one non-debug use in the same
+basic block, legalization also looks through up to eight same-type `COPY`s. If
+the resulting use is `G_ANYEXT` to another carrier supported by the producer,
+the producer uses that carrier instead of its default narrowest carrier. This
+lets LLVM's legalization artifact combiner remove the temporary
+`G_ANYEXT(G_TRUNC)` pair and propagates an already-selected consumer carrier
+backward through a straight-line chain. Multiple uses, cross-block uses,
+`G_PHI`, `G_TRUNC`, and a raw `G_ZEXT`/`G_SEXT` at the time the producer is
+inspected remain boundaries and retain the default policy. The generated
+extension policy described below may separately normalize a supported scalar
+`G_ZEXT`/`G_SEXT` to `G_ANYEXT` before visiting its producer; after that
+intentional weakening, the resulting `G_ANYEXT` may participate in local
+coalescing. An integer type that is already legal is never widened by this
+local optimization.
 
 An omitted opcode/type-index pair inherits the full matching derived carrier
 union. A configured pair replaces that union. For example, if the collected
@@ -384,6 +408,13 @@ introduced by generic widening, not only to casts originating directly in IR.
 LLVM may first fold an extension that participates in a legalization-artifact
 chain; only an extension that survives those semantics-preserving combines
 reaches this custom opcode rewrite.
+
+Local carrier coalescing itself follows only `G_ANYEXT`, whose high bits are
+already unspecified; it never changes a `G_ZEXT` or `G_SEXT`. Under this
+generated target policy, however, the custom extension rewrite above may first
+turn a supported scalar defined extension into `G_ANYEXT`, after which a later
+producer legalization can coalesce with it. Extensions retained for pointer
+semantics remain defined and are carrier boundaries.
 
 When the target declares `ZeroOrOneBooleanContent`, legalization artifacts from
 an original `icmp -> zext -> store` chain can be combined away after widening.
@@ -649,6 +680,10 @@ Legalizer = std::make_unique<ExampleLegalizerInfo>(TM.createDataLayout());
 8. Inspect post-legalization MIR and run instruction selection for every
    generated artifact, intrinsic, comparison, branch, and `G_PHI`; also verify
    that `G_FMAXIMUM` and `G_SELECT` have been eliminated.
-9. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
+9. Test a single-use integer chain whose consumer requires a wider carrier and
+   confirm that no `G_TRUNC`/`G_ANYEXT` pair remains between producer and
+   consumer. Also test that multiple uses, cross-block uses, and any
+   `G_ZEXT`/`G_SEXT` retained by target policy keep the default carrier.
+10. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
    pass legalization unchanged, then independently confirm that the target can
    select, lower, or eliminate them.

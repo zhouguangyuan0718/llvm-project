@@ -18,6 +18,7 @@
 #include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics{{target}}.h"
+#include "llvm/MC/MCInstrDesc.h"
 
 #include <cassert>
 #include <initializer_list>
@@ -161,6 +162,12 @@ static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   return getNativeIntegerTypeForWidth(Bits);
 }
 
+static bool isOpcodeIntegerCarrier(unsigned Opcode, unsigned TypeIdx, LLT Ty) {
+  return Ty.isInteger() &&
+         hasExactType(Ty, getOpcodeIntegerTypeForWidth(
+                              Opcode, TypeIdx, Ty.getScalarSizeInBits()));
+}
+
 static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
                                       unsigned Bits) {
   bool HasConstraint = false;
@@ -185,11 +192,7 @@ static bool isOpcodeIntegerType(const LegalityQuery &Query,
                                 unsigned TypeIdx) {
   if (Query.Types.size() <= TypeIdx)
     return false;
-  const LLT Ty = Query.Types[TypeIdx];
-  return Ty.isInteger() &&
-         hasExactType(Ty, getOpcodeIntegerTypeForWidth(
-                              Query.Opcode, TypeIdx,
-                              Ty.getScalarSizeInBits()));
+  return isOpcodeIntegerCarrier(Query.Opcode, TypeIdx, Query.Types[TypeIdx]);
 }
 
 static bool isOpcodeFloatType(const LegalityQuery &Query, unsigned TypeIdx) {
@@ -805,6 +808,112 @@ static bool applyI1ByteMemoryRewrite(LegalizerHelper &Helper,
 
   MI.eraseFromParent();
   return true;
+}
+
+// Find the single explicit virtual-register definition described by TypeIdx.
+// The local carrier optimization deliberately excludes variable-def structural
+// instructions such as G_PHI and G_UNMERGE_VALUES.
+static Register getSingleDefForTypeIndex(const MachineInstr &MI,
+                                         unsigned TypeIdx) {
+  if (MI.getDesc().isVariadic())
+    return Register{};
+  ArrayRef<MCOperandInfo> OperandInfo = MI.getDesc().operands();
+  Register DefReg;
+  const unsigned NumDescriptorOperands = MI.getDesc().getNumOperands();
+  for (unsigned I = 0, E = MI.getNumExplicitDefs(); I != E; ++I) {
+    if (I >= NumDescriptorOperands || !OperandInfo[I].isGenericType() ||
+        OperandInfo[I].getGenericTypeIndex() != TypeIdx ||
+        !MI.getOperand(I).isReg() || !MI.getOperand(I).getReg().isVirtual())
+      continue;
+    if (DefReg.isValid())
+      return Register{};
+    DefReg = MI.getOperand(I).getReg();
+  }
+  return DefReg;
+}
+
+// Legalization visits consumers before producers. If a consumer has already
+// widened a missing-width result through G_ANYEXT, let its single same-block
+// producer use that wider carrier when the producer supports it too. The
+// resulting G_ANYEXT(G_TRUNC) pair is then removed by LLVM's legalization
+// artifact combiner. At this lookup point, raw G_ZEXT/G_SEXT, multiple uses,
+// PHIs, and cross-block uses remain hard boundaries and retain the ordinary
+// narrowest-carrier policy. The generated target's separate extension policy
+// may deliberately normalize a supported scalar G_ZEXT/G_SEXT to G_ANYEXT
+// before its producer is visited.
+static LLT getLocallyPreferredIntegerCarrier(const MachineInstr &MI,
+                                             MachineRegisterInfo &MRI,
+                                             unsigned TypeIdx,
+                                             LLT DefaultCarrierTy) {
+  const Register DefReg = getSingleDefForTypeIndex(MI, TypeIdx);
+  if (!DefReg.isValid() || !MI.getParent())
+    return DefaultCarrierTy;
+
+  const LLT OriginalTy = MRI.getType(DefReg);
+  if (!OriginalTy.isInteger())
+    return DefaultCarrierTy;
+
+  constexpr unsigned MaxLookThroughDepth = 8;
+  Register CurrentReg = DefReg;
+  for (unsigned Depth = 0; Depth <= MaxLookThroughDepth; ++Depth) {
+    MachineOperand *Use = MRI.getOneNonDBGUse(CurrentReg);
+    if (!Use)
+      return DefaultCarrierTy;
+    MachineInstr *UseMI = Use->getParent();
+    if (!UseMI || UseMI->getParent() != MI.getParent())
+      return DefaultCarrierTy;
+
+    if (UseMI->getOpcode() == TargetOpcode::COPY) {
+      if (UseMI->getNumExplicitDefs() != 1 ||
+          UseMI->getNumExplicitOperands() < 2 || Use != &UseMI->getOperand(1) ||
+          !UseMI->getOperand(0).isReg() ||
+          !UseMI->getOperand(0).getReg().isVirtual())
+        return DefaultCarrierTy;
+      const Register CopyReg = UseMI->getOperand(0).getReg();
+      if (!hasExactType(MRI.getType(CurrentReg), MRI.getType(CopyReg)))
+        return DefaultCarrierTy;
+      CurrentReg = CopyReg;
+      continue;
+    }
+
+    if (UseMI->getOpcode() != TargetOpcode::G_ANYEXT ||
+        UseMI->getNumExplicitDefs() != 1 ||
+        UseMI->getNumExplicitOperands() < 2 || Use != &UseMI->getOperand(1) ||
+        !UseMI->getOperand(0).isReg() ||
+        !UseMI->getOperand(0).getReg().isVirtual())
+      return DefaultCarrierTy;
+
+    const LLT CandidateTy = MRI.getType(UseMI->getOperand(0).getReg());
+    if (!CandidateTy.isInteger() ||
+        CandidateTy.getScalarSizeInBits() <= OriginalTy.getScalarSizeInBits() ||
+        !isOpcodeIntegerCarrier(MI.getOpcode(), TypeIdx, CandidateTy))
+      return DefaultCarrierTy;
+    return CandidateTy;
+  }
+  return DefaultCarrierTy;
+}
+
+static bool applyLocalIntegerCarrierPromotion(LegalizerHelper &Helper,
+                                              MachineInstr &MI,
+                                              unsigned TypeIdx) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const Register DefReg = getSingleDefForTypeIndex(MI, TypeIdx);
+  if (!DefReg.isValid())
+    return false;
+
+  const LLT OriginalTy = MRI.getType(DefReg);
+  if (!OriginalTy.isInteger())
+    return false;
+  const LLT DefaultCarrierTy = getOpcodeIntegerTypeForWidth(
+      MI.getOpcode(), TypeIdx, OriginalTy.getScalarSizeInBits());
+  if (!DefaultCarrierTy.isValid() || DefaultCarrierTy.getScalarSizeInBits() <=
+                                         OriginalTy.getScalarSizeInBits())
+    return false;
+
+  const LLT CarrierTy =
+      getLocallyPreferredIntegerCarrier(MI, MRI, TypeIdx, DefaultCarrierTy);
+  return Helper.widenScalar(MI, TypeIdx, CarrierTy) ==
+         LegalizerHelper::Legalized;
 }
 
 // Legalization visits ordinary instructions bottom-up, so G_BRCOND normally
@@ -1519,8 +1628,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
            (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
             isOpcodeFloatType(Query, 0));
   });
-  ScalarCarrierActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                                     promoteIntegerType(0));
+  ScalarCarrierActions.customIf(integerTypeNeedsPromotion(0));
 
   auto &ConstantActions = GetActions(G_CONSTANT);
   ConstantActions.legalIf([](const LegalityQuery &Query) {
@@ -1528,8 +1636,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
            (Query.Types[0].isPointer() ||
             isNativeIntegerType(Query.Types[0]));
   });
-  ConstantActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                                promoteIntegerType(0));
+  ConstantActions.customIf(integerTypeNeedsPromotion(0));
 
   auto &IntegerActions = GetActionsFor({
       G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_AND, G_OR,
@@ -1538,8 +1645,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   IntegerActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeIntegerType(Query, 0);
   });
-  IntegerActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                               promoteIntegerType(0));
+  IntegerActions.customIf(integerTypeNeedsPromotion(0));
 
   // Operand values are unavailable to LegalityQuery. Route every otherwise
   // legal G_UREM through the custom handler so it can fold a divisor known to
@@ -1547,8 +1653,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &URemActions = GetActions(G_UREM);
   URemActions.customIf(
       [](const LegalityQuery &Query) { return isOpcodeIntegerType(Query, 0); });
-  URemActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                            promoteIntegerType(0));
+  URemActions.customIf(integerTypeNeedsPromotion(0));
 
   auto &ShiftActions =
       GetActionsFor({G_SHL, G_LSHR, G_ASHR});
@@ -1556,8 +1661,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            isOpcodeIntegerType(Query, 1);
   });
-  ShiftActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                             promoteIntegerType(0));
+  ShiftActions.customIf(integerTypeNeedsPromotion(0));
   ShiftActions.widenScalarIf(integerTypeNeedsPromotion(1),
                              promoteIntegerType(1));
 
@@ -1567,8 +1671,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            isOpcodeIntegerType(Query, 1);
   });
-  BitCountActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                                promoteIntegerType(0));
+  BitCountActions.customIf(integerTypeNeedsPromotion(0));
   BitCountActions.widenScalarIf(integerTypeNeedsPromotion(1),
                                 promoteIntegerType(1));
 
@@ -1709,8 +1812,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                               promoteIntegerType(1));
   SelectActions.bitcastIf(floatTypeNeedsIntegerBitcast(0),
                           bitcastFloatToSameWidthInteger(0));
-  SelectActions.widenScalarIf(integerTypeNeedsPromotion(0),
-                              promoteIntegerType(0));
+  SelectActions.customIf(integerTypeNeedsPromotion(0));
 
   auto &PhiActions = GetActions(G_PHI);
   PhiActions.legalIf([](const LegalityQuery &Query) {
@@ -1740,6 +1842,36 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_IMPLICIT_DEF:
+  case TargetOpcode::G_FREEZE:
+  case TargetOpcode::G_CONSTANT_FOLD_BARRIER:
+  case TargetOpcode::G_CONSTANT:
+  case TargetOpcode::G_ADD:
+  case TargetOpcode::G_SUB:
+  case TargetOpcode::G_MUL:
+  case TargetOpcode::G_SDIV:
+  case TargetOpcode::G_UDIV:
+  case TargetOpcode::G_SREM:
+  case TargetOpcode::G_AND:
+  case TargetOpcode::G_OR:
+  case TargetOpcode::G_XOR:
+  case TargetOpcode::G_SMIN:
+  case TargetOpcode::G_SMAX:
+  case TargetOpcode::G_UMIN:
+  case TargetOpcode::G_UMAX:
+  case TargetOpcode::G_ABS:
+  case TargetOpcode::G_SEXT_INREG:
+  case TargetOpcode::G_BSWAP:
+  case TargetOpcode::G_BITREVERSE:
+  case TargetOpcode::G_SHL:
+  case TargetOpcode::G_LSHR:
+  case TargetOpcode::G_ASHR:
+  case TargetOpcode::G_CTLZ:
+  case TargetOpcode::G_CTLZ_ZERO_UNDEF:
+  case TargetOpcode::G_CTTZ:
+  case TargetOpcode::G_CTTZ_ZERO_UNDEF:
+  case TargetOpcode::G_CTPOP:
+    return applyLocalIntegerCarrierPromotion(Helper, MI, 0);
   case TargetOpcode::G_ZEXT:
   case TargetOpcode::G_SEXT:
     return applyIntegerAnyExtensionRewrite(Helper, MI);
@@ -1748,14 +1880,32 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     return applyI1ByteMemoryRewrite(Helper, MI);
   case TargetOpcode::G_BRCOND:
     return applyBrCondCarrierRewrite(Helper, MI);
-  case TargetOpcode::G_SELECT:
+  case TargetOpcode::G_SELECT: {
+    MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+    if (MI.getNumExplicitDefs() == 1 && MI.getOperand(0).isReg() &&
+        MI.getOperand(0).getReg().isVirtual()) {
+      const LLT ValueTy = MRI.getType(MI.getOperand(0).getReg());
+      if (ValueTy.isInteger() &&
+          !isOpcodeIntegerCarrier(TargetOpcode::G_SELECT, 0, ValueTy))
+        return applyLocalIntegerCarrierPromotion(Helper, MI, 0);
+    }
     return applySelectControlFlowRewrite(Helper, MI);
+  }
   case TargetOpcode::G_FMAXIMUM:
     return applyFMaximumSelectRewrite(Helper, MI);
   case TargetOpcode::G_FCONSTANT:
     return applyFConstantRewrite(Helper, MI);
-  case TargetOpcode::G_UREM:
+  case TargetOpcode::G_UREM: {
+    MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+    if (MI.getNumExplicitDefs() == 1 && MI.getOperand(0).isReg() &&
+        MI.getOperand(0).getReg().isVirtual()) {
+      const LLT ValueTy = MRI.getType(MI.getOperand(0).getReg());
+      if (ValueTy.isInteger() &&
+          !isOpcodeIntegerCarrier(TargetOpcode::G_UREM, 0, ValueTy))
+        return applyLocalIntegerCarrierPromotion(Helper, MI, 0);
+    }
     return applyURemPowerOfTwoRewrite(Helper, MI);
+  }
   default:
     return false;
   }

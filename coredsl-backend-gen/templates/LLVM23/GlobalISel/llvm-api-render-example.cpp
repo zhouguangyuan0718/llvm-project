@@ -54,6 +54,9 @@ static json::Value makeLegalizerInput() {
   json::Array MulTypes;
   MulTypes.emplace_back(IntegerType(16));
 
+  json::Array XorTypes;
+  XorTypes.emplace_back(IntegerType(32));
+
   json::Array FDivTypes;
   FDivTypes.emplace_back(FloatType(32));
 
@@ -85,6 +88,8 @@ static json::Value makeLegalizerInput() {
       "opcode_cpp", "G_STORE", SingleScalarType(0, MemoryTypes())));
   OperationTypeConstraints.emplace_back(MakeOperation(
       "opcode_cpp", "G_MUL", SingleScalarType(0, std::move(MulTypes))));
+  OperationTypeConstraints.emplace_back(MakeOperation(
+      "opcode_cpp", "G_XOR", SingleScalarType(0, std::move(XorTypes))));
   OperationTypeConstraints.emplace_back(MakeOperation(
       "opcode_cpp", "G_FDIV", SingleScalarType(0, std::move(FDivTypes))));
   OperationTypeConstraints.emplace_back(

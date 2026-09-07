@@ -292,6 +292,14 @@ Inspect that, for the derived integer carriers `[16, 32]`:
 - an `i24` integer operation is promoted to `i32`;
 - the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
   `i32` instead of treating every derived integer carrier as legal;
+- when an unsupported-width integer producer has one same-block use through
+  `G_ANYEXT`, it adopts that wider consumer carrier if the producer supports it;
+  after artifact combining, a chain such as an `i8 G_ADD` feeding an operation
+  fixed to `i32` has no intervening `G_TRUNC`/`G_ANYEXT` pair;
+- multiple uses, cross-block uses, and any `G_ZEXT`/`G_SEXT` retained by target
+  policy keep the ordinary narrowest-carrier choice; supported scalar defined
+  extensions that this generated policy intentionally normalizes to
+  `G_ANYEXT` may then participate in coalescing;
 - `G_UREM x, 16` becomes `G_AND x, 15` when both operations support that
   carrier, while divisors `0`, `12`, and unknown values remain `G_UREM`;
 - the multi-index `G_SHL` accepts `i16` or `i32` at type index 0 but only
