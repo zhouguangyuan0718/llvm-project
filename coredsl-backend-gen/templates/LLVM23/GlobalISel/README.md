@@ -449,11 +449,12 @@ through copies or integer casts), branch legalization predicts the compare's
 eventual result carrier instead of selecting the smallest carrier in
 isolation. For `G_FCMP`, that prediction first determines the legalized float
 input and then uses its same-width integer type. This compensates for LLVM's
-bottom-up legalization order. With an `i64` integer comparison, the artifact
-combiner can therefore reduce the temporary `G_TRUNC`/boolean-extension chain
-to `G_ICMP i64` followed directly by `G_BRCOND i64` rather than retaining an
-`i64`-to-`i16` conversion; an `f32` comparison similarly reaches
-`G_BRCOND i32`.
+bottom-up legalization order. When `i64` is also a configured `G_BRCOND`
+carrier, an `i64` integer comparison can therefore become `G_ICMP i64`
+followed directly by `G_BRCOND i64`. If the branch list excludes `i64`, the
+branch instead uses its own smallest fitting carrier and retains the necessary
+conversion. An `f32` comparison similarly reaches `G_BRCOND i32` when `i32` is
+configured for both operations.
 
 The generated constructor receives and stores the target's LLVM `DataLayout`.
 For each pointer operation it reads the address space from the pointer LLT.
