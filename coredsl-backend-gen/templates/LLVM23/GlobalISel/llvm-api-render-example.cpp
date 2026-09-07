@@ -18,19 +18,6 @@ static json::Value makeLegalizerInput() {
   json::Object Root;
   Root["target"] = "Example";
 
-  json::Array IntegerWidths;
-  IntegerWidths.emplace_back(16);
-  IntegerWidths.emplace_back(32);
-  IntegerWidths.emplace_back(64);
-
-  json::Array FloatingPointWidths;
-  FloatingPointWidths.emplace_back(32);
-
-  json::Object NativeTypes;
-  NativeTypes["integer_widths"] = std::move(IntegerWidths);
-  NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
-  Root["native_types"] = std::move(NativeTypes);
-
   auto IntegerType = [](unsigned Width) {
     json::Object Type;
     Type["integer_width"] = Width;
@@ -70,6 +57,10 @@ static json::Value makeLegalizerInput() {
   json::Array XorTypes;
   XorTypes.emplace_back(IntegerType(32));
 
+  json::Array BrCondTypes;
+  BrCondTypes.emplace_back(IntegerType(32));
+  BrCondTypes.emplace_back(IntegerType(16));
+
   json::Array FDivTypes;
   FDivTypes.emplace_back(FloatType(32));
 
@@ -103,6 +94,9 @@ static json::Value makeLegalizerInput() {
       "opcode_cpp", "G_MUL", SingleScalarType(0, std::move(MulTypes))));
   OperationTypeConstraints.emplace_back(MakeOperation(
       "opcode_cpp", "G_XOR", SingleScalarType(0, std::move(XorTypes))));
+  OperationTypeConstraints.emplace_back(MakeOperation(
+      "opcode_cpp", "G_BRCOND",
+      SingleScalarType(0, std::move(BrCondTypes))));
   OperationTypeConstraints.emplace_back(MakeOperation(
       "opcode_cpp", "G_FDIV", SingleScalarType(0, std::move(FDivTypes))));
   OperationTypeConstraints.emplace_back(
