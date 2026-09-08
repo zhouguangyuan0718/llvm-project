@@ -615,7 +615,8 @@ static void checkSelectComparisons(TestContext &TC, unsigned InputBits) {
 }
 
 static void checkTruncBranchProof(TestContext &TC, int MaskValue,
-                                  unsigned Adapter, unsigned Bits = 32) {
+                                  unsigned Adapter, unsigned Bits = 32,
+                                  unsigned CopyDepth = 0, bool Swap = false) {
   MachineFunction &MF = TC.makeFunction("trunc_branch_proof");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
   MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
@@ -633,14 +634,28 @@ static void checkTruncBranchProof(TestContext &TC, int MaskValue,
       Adapter == TargetOpcode::G_SEXT) {
     Register One = B.buildConstant(I1, 1).getReg(0);
     Mask = B.buildInstr(Adapter, {Ty}, {One}).getReg(0);
+  } else if (Adapter == TargetOpcode::G_IMPLICIT_DEF) {
+    Mask = B.buildUndef(Ty).getReg(0);
   } else {
     Mask = B.buildConstant(Ty, MaskValue).getReg(0);
   }
-  MachineInstr *Inner = B.buildAnd(Ty, C, Mask).getInstr();
+  MachineInstr *Inner =
+      B.buildAnd(Ty, Swap ? Mask : C, Swap ? C : Mask).getInstr();
   Register DynamicMask = Inner->getOperand(0).getReg();
   if (Adapter == TargetOpcode::G_FREEZE)
     DynamicMask = B.buildInstr(Adapter, {Ty}, {DynamicMask}).getReg(0);
-  MachineInstr *Outer = B.buildAnd(Ty, A, DynamicMask).getInstr();
+  else if (Adapter == TargetOpcode::G_OR || Adapter == TargetOpcode::G_XOR) {
+    Register OtherMasked = B.buildAnd(Ty, A, Mask).getReg(0);
+    DynamicMask =
+        B.buildInstr(Adapter, {Ty}, {DynamicMask, OtherMasked}).getReg(0);
+  }
+  for (unsigned I = 0; I != CopyDepth; ++I) {
+    Register Copied = MRI.createGenericVirtualRegister(Ty);
+    B.buildCopy(Copied, DynamicMask);
+    DynamicMask = Copied;
+  }
+  MachineInstr *Outer =
+      B.buildAnd(Ty, Swap ? DynamicMask : A, Swap ? A : DynamicMask).getInstr();
   Register Value = Outer->getOperand(0).getReg();
   MachineInstr *Trunc = B.buildTrunc(I1, Value).getInstr();
   Register Narrow = Trunc->getOperand(0).getReg();
@@ -650,8 +665,10 @@ static void checkTruncBranchProof(TestContext &TC, int MaskValue,
   GISelObserverWrapper Observer;
   LegalizerHelper Helper(MF, TC.LI, Observer, B);
   LostDebugLocObserver LocObserver("trunc-branch-proof-step");
-  const bool Expected =
-      Bits == 32 && !Adapter && (MaskValue == 0 || MaskValue == 1);
+  const bool Expected = Bits == 32 &&
+                        (!Adapter || Adapter == TargetOpcode::G_OR ||
+                         Adapter == TargetOpcode::G_XOR) &&
+                        CopyDepth < 64 && (MaskValue == 0 || MaskValue == 1);
   const auto Size = Entry->size();
   for (unsigned I = 0; I != 2; ++I)
     if (Helper.legalizeInstrStep(*Trunc, LocObserver) !=
@@ -659,9 +676,9 @@ static void checkTruncBranchProof(TestContext &TC, int MaskValue,
         Branch->getOperand(0).getReg() != (Expected ? Value : Narrow) ||
         Entry->size() != Size)
       fail("late truncation proof failed or was not idempotent", MF);
-  if (Outer->getOperand(1).getReg() != A ||
-      Outer->getOperand(2).getReg() != DynamicMask ||
-      Inner->getOperand(2).getReg() != Mask ||
+  if (Outer->getOperand(Swap ? 2 : 1).getReg() != A ||
+      Outer->getOperand(Swap ? 1 : 2).getReg() != DynamicMask ||
+      Inner->getOperand(Swap ? 1 : 2).getReg() != Mask ||
       Other->getOperand(1).getReg() != Narrow || MRI.getType(Narrow) != I1)
     fail("late truncation proof changed arithmetic or another user", MF);
 }
@@ -756,9 +773,15 @@ int main() {
   TestContext TC(std::move(TM));
 #ifdef COREDSL_SELECT_AND_TEST
   for (int Mask : {0, 1, 2, 3, -1})
-    checkTruncBranchProof(TC, Mask, 0);
-  for (unsigned Adapter : {TargetOpcode::G_ANYEXT, TargetOpcode::G_ZEXT,
-                           TargetOpcode::G_SEXT, TargetOpcode::G_FREEZE})
+    for (bool Swap : {false, true}) {
+      for (unsigned Depth : {0, 8, 128})
+        checkTruncBranchProof(TC, Mask, 0, 32, Depth, Swap);
+      for (unsigned Op : {TargetOpcode::G_OR, TargetOpcode::G_XOR})
+        checkTruncBranchProof(TC, Mask, Op, 32, 0, Swap);
+    }
+  for (unsigned Adapter :
+       {TargetOpcode::G_ANYEXT, TargetOpcode::G_ZEXT, TargetOpcode::G_SEXT,
+        TargetOpcode::G_FREEZE, TargetOpcode::G_IMPLICIT_DEF})
     checkTruncBranchProof(TC, 1, Adapter);
   checkTruncBranchProof(TC, 1, 0, 16);
   for (bool UseCSE : {false, true})

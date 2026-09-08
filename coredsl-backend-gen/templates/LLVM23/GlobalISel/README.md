@@ -404,10 +404,27 @@ The same direct-result optimization also recognizes `G_AND x, 1` and
 is unnecessary. If AND needs widening, its mask is explicitly materialized as
 the numeric value `1` in the native carrier rather than any-extending the old
 mask. Masks recognized through constant copies or defined casts are stabilized
-the same way. Other masks and variable masks are not optimized; ANYEXT's
-unspecified high bits are not treated as proof of a mask equal to one. Other
+the same way. At this early branch rewrite, other masks and variable masks are
+not optimized; ANYEXT's unspecified high bits are not treated as proof of a
+mask equal to one. Other
 users still keep their original result types. No general arithmetic-result
 optimization is enabled.
+
+Supported `G_TRUNC` pairs also have a late custom step for direct `G_BRCOND`
+users. A branch emitted by SELECT may accept its i1 condition before ordinary
+AND widening creates a `TRUNC i32 -> i1`. At that artifact's legalization step,
+the branch can use the native source directly if every source bit above bit 0
+is provably zero. This handles a dynamic mask such as
+`AND a, (AND b, 1)` without changing either AND or its operands. Conversions
+still required by the arithmetic, such as ICMP's i64-to-i32 input to AND, remain.
+Other narrow users keep the truncation; a now-unused truncation is removed.
+
+The proof examines at most 64 distinct registers and only stable facts from currently
+legal constants, AND/OR/XOR, comparisons, same-type COPY and supported
+TRUNC/ANYEXT adapters. ANYEXT adds no high-bit facts. Pending widening,
+ZEXT/SEXT (which this policy later turns into ANYEXT), PHI, FREEZE, unknown
+values and unsupported operations do not supply proof. Ordinary truncations
+with no provably redundant branch edge are accepted unchanged.
 
 Scalar `G_UREM x, y` uses the existing opcode-specific type and promotion
 rules, but its accepted scalar form now has a value-dependent custom step.
@@ -434,6 +451,13 @@ legalization with CSE, other narrow users, value widening, and successor-PHI
 repair. `coredsl-icmp-brcond-i64` additionally renders the example with
 `--native-i64` to exercise i64 comparisons; the default example still declares
 only i16/i32 native integers.
+`coredsl-icmp-brcond-select-and` uses a separate regression fixture with native
+i1/i16/i32/i64, AND constrained to i32 and ICMP inputs to i64. It exercises an
+i1 ICMP/AND feeding a floating-point SELECT, with CSE on/off, both visit orders
+and other narrow users. The issue's omitted dynamic-mask definition is modeled
+by remainder by two, so the masking AND is generated during legalization.
+One-step tests cover commuted operands, COPY chains, the proof budget, OR/XOR,
+unknown/non-boolean masks, pending widening and extension/FREEZE boundaries.
 These MIR tests do not validate another target's
 instruction selector.
 
