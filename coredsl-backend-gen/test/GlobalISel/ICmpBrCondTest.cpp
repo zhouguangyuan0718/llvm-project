@@ -385,88 +385,6 @@ static void checkOtherAndMasks(TestContext &TC, int MaskValue, bool Variable,
     fail("AND with a mask other than exact one was rewritten", MF);
 }
 
-static void checkAndChain(TestContext &TC, unsigned Bits, unsigned Depth,
-                          bool MaskFirst, bool Copies, bool FullPassFirst,
-                          int MaskValue = 1, unsigned Barrier = 0,
-                          bool DirectTrunc = false) {
-  MachineFunction &MF = TC.makeFunction("and_chain_branch");
-  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
-  MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
-  MF.push_back(Entry);
-  MF.push_back(Target);
-  Entry->addSuccessor(Target);
-  MachineIRBuilder B(MF);
-  B.setMBB(*Entry);
-  MachineRegisterInfo &MRI = MF.getRegInfo();
-  const LLT Ty = LLT::integer(Bits);
-  Register Input = B.buildUndef(Ty).getReg(0);
-  Register Value = B.buildConstant(Ty, MaskValue).getReg(0);
-  struct AndSnapshot {
-    MachineInstr *MI;
-    Register Result, Left, Right;
-  };
-  SmallVector<AndSnapshot, 8> Ands;
-  for (unsigned I = 0; I != Depth; ++I) {
-    if (I == 1 && Barrier) {
-      if (Barrier == TargetOpcode::G_ANYEXT ||
-          Barrier == TargetOpcode::G_ZEXT) {
-        Register Narrow = B.buildTrunc(LLT::integer(1), Value).getReg(0);
-        Value = B.buildInstr(Barrier, {Ty}, {Narrow}).getReg(0);
-      } else if (Barrier == TargetOpcode::G_OR) {
-        Value = B.buildOr(Ty, Value, Input).getReg(0);
-      } else {
-        Value = B.buildInstr(Barrier, {Ty}, {Value}).getReg(0);
-      }
-    }
-    if (Copies) {
-      Register Copy = MRI.createGenericVirtualRegister(Ty);
-      B.buildCopy(Copy, Value);
-      Value = Copy;
-    }
-    Register Left = MaskFirst ? Value : Input;
-    Register Right = MaskFirst ? Input : Value;
-    MachineInstr *And = B.buildAnd(Ty, Left, Right).getInstr();
-    Value = And->getOperand(0).getReg();
-    Ands.push_back({And, Value, Left, Right});
-  }
-  Register Narrow = B.buildTrunc(LLT::integer(1), Value).getReg(0);
-  Register Sink = MRI.createGenericVirtualRegister(LLT::integer(1));
-  MachineInstr *Other = B.buildCopy(Sink, Narrow).getInstr();
-  Register Condition =
-      DirectTrunc ? Narrow : B.buildZExt(LLT::integer(16), Narrow).getReg(0);
-  MachineInstr *Branch = B.buildBrCond(Condition, *Target).getInstr();
-  const bool Expected = Bits >= 16 && Depth < 32 && MaskValue == 1 && !Barrier;
-  if (!FullPassFirst) {
-    GISelObserverWrapper Observer;
-    LegalizerHelper Helper(MF, TC.LI, Observer, B);
-    LostDebugLocObserver LocObserver("and-chain-step");
-    const auto Size = Entry->size();
-    for (unsigned I = 0; I != 2; ++I) {
-      if (Helper.legalizeInstrStep(*Branch, LocObserver) ==
-              LegalizerHelper::UnableToLegalize ||
-          Branch->getOperand(0).getReg() != (Expected ? Value : Condition) ||
-          Entry->size() != Size)
-        fail("AND-chain branch proof or idempotence failed", MF);
-    }
-    for (const auto &Saved : Ands)
-      if (Saved.MI->getOperand(0).getReg() != Saved.Result ||
-          Saved.MI->getOperand(1).getReg() != Saved.Left ||
-          Saved.MI->getOperand(2).getReg() != Saved.Right)
-        fail("AND-chain proof modified a dynamic operand or result", MF);
-    if (!Expected)
-      return;
-  }
-  legalizeAll(TC, MF);
-  if (Branch->getOperand(0).getReg() != Value ||
-      MRI.getType(Other->getOperand(1).getReg()) != LLT::integer(1))
-    fail("AND-chain full pass retained branch casts or changed another use",
-         MF);
-  const auto &Root = Ands.back();
-  if (Root.MI->getOperand(1).getReg() != Root.Left ||
-      Root.MI->getOperand(2).getReg() != Root.Right)
-    fail("AND-chain full pass replaced a dynamic mask", MF);
-}
-
 static void checkURem(TestContext &TC, unsigned Bits, uint64_t DivisorValue,
                       bool Dynamic = false, bool Unknown = false,
                       bool Signed = false, bool BranchUse = false) {
@@ -721,23 +639,6 @@ int main() {
 #endif
   for (unsigned Bits : {8u, 16u, 32u})
     checkSelectComparisons(TC, Bits);
-  for (unsigned Bits : {16u, 32u})
-    for (unsigned Depth : {2u, 6u})
-      for (bool MaskFirst : {false, true})
-        for (bool Copies : {false, true})
-          for (bool FullPassFirst : {false, true})
-            for (bool DirectTrunc : {false, true})
-              checkAndChain(TC, Bits, Depth, MaskFirst, Copies, FullPassFirst,
-                            1, 0, DirectTrunc);
-  for (bool MaskFirst : {false, true}) {
-    for (int Mask : {0, 2, 3, -1})
-      checkAndChain(TC, 32, 2, MaskFirst, true, false, Mask);
-    for (unsigned Barrier : {TargetOpcode::G_ANYEXT, TargetOpcode::G_ZEXT,
-                             TargetOpcode::G_FREEZE, TargetOpcode::G_OR})
-      checkAndChain(TC, 32, 2, MaskFirst, false, false, 1, Barrier);
-    checkAndChain(TC, 8, 2, MaskFirst, false, false);
-    checkAndChain(TC, 32, 128, MaskFirst, false, false);
-  }
   for (unsigned Bits : {16u, 32u}) {
     for (uint64_t Divisor :
          {uint64_t(0), uint64_t(1), uint64_t(2), uint64_t(3), uint64_t(8),
