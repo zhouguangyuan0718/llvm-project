@@ -1,5 +1,7 @@
 #include "ExampleLegalizerInfo.h"
 
+#include "llvm/CodeGen/GlobalISel/CSEInfo.h"
+#include "llvm/CodeGen/GlobalISel/CSEMIRBuilder.h"
 #include "llvm/CodeGen/GlobalISel/GISelChangeObserver.h"
 #include "llvm/CodeGen/GlobalISel/GISelValueTracking.h"
 #include "llvm/CodeGen/GlobalISel/Legalizer.h"
@@ -53,12 +55,23 @@ struct TestContext {
   }
 };
 
-static void legalizeAll(TestContext &TC, MachineFunction &MF) {
+static void legalizeAll(TestContext &TC, MachineFunction &MF,
+                        bool UseCSE = false) {
   MachineIRBuilder B(MF);
   LostDebugLocObserver LocObserver("icmp-brcond-test");
   GISelValueTracking VT(MF);
+  GISelCSEInfo CSEInfo;
+  SmallVector<GISelChangeObserver *, 2> Observers{&LocObserver};
+  if (UseCSE) {
+    CSEInfo.setCSEConfig(std::make_unique<CSEConfigFull>());
+    CSEInfo.analyze(MF);
+    B.setCSEInfo(&CSEInfo);
+    Observers.push_back(&CSEInfo);
+  }
+  CSEMIRBuilder CSEBuilder(B.getState());
+  MachineIRBuilder &Builder = UseCSE ? CSEBuilder : B;
   const auto Result = Legalizer::legalizeMachineFunction(
-      MF, TC.LI, {&LocObserver}, LocObserver, B, &VT);
+      MF, TC.LI, Observers, LocObserver, Builder, &VT);
   if (Result.FailedOn)
     fail("whole-function legalization failed", MF);
 }
@@ -577,6 +590,112 @@ static void checkURemDependencies(TestContext &TC, unsigned Missing,
     fail("skipped remainder rewrite left partial instructions behind", MF);
 }
 
+static void checkSelectCompareBranch(TestContext &TC, unsigned InputBits,
+                                     unsigned ValueBits, bool CompareFirst,
+                                     bool NativeAdapter, bool OtherUse,
+                                     bool FullPassFirst,
+                                     CmpInst::Predicate Predicate) {
+  MachineFunction &MF = TC.makeFunction("select_compare_branch");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Exit = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Exit);
+  Entry->addSuccessor(Exit);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const LLT InputTy = LLT::integer(InputBits),
+            ValueTy = LLT::integer(ValueBits);
+  Register A = B.buildUndef(InputTy).getReg(0);
+  Register C = B.buildUndef(InputTy).getReg(0);
+  MachineInstr *Cmp = B.buildICmp(Predicate, LLT::integer(1), A, C).getInstr();
+  Register Condition = Cmp->getOperand(0).getReg();
+  MachineInstr *Other = nullptr;
+  if (OtherUse) {
+    Register Sink = MRI.createGenericVirtualRegister(LLT::integer(1));
+    Other = B.buildCopy(Sink, Condition).getInstr();
+  }
+  if (NativeAdapter)
+    Condition = B.buildZExt(LLT::integer(16), Condition).getReg(0);
+  Register TrueValue = B.buildConstant(ValueTy, 1).getReg(0);
+  Register FalseValue = B.buildConstant(ValueTy, 0).getReg(0);
+  MachineInstr *Select =
+      B.buildSelect(ValueTy, Condition, TrueValue, FalseValue).getInstr();
+  Register Selected = Select->getOperand(0).getReg();
+  B.buildBr(*Exit);
+  B.setMBB(*Exit);
+  MachineInstr *ExitPhi = B.buildInstr(TargetOpcode::G_PHI, {ValueTy}, {})
+                              .addUse(Selected)
+                              .addMBB(Entry)
+                              .getInstr();
+  Register Sink = MRI.createGenericVirtualRegister(ValueTy);
+  B.buildCopy(Sink, ExitPhi->getOperand(0).getReg());
+  if (!FullPassFirst) {
+    GISelObserverWrapper Observer;
+    LegalizerHelper Helper(MF, TC.LI, Observer, B);
+    LostDebugLocObserver LocObserver("select-compare-step");
+    if (CompareFirst) {
+      for (unsigned I = 0; I != 3 && TC.LI.getAction(*Cmp, MRI).Action !=
+                                         LegalizeActions::Legal;
+           ++I)
+        if (Helper.legalizeInstrStep(*Cmp, LocObserver) !=
+            LegalizerHelper::Legalized)
+          fail("SELECT's comparison could not be legalized first", MF);
+    }
+    // Data widening may precede expansion; condition widening must not.
+    if (ValueBits < 16 && Helper.legalizeInstrStep(*Select, LocObserver) !=
+                              LegalizerHelper::Legalized)
+      fail("SELECT data widening failed", MF);
+    if (Helper.legalizeInstrStep(*Select, LocObserver) !=
+        LegalizerHelper::Legalized)
+      fail("SELECT expansion failed", MF);
+    MachineInstr *Branch = Entry->getFirstTerminatorForward() == Entry->end()
+                               ? nullptr
+                               : &*Entry->getFirstTerminatorForward();
+    if (!Branch || Branch->getOpcode() != TargetOpcode::G_BRCOND ||
+        Branch->getOperand(0).getReg() != Cmp->getOperand(0).getReg() ||
+        TC.LI.getAction(*Cmp, MRI).Action != LegalizeActions::Legal)
+      fail("SELECT did not create a direct legalized comparison branch", MF);
+  }
+  legalizeAll(TC, MF, FullPassFirst);
+  MachineInstr &Branch = *Entry->getFirstTerminatorForward();
+  if (Branch.getOpcode() != TargetOpcode::G_BRCOND ||
+      Branch.getOperand(0).getReg() != Cmp->getOperand(0).getReg() ||
+      MRI.getType(Branch.getOperand(0).getReg()) !=
+          LLT::integer(std::max(16u, InputBits)) ||
+      Cmp->getOperand(1).getPredicate() != Predicate)
+    fail("SELECT-generated branch retained condition artifacts", MF);
+  for (const auto &BB : MF)
+    for (const auto &MI : BB)
+      // Narrow comparison inputs may legitimately need masking during their
+      // own widening. Native input comparisons need no mask at all here.
+      if (MI.getOpcode() == TargetOpcode::G_SELECT ||
+          (InputBits >= 16 && MI.getOpcode() == TargetOpcode::G_AND))
+        fail("comparison SELECT left a SELECT or boolean mask behind", MF);
+  if (Other && MRI.getType(Other->getOperand(1).getReg()) != LLT::integer(1))
+    fail("SELECT expansion changed another comparison user's type", MF);
+  if (Exit->pred_size() != 1 ||
+      ExitPhi->getOperand(2).getMBB() != *Exit->pred_begin() ||
+      ExitPhi->getOperand(2).getMBB() == Entry || MF.size() != 5)
+    fail("SELECT expansion did not repair the successor PHI and CFG", MF);
+}
+
+static void checkSelectComparisons(TestContext &TC, unsigned InputBits) {
+  SmallVector<unsigned, 5> ValueWidths{1, 8, 16, 32};
+  if (InputBits == 64)
+    ValueWidths.push_back(64);
+  for (unsigned ValueBits : ValueWidths)
+    for (bool CompareFirst : {false, true})
+      for (bool NativeAdapter : {false, true})
+        for (bool OtherUse : {false, true})
+          for (bool FullPassFirst : {false, true})
+            for (auto Pred :
+                 {CmpInst::ICMP_EQ, CmpInst::ICMP_SLT, CmpInst::ICMP_ULT})
+              checkSelectCompareBranch(TC, InputBits, ValueBits, CompareFirst,
+                                       NativeAdapter, OtherUse, FullPassFirst,
+                                       Pred);
+}
+
 int main() {
   LLT::setUseExtended(true);
   InitializeNativeTarget();
@@ -595,6 +714,13 @@ int main() {
   if (!TM)
     return 1;
   TestContext TC(std::move(TM));
+#ifdef COREDSL_SELECT_I64_TEST
+  checkSelectComparisons(TC, 64);
+  outs() << "i64 comparison SELECT-generated branch tests passed\n";
+  return 0;
+#endif
+  for (unsigned Bits : {8u, 16u, 32u})
+    checkSelectComparisons(TC, Bits);
   for (unsigned Bits : {16u, 32u})
     for (unsigned Depth : {2u, 6u})
       for (bool MaskFirst : {false, true})

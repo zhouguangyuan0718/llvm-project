@@ -1,6 +1,6 @@
 foreach(Kind IN ITEMS h cpp)
   execute_process(
-    COMMAND "${RENDERER}" "${TEMPLATES}/LegalizerInfo.${Kind}.mustache"
+    COMMAND "${RENDERER}" "${TEMPLATES}/LegalizerInfo.${Kind}.mustache" ${RENDERER_ARGS}
     OUTPUT_FILE "${OUTPUT_DIRECTORY}/ExampleLegalizerInfo.${Kind}"
     ERROR_VARIABLE Error
     RESULT_VARIABLE Result)

@@ -332,8 +332,10 @@ closed. `G_FCMP` promotes an unsupported floating-point input to its narrowest
 wider native type, then gives the comparison result the exact same width as
 that legalized input: `f16 -> i16`, `f32 -> i32`, and so on. The corresponding
 exact integer type must be supported for `G_FCMP`; a merely wider integer does
-not substitute for it. The condition input of `G_SELECT` uses the smallest
-condition carrier. Pointer values are also accepted by `G_SELECT` and `G_PHI`.
+not substitute for it. The condition input of `G_SELECT` is delegated to the
+`G_BRCOND` policy during control-flow expansion rather than widened separately
+under SELECT's index-1 constraints. Pointer values are also accepted by
+`G_SELECT` and `G_PHI`.
 
 An accepted scalar `G_SELECT` is not left for instruction selection. Custom
 legalization splits its block into true, false, and merge blocks, emits
@@ -342,6 +344,12 @@ merge block. This applies to integer, floating-point, and pointer values and to
 all selects, not only selects introduced by another generated rule. Instructions
 after the select and the original CFG successors are moved to the merge block;
 successor PHIs and the machine-function `NoPHIs` property are updated.
+The new BRCOND is immediately passed through the existing branch-carrier
+rewrite. An `ICMP i64 -> i1 -> SELECT` therefore connects the generated branch
+directly to the legalized comparison result when i64 comparisons are supported,
+without first building SELECT's condition ZEXT/SEXT or waiting for a later
+worklist visit. SELECT value promotion/bitcasting and other narrow comparison
+users are unchanged. Non-comparison conditions retain BRCOND's existing rules.
 
 `G_FMAXIMUM` is custom-lowered through `G_FCMP` and `G_SELECT`, after promoting
 an unsupported low floating-point type when a wider opcode type is available.
@@ -433,6 +441,11 @@ AND-chain tests cover nested/commuted operands, COPYs, unchanged dynamic masks,
 other narrow users, traversal limits, and unsupported-width/cast boundaries.
 It also checks constant and dynamic power-of-two remainder, non-rewritten
 divisors, missing replacement operations, and remainder-by-two branch edges.
+SELECT tests cover comparison-first and SELECT-first processing, full worklist
+legalization with CSE, other narrow users, value widening, and successor-PHI
+repair. `coredsl-icmp-brcond-i64` additionally renders the example with
+`--native-i64` to exercise i64 comparisons; the default example still declares
+only i16/i32 native integers.
 These MIR tests do not validate another target's
 instruction selector.
 

@@ -1056,7 +1056,15 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
 
   Builder.setInsertPt(HeadMBB, HeadMBB.end());
   Builder.setDebugLoc(DL);
-  Builder.buildBrCond(ConditionReg, *TrueMBB);
+  MachineInstr *Branch = Builder.buildBrCond(ConditionReg, *TrueMBB).getInstr();
+  // Resolve the condition while expanding SELECT, not only when the new
+  // branch is eventually visited. In particular, finish ICMP widening and
+  // reuse its real result before artifact combining can insert boolean masks.
+  if (!applyBrCondCarrierRewrite(Helper, *Branch))
+    return false;
+  // The branch rewrite can move the builder back to the defining comparison.
+  Builder.setInsertPt(HeadMBB, HeadMBB.end());
+  Builder.setDebugLoc(DL);
   Builder.buildBr(*FalseMBB);
 
   Builder.setInsertPt(*TrueMBB, TrueMBB->end());
@@ -1773,10 +1781,12 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return Query.Types.size() > 1 &&
            (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
             isOpcodeFloatType(Query, 0)) &&
-           isOpcodeIntegerType(Query, 1);
+           Query.Types[1].isInteger() &&
+           getNativeIntegerTypeForWidth(
+               Query.Types[1].getScalarSizeInBits()).isValid();
   });
-  SelectActions.widenScalarIf(integerTypeNeedsPromotion(1),
-                              promoteIntegerType(1));
+  // SELECT is eliminated into control flow. Let BRCOND choose its condition
+  // carrier directly instead of first introducing SELECT's ZEXT/SEXT adapter.
   SelectActions.bitcastIf(floatTypeNeedsIntegerBitcast(0),
                           bitcastFloatToSameWidthInteger(0));
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(0),

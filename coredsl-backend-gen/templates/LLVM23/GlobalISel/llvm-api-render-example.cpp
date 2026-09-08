@@ -14,13 +14,15 @@
 
 using namespace llvm;
 
-static json::Value makeLegalizerInput() {
+static json::Value makeLegalizerInput(bool IncludeI64 = false) {
   json::Object Root;
   Root["target"] = "Example";
 
   json::Array IntegerWidths;
   IntegerWidths.emplace_back(16);
   IntegerWidths.emplace_back(32);
+  if (IncludeI64)
+    IntegerWidths.emplace_back(64);
 
   json::Array FloatingPointWidths;
   FloatingPointWidths.emplace_back(32);
@@ -136,13 +138,13 @@ static Error renderTemplate(StringRef TemplatePath, const json::Value &Data,
 }
 
 int main(int Argc, char **Argv) {
-  if (Argc != 2) {
-    errs() << "usage: llvm-api-render-example <template.mustache>\n";
+  if (Argc != 2 && !(Argc == 3 && StringRef(Argv[2]) == "--native-i64")) {
+    errs() << "usage: llvm-api-render-example <template.mustache> [--native-i64]\n";
     return 1;
   }
 
   ExitOnError ExitOnErr("llvm-api-render-example: ");
-  json::Value Data = makeLegalizerInput();
+  json::Value Data = makeLegalizerInput(Argc == 3);
   ExitOnErr(renderTemplate(Argv[1], Data, outs()));
   return 0;
 }
