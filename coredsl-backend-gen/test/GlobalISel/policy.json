@@ -1,0 +1,25 @@
+{
+  "target": "Example",
+  "native_types": {"integer_widths":[64,16,32],"floating_point_widths":[64,32]},
+  "operation_type_constraints": [
+    {"opcode_cpp":"G_IMPLICIT_DEF","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32},{"integer_width":64},{"floating_point_width":32},{"floating_point_width":64}]}]},
+    {"opcode_cpp":"G_CONSTANT","scalar_types":[{"index":0,"types":[{"integer_width":32},{"integer_width":16}]}]},
+    {"opcode_cpp":"G_FCONSTANT","scalar_types":[{"index":0,"types":[{"floating_point_width":64}]}]},
+    {"opcode_cpp":"G_MUL","scalar_types":[{"index":0,"types":[{"integer_width":16}]}]},
+    {"opcode_cpp":"G_XOR","scalar_types":[{"index":0,"types":[{"integer_width":32}]}]},
+    {"opcode_cpp":"G_AND","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]}]},
+    {"opcode_cpp":"G_OR","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]}]},
+    {"opcode_cpp":"G_UREM","scalar_types":[{"index":0,"types":[{"integer_width":32}]}]},
+    {"opcode_cpp":"G_SHL","scalar_types":[{"index":0,"types":[{"integer_width":32}]}]},
+    {"opcode_cpp":"G_ICMP","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]},{"index":1,"types":[{"integer_width":16},{"integer_width":32},{"integer_width":64}]}]},
+    {"opcode_cpp":"G_FCMP","scalar_types":[{"index":0,"types":[{"integer_width":64}]},{"index":1,"types":[{"floating_point_width":32},{"floating_point_width":64}]}]},
+    {"opcode_cpp":"G_BRCOND","scalar_types":[{"index":0,"types":[{"integer_width":32}]}]},
+    {"opcode_cpp":"G_SELECT","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32},{"integer_width":64},{"floating_point_width":32}]},{"index":1,"types":[{"integer_width":16},{"integer_width":32},{"integer_width":64}]}]},
+    {"opcode_cpp":"G_PHI","scalar_types":[{"index":0,"types":[{"integer_width":32},{"floating_point_width":32}]}]},
+    {"opcode_cpp":"G_LOAD","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32},{"floating_point_width":32}]}]},
+    {"opcode_cpp":"G_STORE","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32},{"floating_point_width":32}]}]},
+    {"opcode_cpp":"G_FMAXIMUM","scalar_types":[{"index":0,"types":[{"floating_point_width":32}]}]},
+    {"opcode_cpp":"G_FMINIMUM","scalar_types":[{"index":0,"types":[{"floating_point_width":32}]}]},
+    {"opcode_cpp":"G_FDIV","scalar_types":[{"index":0,"types":[{"floating_point_width":32}]}]}
+  ]
+}

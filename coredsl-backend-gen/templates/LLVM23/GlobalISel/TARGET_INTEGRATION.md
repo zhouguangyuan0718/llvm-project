@@ -1,155 +1,43 @@
-# Integrating the generated legalizer into another LLVM target
+# Integrating the generated legalizer
 
-This example integrates the templates into a fictional LLVM target named
-`Toy16`. It assumes that the target already has, or is also adding, the other
-required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
-`InstructionSelector`.
+The target must already provide GlobalISel CallLowering, RegisterBankInfo, and
+InstructionSelector components. This guide integrates the standalone templates,
+not the separate simplified policy emitted by LLVM23Emitter.cpp.
 
-## 1. Construct the renderer input
+## 1. Supply capability data and render
 
-The generator supplies the target name, target-native scalar carriers, and one
-instruction-collected scalar capability table shared by generic opcodes and
-intrinsics. Operation-specific candidates must be members of the matching
-native carrier list:
+Use the input shape in [legalizer-input.example.json](legalizer-input.example.json).
+Set `target` to the exact LLVM target spelling, for example `Toy16`, and collect
+scalar register carriers from target instruction results and operands:
 
 ```cpp
-llvm::json::Object Root;
 Root["target"] = "Toy16";
-
-llvm::json::Array IntegerWidths;
-IntegerWidths.emplace_back(16);
-IntegerWidths.emplace_back(32);
-
-llvm::json::Array FloatingPointWidths;
-FloatingPointWidths.emplace_back(32);
-
-llvm::json::Object NativeTypes;
-NativeTypes["integer_widths"] = std::move(IntegerWidths);
-NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
-Root["native_types"] = std::move(NativeTypes);
-
-auto IntegerType = [](unsigned Width) {
-  llvm::json::Object Type;
-  Type["integer_width"] = Width;
-  return Type;
-};
-auto FloatType = [](unsigned Width) {
-  llvm::json::Object Type;
-  Type["floating_point_width"] = Width;
-  return Type;
-};
-auto MakeScalarType = [](unsigned Index, llvm::json::Array Types) {
-  llvm::json::Object ScalarType;
-  ScalarType["index"] = Index;
-  ScalarType["types"] = std::move(Types);
-  return ScalarType;
-};
-
-auto MakeOperation = [](llvm::StringRef IdKey, llvm::StringRef Id,
-                        llvm::json::Array ScalarTypes) {
-  llvm::json::Object Operation;
-  Operation[IdKey] = Id;
-  Operation["scalar_types"] = std::move(ScalarTypes);
-  return Operation;
-};
-auto MemoryTypes = [&]() {
-  llvm::json::Array Types;
-  Types.emplace_back(IntegerType(16));
-  Types.emplace_back(IntegerType(32));
-  return Types;
-};
-
-llvm::json::Array MulTypes;
-MulTypes.emplace_back(IntegerType(16));
-
-llvm::json::Array BrCondTypes;
-BrCondTypes.emplace_back(IntegerType(32));
-BrCondTypes.emplace_back(IntegerType(16));
-
-llvm::json::Array FDivTypes;
-FDivTypes.emplace_back(FloatType(32));
-
-llvm::json::Array ShlValueTypes;
-ShlValueTypes.emplace_back(IntegerType(32));
-ShlValueTypes.emplace_back(IntegerType(16));
-
-llvm::json::Array ShlAmountTypes;
-ShlAmountTypes.emplace_back(IntegerType(16));
-
-llvm::json::Array IntrinsicTypes;
-IntrinsicTypes.emplace_back(IntegerType(32));
-IntrinsicTypes.emplace_back(IntegerType(16));
-
-auto SingleScalarType = [&](unsigned Index, llvm::json::Array Types) {
-  llvm::json::Array ScalarTypes;
-  ScalarTypes.emplace_back(MakeScalarType(Index, std::move(Types)));
-  return ScalarTypes;
-};
-
-llvm::json::Array ShlScalarTypes;
-ShlScalarTypes.emplace_back(
-    MakeScalarType(0, std::move(ShlValueTypes)));
-ShlScalarTypes.emplace_back(
-    MakeScalarType(1, std::move(ShlAmountTypes)));
-
-Root["operation_type_constraints"] = llvm::json::Array{
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_LOAD", SingleScalarType(0, MemoryTypes()))),
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_STORE", SingleScalarType(0, MemoryTypes()))),
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_MUL", SingleScalarType(0, std::move(MulTypes)))),
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_BRCOND",
-        SingleScalarType(0, std::move(BrCondTypes)))),
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_FDIV", SingleScalarType(0, std::move(FDivTypes)))),
-    llvm::json::Value(MakeOperation(
-        "opcode_cpp", "G_SHL", std::move(ShlScalarTypes))),
-    llvm::json::Value(MakeOperation(
-        "intrinsic_id_cpp", "Intrinsic::toy16_f16_op",
-        SingleScalarType(0, std::move(IntrinsicTypes))))};
+// native_types: integer_widths [16,32], floating_point_widths [32]
+// operation_type_constraints: generic opcode/type indices and intrinsic inputs
 ```
 
-The `G_SHL` index-0 and intrinsic candidate lists deliberately spell `i32`
-before `i16`. Capability-list order has no semantic effect; legalization still
-selects the narrowest convertible type after preserving an exact match.
-The input producer should obtain these candidates from target instruction
-register results and operands, grouped by the mapped generic opcode or
-intrinsic and scalar index. Do not collect immediate widths, memory-only widths,
-or source IR types that are converted before reaching the target instruction.
-Types repeated by different instructions are harmless: the generated table
-keeps the operation-specific entries independent of `native_types`.
-`G_BRCOND` is a normal typed opcode with condition type index 0; preserve its
-entry instead of replacing it with an inferred target-wide branch type set.
+Do not collect immediate widths, memory-only widths, or IR source types that
+must first be converted into register carriers. Each operation candidate must
+belong to the appropriate native list. For opcode indices and fixed artifact
+exclusions, follow the [rule domains and operation table](README.md).
 
-Register the `target_upper` lambda as shown in
-`llvm-api-render-example.cpp`, disable HTML escaping, and render:
+Register `target_upper` and disable HTML escaping as in
+`llvm-api-render-example.cpp`. Render and format:
 
 ```text
-LegalizerInfo.h.mustache
-  -> llvm/lib/Target/Toy16/GISel/Toy16LegalizerInfo.h
-
-LegalizerInfo.cpp.mustache
-  -> llvm/lib/Target/Toy16/GISel/Toy16LegalizerInfo.cpp
+LegalizerInfo.h.mustache   -> GISel/Toy16LegalizerInfo.h
+LegalizerInfo.cpp.mustache -> GISel/Toy16LegalizerInfo.cpp
 ```
 
-For `target = "Toy16"`, the generated header declares
-`llvm::Toy16LegalizerInfo`, and its guard is
-`LLVM_LIB_TARGET_TOY16_LEGALIZERINFO_H`.
+The generated class is `llvm::Toy16LegalizerInfo`. If the input contains
+intrinsics, the source includes `llvm/IR/IntrinsicsToy16.h`; its enum names must
+match those emitted from the target intrinsic TableGen definitions. Inputs
+without intrinsics do not need that header.
 
-The source includes `llvm/IR/IntrinsicsToy16.h`. If the target uses the custom
-intrinsic in this example, add its `.td` file to `llvm/IR/Intrinsics.td` and add
-the corresponding `-gen-intrinsic-enums` entry to
-`llvm/include/llvm/IR/CMakeLists.txt`, following the existing target intrinsic
-headers. The `intrinsic_id_cpp` spelling must match the generated enum.
+## 2. Enable ExtendedLLT
 
-## 2. Enable ExtendedLLT consistently
-
-This template targets `llvmorg-23-init` plus the ExtendedLLT reland. Enable
-ExtendedLLT in both the generated matcher and the target runtime.
-
-Add `-gisel-extended-llt` to the target's GlobalISel TableGen command:
+This policy requires LLVM 23 with the ExtendedLLT implementation used by this
+repository. Enable it both in TableGen and before creating runtime LLTs:
 
 ```cmake
 tablegen(LLVM Toy16GenGlobalISel.inc
@@ -157,277 +45,113 @@ tablegen(LLVM Toy16GenGlobalISel.inc
   -gisel-extended-llt)
 ```
 
-Enable the same representation in the target-machine constructor, before
-GlobalISel creates any LLTs:
-
 ```cpp
 #include "llvm/CodeGenTypes/LowLevelType.h"
 
-Toy16TargetMachine::Toy16TargetMachine(/* existing arguments */)
-    : LLVMTargetMachine(/* existing initialization */) {
-  LLT::setUseExtended(true);
-  // Existing target-machine initialization...
-}
+// In the target-machine initialization path, before GlobalISel creates types:
+LLT::setUseExtended(true);
 ```
 
-The switch is process-wide in this LLVM revision. Setting only the TableGen
-flag or only the runtime flag is invalid: generated `GIM_SwitchType` tables use
-the exact ExtendedLLT raw identity, so `s32`, `i32`, and `f32` are different
-keys.
+Use `LLT::integer` and `LLT::floatIEEE` consistently in target code and tests.
+Generic `LLT::scalar` does not match these exact identities.
 
-## 3. Compile the generated source
+## 3. Compile and expose the class
 
-Add the generated implementation to `llvm/lib/Target/Toy16/CMakeLists.txt`:
-
-```cmake
-add_llvm_target(Toy16CodeGen
-  GISel/Toy16CallLowering.cpp
-  GISel/Toy16InstructionSelector.cpp
-  GISel/Toy16LegalizerInfo.cpp
-  GISel/Toy16RegisterBankInfo.cpp
-  Toy16Subtarget.cpp
-  Toy16TargetMachine.cpp
-  # Other target sources...
-)
-```
-
-The generated legalizer has no Subtarget constructor argument. CPU or feature
-dependent legality is intentionally outside this simplified policy. It does
-take the target's `DataLayout`, which supplies pointer representation and index
-widths without adding fields to the renderer input.
-
-The generated source registers the process-wide
-`-Toy16-use-legalizer` option. It defaults to false: an opcode/type-index pair
-absent from the collected table falls back to the matching `native_types`
-list. Set `-Toy16-use-legalizer=true` to make an absent pair fail closed.
-Explicit operation entries take priority and remain closed in both modes. The
-option does not remove native carrier validation for structural legalization
-artifacts such as constants, extensions, or scalar `i1` memory accesses.
-
-The generated constructor also finalizes the embedded legacy tables required
-by `llvmorg-23-init`. Do not remove its
-`getLegacyLegalizerInfo().computeTables()` call: explicitly configured pointer
-and memory rules ending in `fallback()` can still reach the legacy legalizer,
-even if the target defines no legacy actions itself. Completely unlisted
-pre-isel generic opcodes instead pass type legalization unchanged.
-
-## 4. Expose it from the Subtarget
-
-The GlobalISel `Legalizer` pass obtains the policy through
-`TargetSubtargetInfo::getLegalizerInfo()`. Add storage and the override to
-`Toy16Subtarget.h`:
+Add `GISel/Toy16LegalizerInfo.cpp` to the target's CodeGen library. Expose its
+instance through the subtarget:
 
 ```cpp
-#include "llvm/CodeGen/GlobalISel/LegalizerInfo.h"
+// Toy16Subtarget.h
+std::unique_ptr<LegalizerInfo> Legalizer;
+const LegalizerInfo *getLegalizerInfo() const override;
 
-#include <memory>
-
-namespace llvm {
-
-class Toy16Subtarget final : public Toy16GenSubtargetInfo {
-  // Existing CallLowering, selector, and register-bank members...
-  std::unique_ptr<LegalizerInfo> Legalizer;
-
-public:
-  Toy16Subtarget(const Triple &TT, StringRef CPU, StringRef FS,
-                 const TargetMachine &TM);
-
-  const LegalizerInfo *getLegalizerInfo() const override;
-};
-
-} // namespace llvm
-```
-
-Construct the generated policy and return it from `Toy16Subtarget.cpp`:
-
-```cpp
-#include "Toy16Subtarget.h"
+// Toy16Subtarget.cpp
 #include "GISel/Toy16LegalizerInfo.h"
 
-using namespace llvm;
-
-Toy16Subtarget::Toy16Subtarget(const Triple &TT, StringRef CPU, StringRef FS,
-                               const TargetMachine &TM)
-    : Toy16GenSubtargetInfo(TT, CPU, CPU, FS) {
-  // Construct the target's other GlobalISel components here as usual.
-  Legalizer =
-      std::make_unique<Toy16LegalizerInfo>(TM.createDataLayout());
-}
+// In the subtarget constructor:
+Legalizer = std::make_unique<Toy16LegalizerInfo>();
 
 const LegalizerInfo *Toy16Subtarget::getLegalizerInfo() const {
   return Legalizer.get();
 }
 ```
 
-If the target already owns a `std::unique_ptr<LegalizerInfo>`, only replace its
-old construction with
-`std::make_unique<Toy16LegalizerInfo>(TM.createDataLayout())`; do not add a
-second legalizer. The generated class stores its own `DataLayout` copy, so the
-temporary returned by `createDataLayout()` is safe.
+The constructor takes neither Subtarget nor DataLayout. Integrations using the
+previous `Toy16LegalizerInfo(TM.createDataLayout())` call must update it.
 
-## 5. Ensure the GlobalISel pipeline is present
+Keep the standard GlobalISel pipeline: IRTranslator, Legalizer, RegBankSelect,
+InstructionSelect, plus normal target/pass registration. This template does
+not install those components.
 
-An existing GlobalISel target normally already has these hooks. A new target
-needs the standard pass sequence in its `TargetPassConfig`:
+## 4. Choose the fallback mode
 
-```cpp
-bool Toy16PassConfig::addIRTranslator() {
-  addPass(new IRTranslator());
-  return false;
-}
+The generated source registers `-Toy16-use-legalizer`, default false.
 
-bool Toy16PassConfig::addLegalizeMachineIR() {
-  addPass(new Legalizer());
-  return false;
-}
+| Configuration | Result |
+| --- | --- |
+| Explicit opcode/type-index entry | Always use only that entry. |
+| Missing scalar pair, option false | Native scalar fallback permitted. |
+| Missing scalar pair, option true | No scalar carrier. |
+| Fixed cast artifacts or intentional pass-through | Their built-in policy applies in both modes. |
 
-bool Toy16PassConfig::addRegBankSelect() {
-  addPass(new RegBankSelect());
-  return false;
-}
+Strict mode requires explicit entries for scalar operations that legalization
+can produce, including `G_CONSTANT`, `G_FCONSTANT`, and `G_IMPLICIT_DEF`
+when used. Both compare indices require compatible carriers.
 
-bool Toy16PassConfig::addGlobalInstructionSelect() {
-  addPass(new InstructionSelect());
-  return false;
-}
-```
+For example:
 
-Register the GlobalISel passes once during target initialization:
+- scalar SELECT expansion needs supported BRCOND and PHI carriers;
+- i1 memory expansion needs load/store, AND, constants, and possibly OR;
+- constant UREM masking needs AND and constants; a dynamic mask also needs ADD;
+- intrinsic argument conversion may need operation-supported constants.
 
-```cpp
-extern "C" LLVM_ABI LLVM_EXTERNAL_VISIBILITY void LLVMInitializeToy16Target() {
-  RegisterTargetMachine<Toy16TargetMachine> X(getTheToy16Target());
-  initializeGlobalISel(*PassRegistry::getPassRegistry());
-}
-```
+Do not configure scalar entries for artifact-only instructions
+(`ANYEXT/ZEXT/SEXT/TRUNC/BITCAST/FPEXT/FPTRUNC`), unconditional BR, or removed
+pointer opcodes. Their type indices are not scalar capability inputs.
 
-These pipeline hooks are prerequisites of GlobalISel as a whole; the generated
-legalizer does not replace them.
+Pointer arithmetic, conversions, address formation, and pointer-comparison
+legalization must be handled by the integrating target when needed. Removed
+unlisted pointer opcodes pass through this template; pointer ICMP is rejected
+by the scalar comparison rule. No pointer/index width is normalized here.
 
-## 6. Validate the integration
+FMAXIMUM now uses the ordinary exact-type floating rule. If it reaches the
+selector, the target must implement its semantics. There is no generated
+compare/select expansion for it.
 
-Build the target and first stop immediately after legalization:
+## 5. Verify the target integration
+
+Build the target and stop after legalization in both modes:
 
 ```sh
 cmake --build <llvm-build> --target LLVMToy16CodeGen llc
 <llvm-build>/bin/llc -mtriple=toy16 -global-isel \
-  -verify-machineinstrs -stop-after=legalizer input.ll -o -
+  -Toy16-use-legalizer=false -verify-machineinstrs \
+  -stop-after=legalizer input.ll -o -
+<llvm-build>/bin/llc -mtriple=toy16 -global-isel \
+  -Toy16-use-legalizer=true -verify-machineinstrs \
+  -stop-after=legalizer input.ll -o -
 ```
 
-First run without `-Toy16-use-legalizer`, or pass
-`-Toy16-use-legalizer=false` explicitly, and inspect that for native integer
-carriers `[16, 32]`:
+Test native widths, gaps, and values wider than the largest carrier. Exercise
+different result/input constraints for ICMP and FCMP, and verify that unsupported
+result types cannot become directly legal merely because the inputs are legal.
 
-- an `i8 G_CONSTANT` is promoted to the `i16` carrier while `i16` remains legal;
-- `i1` and `i8` integer operations are promoted to `i16`;
-- an `i24` integer operation is promoted to `i32`;
-- the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
-  `i32` instead of treating every native integer carrier as legal;
-- when an unsupported-width integer producer has one same-block use through
-  `G_ANYEXT`, it adopts that wider consumer carrier if the producer supports it;
-  after artifact combining, a chain such as an `i8 G_ADD` feeding an operation
-  fixed to `i32` has no intervening `G_TRUNC`/`G_ANYEXT` pair;
-- multiple uses, cross-block uses, and any `G_ZEXT`/`G_SEXT` retained by target
-  policy keep the ordinary narrowest-carrier choice; supported scalar defined
-  extensions that this generated policy intentionally normalizes to
-  `G_ANYEXT` may then participate in coalescing;
-- `G_UREM x, 16` becomes `G_AND x, 15` when both operations support that
-  carrier, while divisors `0`, `12`, and unknown values remain `G_UREM`;
-- the multi-index `G_SHL` accepts `i16` or `i32` at type index 0 but only
-  `i16` at type index 1; an `i8` shift amount widens to `i16`, while an `i32`
-  shift amount is rejected;
-- an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
-  remaining `G_BITCAST` when `f16` is not native;
-- an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`,
-  `G_FSQRT`, or `G_FEXP` is evaluated as `f32` and truncated back to `f16`,
-  and an `f16 G_FCMP` compares exactly extended `f32` inputs and returns `i32`;
-- an exact floating-point vector `G_FADD`, such as `v4f32`, passes legalization
-  unchanged without a vector entry in the scalar capability table; the target
-  selector must support that complete vector operation;
-- the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
-  wider native float carrier without listing it for `G_FDIV` does not make that
-  type legal for division;
-- an `f16 G_FCONSTANT` feeding one of those promoted operations is folded with
-  its `G_FPEXT` into an exact `f32 G_FCONSTANT`, leaving no low-precision
-  constant definition on that path;
-- a nonconstant `f16` listed intrinsic argument becomes an `i16` bit carrier,
-  while a `G_FCONSTANT f16` argument becomes a bit-identical `G_CONSTANT i16`
-  directly, without a `G_BITCAST`;
-- an `i64 G_CONSTANT` intrinsic argument with candidates `[i16, i32]` becomes
-  `i16` when its value fits either the signed or unsigned `i16` range and falls
-  through to `i32` otherwise; a value outside both ranges and a nonconstant
-  `i64` are rejected;
-- a plain non-atomic `G_LOAD/G_STORE` with an unsupported `f16` value uses an
-  equal-width `i16` memory carrier, while its MMO width and alignment stay
-  unchanged;
-- a plain non-atomic vector `G_LOAD/G_STORE`, such as `v4i16`, is directly legal
-  when its value type and MMO memory type are identical; vector types do not
-  need entries in the scalar index-0 candidate list and are not widened,
-  bitcast, or split by this template;
-- a plain non-atomic, non-volatile `G_LOAD/G_STORE i1` still represents one
-  byte in memory; because this example's common load/store access type is
-  `i16`, a load masks the first byte and a store uses an `i16` read/modify/write
-  with `G_AND`/`G_OR` to preserve the adjacent byte; the target must permit the
-  widened access at the original byte alignment and use a little-endian
-  DataLayout;
-- an `i8` load/store remains unsupported rather than being changed into a
-  mismatched `value i16, memory i8` operation;
-- a native register carrier omitted from the corresponding `G_LOAD` or
-  `G_STORE` index-0 constraint is not directly legal for that memory opcode;
-- assuming Toy16's DataLayout has a 32-bit index, `G_PTR_ADD` keeps its pointer
-  type and promotes an `i8` offset to exactly `i32`; its required signed
-  extension is not weakened to `G_ANYEXT`;
-- `G_INTTOPTR`, `G_PTRTOINT`, and `G_PTRMASK` similarly use the pointer
-  representation width from DataLayout; a layout whose pointer and index
-  widths differ uses the appropriate width for each operation;
-- pointer constants, frame/global/constant-pool/block/jump-table addresses,
-  indirect branches, pointer `G_PHI`, and exact pointer-valued loads/stores
-  pass type legalization unchanged and remain covered by instruction
-  selection;
-- every accepted scalar `G_SELECT`, including a pointer-valued one, becomes a
-  `G_BRCOND`/`G_BR` diamond with a `G_PHI` in its merge block;
-- `nnan nsz G_FMAXIMUM f32` becomes one `G_FCMP ogt` followed by that control-
-  flow expansion; strict `G_FMAXIMUM` additionally retains NaN propagation and
-  `+0.0 > -0.0` repair paths, but leaves no `G_FMAXIMUM` or `G_SELECT`;
-- an unconditional `G_BR` passes legality unchanged;
-- an integer `icmp` result uses the same carrier as its legalized inputs:
-  `(i1, i8)` and `(i1, i16)` become `(i16, i16)`, while `(i1, i32)` becomes
-  `(i32, i32)`; pointer inputs remain unchanged and use an `i16` result;
-- with `ZeroOrOneBooleanContent`, an `icmp -> zext i16 -> store i16` chain
-  contains only `G_ICMP i16` and `G_STORE i16` after artifact combining, with
-  no `G_AND` mask;
-- `G_BRCOND` accepts both `i16` and `i32` conditions directly; a standalone
-  `i1` or `i8` condition is promoted to `i16` with `G_ANYEXT`, using the
-  opcode-specific `G_BRCOND` candidate list;
-- a branch using an integer `G_ICMP` result chooses the same predicted carrier
-  as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an
-  intervening conversion after artifact combining;
-- when the `G_BRCOND` list is temporarily restricted to `[i32]`, an
-  `G_ICMP (i1, i8)` feeding it adopts `(i32, i32)`, and the combined result is
-  a direct `G_ICMP i32` to `G_BRCOND i32` edge;
-- a branch using an `f32 G_FCMP` result likewise reaches `G_BRCOND i32`; an
-  `f16 G_FCMP` promoted to `f32` also returns and branches on `i32`;
-- a value wider than `i32` fails closed instead of narrowing.
+Inspect single-use integer producer/consumer chains and ICMP-to-BRCOND chains.
+Check that redundant truncation/extension bridges disappear, while multiple
+uses, cross-block uses, and raw defined extensions retain their boundaries.
 
-Repeat focused legality queries with `-Toy16-use-legalizer=true`. A built-in
-opcode/type-index pair omitted from `operation_type_constraints`, such as this
-example's `G_ADD` index 0, must fail closed instead of inheriting `[i16, i32]`.
-Configured pairs such as `G_MUL` index 0 and `G_BRCOND` index 0 must retain the
-same legal and rejected carriers in both modes.
+Check constant folding, intrinsic bit patterns and representable narrowing,
+exact memory MMOs, i1 load/store expansions, scalar SELECT CFGs, and guarded
+constant/dynamic UREM cases. For wider i1 access units, independently establish
+the target's alignment and adjacent-byte access contract.
 
-Then run through instruction selection:
+Finally run instruction selection:
 
 ```sh
 <llvm-build>/bin/llc -mtriple=toy16 -global-isel \
-  -verify-machineinstrs input.ll -o /dev/null
+  -Toy16-use-legalizer=true -verify-machineinstrs input.ll -o /dev/null
 ```
 
-The target selector or lowering must cover every built-in opcode that can reach
-it, including `G_FCMP`, `G_ICMP`, `G_BRCOND`, `G_BR`, and `G_PHI`, as well as
-`G_BITCAST`, `G_ANYEXT`, integer truncation, and the generated floating-point
-extension/truncation artifacts introduced by the policy. `G_ZEXT` and `G_SEXT`
-do not reach the selector for supported integer extension pairs. It does not
-need a selector pattern for `G_FMAXIMUM` or scalar `G_SELECT` because generated
-legalization eliminates both.
-Successfully constructing `Toy16LegalizerInfo` alone does not make those
-operations selectable.
+The selector must cover the remaining scalar/vector forms, FMAXIMUM, comparison
+and branch carriers, PHIs, constants, and cast artifacts. Unlisted-opcode
+pass-through is not evidence that an instruction is selectable.

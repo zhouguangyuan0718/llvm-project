@@ -1,0 +1,15 @@
+{
+  "target": "Example",
+  "native_types": {"integer_widths":[16,32],"floating_point_widths":[32]},
+  "operation_type_constraints": [
+    {"opcode_cpp":"G_MUL","scalar_types":[{"index":0,"types":[{"integer_width":16}]}]},
+    {"opcode_cpp":"G_AND","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]}]},
+    {"opcode_cpp":"G_OR","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]}]},
+    {"opcode_cpp":"G_UREM","scalar_types":[{"index":0,"types":[{"integer_width":32}]}]},
+    {"opcode_cpp":"G_LOAD","scalar_types":[{"index":0,"types":[{"integer_width":16}]}]},
+    {"opcode_cpp":"G_STORE","scalar_types":[{"index":0,"types":[{"integer_width":16}]}]},
+    {"opcode_cpp":"G_SELECT","scalar_types":[{"index":0,"types":[{"integer_width":32}]},{"index":1,"types":[{"integer_width":16}]}]},
+    {"opcode_cpp":"G_ICMP","scalar_types":[{"index":1,"types":[{"integer_width":16},{"integer_width":32}]}]},
+    {"opcode_cpp":"G_FCMP","scalar_types":[{"index":1,"types":[{"floating_point_width":32}]}]}
+  ]
+}

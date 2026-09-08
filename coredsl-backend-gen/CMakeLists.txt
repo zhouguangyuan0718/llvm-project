@@ -64,12 +64,67 @@ if(BUILD_TESTING)
   set_tests_properties(coredsl-legalizer-mustache-source PROPERTIES
     PASS_REGULAR_EXPRESSION
       "static_cast<unsigned>\\(TargetOpcode::G_BRCOND\\)")
-  add_test(
-    NAME coredsl-legalizer-mustache-fallback-option
-    COMMAND coredsl-legalizer-mustache-example
-      ${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel/LegalizerInfo.cpp.mustache)
-  set_tests_properties(coredsl-legalizer-mustache-fallback-option PROPERTIES
-    PASS_REGULAR_EXPRESSION "Example-use-legalizer")
+  # Compile rendered templates and exercise LLVM legality queries. The fixtures
+  # use no target intrinsics, so no fabricated intrinsic header is necessary.
+  foreach(Fixture IN ITEMS policy missing)
+    set(LegalizerTestDirectory "${CMAKE_CURRENT_BINARY_DIR}/legalizer-${Fixture}")
+    set(LegalizerTestTarget "coredsl-legalizer-${Fixture}")
+    set(LegalizerFixture "${CMAKE_CURRENT_SOURCE_DIR}/test/GlobalISel/${Fixture}.json")
+    set(LegalizerTemplates "${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel")
+    file(MAKE_DIRECTORY "${LegalizerTestDirectory}")
+    add_custom_command(
+      OUTPUT
+        "${LegalizerTestDirectory}/ExampleLegalizerInfo.h"
+        "${LegalizerTestDirectory}/ExampleLegalizerInfo.cpp"
+      COMMAND ${CMAKE_COMMAND}
+        -DRENDERER=$<TARGET_FILE:coredsl-legalizer-mustache-example>
+        -DTEMPLATES=${LegalizerTemplates}
+        -DINPUT=${LegalizerFixture}
+        -DOUTPUT_DIRECTORY=${LegalizerTestDirectory}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RenderLegalizer.cmake
+      DEPENDS
+        coredsl-legalizer-mustache-example
+        ${LegalizerFixture}
+        ${LegalizerTemplates}/LegalizerInfo.h.mustache
+        ${LegalizerTemplates}/LegalizerInfo.cpp.mustache
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RenderLegalizer.cmake
+      VERBATIM)
+    add_executable(${LegalizerTestTarget}
+      "${LegalizerTestDirectory}/ExampleLegalizerInfo.cpp"
+      "${LegalizerTestDirectory}/ExampleLegalizerInfo.h"
+      test/GlobalISel/LegalizerPolicyTest.cpp)
+    target_include_directories(${LegalizerTestTarget}
+      PRIVATE "${LegalizerTestDirectory}")
+    target_include_directories(${LegalizerTestTarget}
+      SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(${LegalizerTestTarget} PRIVATE LLVMGlobalISel)
+    if(TARGET LLVM${LLVM_NATIVE_ARCH}CodeGen)
+      target_sources(${LegalizerTestTarget} PRIVATE
+        test/GlobalISel/LegalizerMIRTest.cpp)
+      target_link_libraries(${LegalizerTestTarget}
+        PRIVATE LLVM${LLVM_NATIVE_ARCH}CodeGen)
+      target_compile_definitions(${LegalizerTestTarget} PRIVATE HAVE_NATIVE_TARGET)
+    endif()
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+      target_compile_options(${LegalizerTestTarget}
+        PRIVATE ${COREDSL_LLVM_DEFINITIONS})
+    endif()
+    if(NOT LLVM_ENABLE_RTTI)
+      if(MSVC)
+        target_compile_options(${LegalizerTestTarget} PRIVATE /GR-)
+      else()
+        target_compile_options(${LegalizerTestTarget} PRIVATE -fno-rtti)
+      endif()
+    endif()
+    if(Fixture STREQUAL "missing")
+      target_compile_definitions(${LegalizerTestTarget} PRIVATE MISSING_FIXTURE)
+    endif()
+    add_test(NAME ${LegalizerTestTarget}-default COMMAND ${LegalizerTestTarget})
+    add_test(NAME ${LegalizerTestTarget}-fallback
+      COMMAND ${LegalizerTestTarget} -Example-use-legalizer=false)
+    add_test(NAME ${LegalizerTestTarget}-strict
+      COMMAND ${LegalizerTestTarget} -Example-use-legalizer=true -expect-strict)
+  endforeach()
 
   add_test(
     NAME coredsl-parser-basic

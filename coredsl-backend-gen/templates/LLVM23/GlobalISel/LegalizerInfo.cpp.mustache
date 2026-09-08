@@ -17,9 +17,15 @@
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Intrinsics.h"
+{{#operation_type_constraints}}
+{{#intrinsic_id_cpp}}
 #include "llvm/IR/Intrinsics{{target}}.h"
+{{/intrinsic_id_cpp}}
+{{/operation_type_constraints}}
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <cassert>
 #include <initializer_list>
@@ -31,7 +37,7 @@ namespace {
 
 static cl::opt<bool> {{target}}UseLegalizer(
     "{{target}}-use-legalizer",
-    cl::desc("Use only explicit generated opcode/type-index legality"),
+    cl::desc("Disable native fallback for generated scalar opcode rules"),
     cl::init(false));
 
 static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
@@ -39,11 +45,9 @@ static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
          ActualTy.getUniqueRAWLLTData() == ExpectedTy.getUniqueRAWLLTData();
 }
 
-enum class ScalarOperationKind {
-  Invalid,
-  Opcode,
-  Intrinsic,
-};
+//===----------------------------------------------------------------------===//
+// 1. Target capabilities and scalar type selection
+//===----------------------------------------------------------------------===//
 
 enum class ScalarTypeKind {
   Integer,
@@ -51,51 +55,32 @@ enum class ScalarTypeKind {
 };
 
 struct ScalarTypeCapability {
-  ScalarOperationKind OperationKind;
-  unsigned Operation;
+  unsigned Opcode;
   unsigned TypeIndex;
   ScalarTypeKind TypeKind;
   unsigned Width;
 };
 
-// This table records operation-specific scalar target capabilities. Opcode
-// rules filter it by opcode and LegalityQuery type index. The sentinel keeps
-// the array valid even when the collected instruction list is empty.
+// Intrinsic input candidates are emitted only in legalizeIntrinsic below:
+// unlike opcode type indices, they describe explicit input argument indices.
+// The sentinel keeps an empty operation table valid C++.
 static constexpr ScalarTypeCapability ScalarTypeCapabilities[] = {
-    {ScalarOperationKind::Invalid, 0, 0, ScalarTypeKind::Integer, 0},
+    {0, 0, ScalarTypeKind::Integer, 0},
 {{#operation_type_constraints}}
 {{#opcode_cpp}}
 {{#scalar_types}}
 {{#types}}
 {{#integer_width}}
-    {ScalarOperationKind::Opcode,
-     static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
+    {static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
      ScalarTypeKind::Integer, {{.}}},
 {{/integer_width}}
 {{#floating_point_width}}
-    {ScalarOperationKind::Opcode,
-     static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
+    {static_cast<unsigned>(TargetOpcode::{{opcode_cpp}}), {{index}},
      ScalarTypeKind::FloatIEEE, {{.}}},
 {{/floating_point_width}}
 {{/types}}
 {{/scalar_types}}
 {{/opcode_cpp}}
-{{#intrinsic_id_cpp}}
-{{#scalar_types}}
-{{#types}}
-{{#integer_width}}
-    {ScalarOperationKind::Intrinsic,
-     static_cast<unsigned>({{intrinsic_id_cpp}}), {{index}},
-     ScalarTypeKind::Integer, {{.}}},
-{{/integer_width}}
-{{#floating_point_width}}
-    {ScalarOperationKind::Intrinsic,
-     static_cast<unsigned>({{intrinsic_id_cpp}}), {{index}},
-     ScalarTypeKind::FloatIEEE, {{.}}},
-{{/floating_point_width}}
-{{/types}}
-{{/scalar_types}}
-{{/intrinsic_id_cpp}}
 {{/operation_type_constraints}}
 };
 
@@ -140,29 +125,39 @@ static LLT getNativeFloatTypeForWidth(unsigned Bits) {
   return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
 }
 
-// A collected opcode/type-index constraint takes priority and remains closed
-// when no candidate fits. An unmentioned pair inherits native_types only while
-// the target's strict generated-legalizer option is disabled.
-static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
-                                        unsigned Bits) {
+// The sole fallback decision for operation-specific scalar types. A present
+// pair is closed even if it contains only the other scalar kind. A missing pair
+// may inherit native types only in compatibility mode.
+static LLT getOpcodeTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                 unsigned Bits, ScalarTypeKind Kind) {
   bool HasConstraint = false;
   unsigned BestWidth = 0;
   for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.OperationKind != ScalarOperationKind::Opcode ||
-        Capability.Operation != Opcode || Capability.TypeIndex != TypeIdx)
+    if (Capability.Opcode != Opcode || Capability.TypeIndex != TypeIdx)
       continue;
     HasConstraint = true;
-    if (Capability.TypeKind != ScalarTypeKind::Integer ||
-        Bits > Capability.Width)
+    if (Capability.TypeKind != Kind || Bits > Capability.Width)
       continue;
     if (BestWidth == 0 || Capability.Width < BestWidth)
       BestWidth = Capability.Width;
   }
-  if (HasConstraint)
-    return BestWidth == 0 ? LLT{} : LLT::integer(BestWidth);
-  if ({{target}}UseLegalizer)
+  if (BestWidth != 0)
+    return Kind == ScalarTypeKind::Integer ? LLT::integer(BestWidth)
+                                           : LLT::floatIEEE(BestWidth);
+  if (HasConstraint || {{target}}UseLegalizer)
     return LLT{};
-  return getNativeIntegerTypeForWidth(Bits);
+  return Kind == ScalarTypeKind::Integer ? getNativeIntegerTypeForWidth(Bits)
+                                         : getNativeFloatTypeForWidth(Bits);
+}
+
+static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                        unsigned Bits) {
+  return getOpcodeTypeForWidth(Opcode, TypeIdx, Bits, ScalarTypeKind::Integer);
+}
+
+static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                      unsigned Bits) {
+  return getOpcodeTypeForWidth(Opcode, TypeIdx, Bits, ScalarTypeKind::FloatIEEE);
 }
 
 static bool isOpcodeIntegerCarrier(unsigned Opcode, unsigned TypeIdx, LLT Ty) {
@@ -171,149 +166,49 @@ static bool isOpcodeIntegerCarrier(unsigned Opcode, unsigned TypeIdx, LLT Ty) {
                               Opcode, TypeIdx, Ty.getScalarSizeInBits()));
 }
 
-static LLT getOpcodeFloatTypeForWidth(unsigned Opcode, unsigned TypeIdx,
-                                      unsigned Bits) {
-  bool HasConstraint = false;
-  unsigned BestWidth = 0;
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.OperationKind != ScalarOperationKind::Opcode ||
-        Capability.Operation != Opcode || Capability.TypeIndex != TypeIdx)
-      continue;
-    HasConstraint = true;
-    if (Capability.TypeKind != ScalarTypeKind::FloatIEEE ||
-        Bits > Capability.Width)
-      continue;
-    if (BestWidth == 0 || Capability.Width < BestWidth)
-      BestWidth = Capability.Width;
-  }
-  if (HasConstraint)
-    return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
-  if ({{target}}UseLegalizer)
-    return LLT{};
-  return getNativeFloatTypeForWidth(Bits);
+static bool isOpcodeFloatCarrier(unsigned Opcode, unsigned TypeIdx, LLT Ty) {
+  return Ty.isFloat() &&
+         hasExactType(Ty, getOpcodeFloatTypeForWidth(
+                              Opcode, TypeIdx, Ty.getScalarSizeInBits()));
 }
 
-static bool isOpcodeIntegerType(const LegalityQuery &Query,
-                                unsigned TypeIdx) {
-  if (Query.Types.size() <= TypeIdx)
-    return false;
-  return isOpcodeIntegerCarrier(Query.Opcode, TypeIdx, Query.Types[TypeIdx]);
+static bool isOpcodeIntegerType(const LegalityQuery &Query, unsigned TypeIdx) {
+  return Query.Types.size() > TypeIdx &&
+         isOpcodeIntegerCarrier(Query.Opcode, TypeIdx, Query.Types[TypeIdx]);
 }
 
 static bool isOpcodeFloatType(const LegalityQuery &Query, unsigned TypeIdx) {
-  if (Query.Types.size() <= TypeIdx)
-    return false;
-  const LLT Ty = Query.Types[TypeIdx];
-  return Ty.isFloat() &&
-         hasExactType(Ty, getOpcodeFloatTypeForWidth(
-                              Query.Opcode, TypeIdx,
-                              Ty.getScalarSizeInBits()));
+  return Query.Types.size() > TypeIdx &&
+         isOpcodeFloatCarrier(Query.Opcode, TypeIdx, Query.Types[TypeIdx]);
 }
 
-enum class PointerIntegerWidthKind {
-  Representation,
-  Index,
-};
-
-// Pointer LLTs carry the representation width selected by DataLayout, but not
-// its possibly different index width. Normalize the integer side of pointer
-// operations to the width required by the pointer's address space, and reject
-// that normalization when the exact integer carrier is unavailable for the
-// opcode.
-static LLT getPointerIntegerType(const DataLayout &DL,
-                                 const LegalityQuery &Query,
-                                 unsigned PointerTypeIdx,
-                                 unsigned IntegerTypeIdx,
-                                 PointerIntegerWidthKind WidthKind) {
-  if (Query.Types.size() <= PointerTypeIdx ||
-      Query.Types.size() <= IntegerTypeIdx)
-    return LLT{};
-
-  const LLT PointerTy = Query.Types[PointerTypeIdx];
-  const LLT IntegerTy = Query.Types[IntegerTypeIdx];
-  if (!PointerTy.isPointer() || !IntegerTy.isInteger())
-    return LLT{};
-
-  const unsigned AddressSpace = PointerTy.getAddressSpace();
-  const unsigned PointerBits = DL.getPointerSizeInBits(AddressSpace);
-  if (PointerTy.getScalarSizeInBits() != PointerBits)
-    return LLT{};
-
-  const unsigned RequiredBits =
-      WidthKind == PointerIntegerWidthKind::Index
-          ? DL.getIndexSizeInBits(AddressSpace)
-          : PointerBits;
-  const LLT RequiredTy = LLT::integer(RequiredBits);
-  return hasExactType(RequiredTy,
-                      getOpcodeIntegerTypeForWidth(
-                          Query.Opcode, IntegerTypeIdx, RequiredBits))
-             ? RequiredTy
-             : LLT{};
+// Compare results and inputs share a width. Both type-index candidate sets
+// participate in the decision, including strict-mode missing-pair rejection.
+// Each iteration increases Bits until the two finite candidate sets agree.
+static LLT getCompareInputCarrier(unsigned Opcode, ScalarTypeKind InputKind,
+                                  unsigned Bits) {
+  while (true) {
+    const LLT InputTy = getOpcodeTypeForWidth(Opcode, 1, Bits, InputKind);
+    if (!InputTy.isValid())
+      return LLT{};
+    const LLT ResultTy =
+        getOpcodeIntegerTypeForWidth(Opcode, 0, InputTy.getScalarSizeInBits());
+    if (!ResultTy.isValid())
+      return LLT{};
+    if (InputTy.getScalarSizeInBits() == ResultTy.getScalarSizeInBits())
+      return InputTy;
+    Bits = ResultTy.getScalarSizeInBits();
+  }
 }
 
-enum class PointerIntegerWidthRelation {
-  Exact,
-  Narrower,
-  Wider,
-};
-
-static LegalityPredicate pointerIntegerTypeMatches(
-    const DataLayout &DL, unsigned PointerTypeIdx, unsigned IntegerTypeIdx,
-    PointerIntegerWidthKind WidthKind,
-    PointerIntegerWidthRelation Relation) {
-  const DataLayout *DLP = &DL;
-  return [DLP, PointerTypeIdx, IntegerTypeIdx,
-          WidthKind, Relation](const LegalityQuery &Query) {
-    const LLT RequiredTy =
-        getPointerIntegerType(*DLP, Query, PointerTypeIdx, IntegerTypeIdx,
-                              WidthKind);
-    if (!RequiredTy.isValid())
-      return false;
-    const LLT ActualTy = Query.Types[IntegerTypeIdx];
-    switch (Relation) {
-    case PointerIntegerWidthRelation::Exact:
-      return hasExactType(ActualTy, RequiredTy);
-    case PointerIntegerWidthRelation::Narrower:
-      return ActualTy.getScalarSizeInBits() < RequiredTy.getScalarSizeInBits();
-    case PointerIntegerWidthRelation::Wider:
-      return ActualTy.getScalarSizeInBits() > RequiredTy.getScalarSizeInBits();
-    }
-    return false;
-  };
+static LLT getICmpCarrierForWidth(unsigned Bits) {
+  return getCompareInputCarrier(TargetOpcode::G_ICMP, ScalarTypeKind::Integer,
+                                Bits);
 }
 
-static LegalizeMutation
-changeIntegerTypeToPointerWidth(const DataLayout &DL,
-                                unsigned PointerTypeIdx,
-                                unsigned IntegerTypeIdx,
-                                PointerIntegerWidthKind WidthKind) {
-  const DataLayout *DLP = &DL;
-  return [DLP, PointerTypeIdx, IntegerTypeIdx,
-          WidthKind](const LegalityQuery &Query) {
-    return std::pair<unsigned, LLT>(
-        IntegerTypeIdx,
-        getPointerIntegerType(*DLP, Query, PointerTypeIdx, IntegerTypeIdx,
-                              WidthKind));
-  };
-}
-
-static void addPointerIntegerTypeRules(
-    LegalizeRuleSet &Actions, const DataLayout &DL, unsigned PointerTypeIdx,
-    unsigned IntegerTypeIdx, PointerIntegerWidthKind WidthKind) {
-  Actions.legalIf(pointerIntegerTypeMatches(
-      DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
-      PointerIntegerWidthRelation::Exact));
-  Actions.widenScalarIf(
-      pointerIntegerTypeMatches(DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
-                                PointerIntegerWidthRelation::Narrower),
-      changeIntegerTypeToPointerWidth(DL, PointerTypeIdx, IntegerTypeIdx,
-                                      WidthKind));
-  Actions.narrowScalarIf(
-      pointerIntegerTypeMatches(DL, PointerTypeIdx, IntegerTypeIdx, WidthKind,
-                                PointerIntegerWidthRelation::Wider),
-      changeIntegerTypeToPointerWidth(DL, PointerTypeIdx, IntegerTypeIdx,
-                                      WidthKind));
-  Actions.fallback();
+static LLT getFCmpCarrierForWidth(unsigned Bits) {
+  return getCompareInputCarrier(TargetOpcode::G_FCMP, ScalarTypeKind::FloatIEEE,
+                                Bits);
 }
 
 // G_FCMP uses an integer result with exactly the same width as its legalized
@@ -331,9 +226,9 @@ static LLT getFCmpResultTypeForInput(LLT InputTy) {
              : LLT{};
 }
 
-[[maybe_unused]] static bool isNativeValueType(LLT Ty) {
-  return Ty.isPointer() || isNativeIntegerType(Ty) || isNativeFloatType(Ty);
-}
+//===----------------------------------------------------------------------===//
+// 2. Type-only predicates and mutations
+//===----------------------------------------------------------------------===//
 
 [[maybe_unused]] static LegalityPredicate
 integerTypeNeedsPromotion(unsigned TypeIdx) {
@@ -389,19 +284,16 @@ promoteFloatType(unsigned TypeIdx) {
 // unsupported result type, for example (i1, i8) -> (i16, i8) when i16 is the
 // narrowest native integer. Custom legalization may replace that default with
 // a wider locally preferred carrier shared with the result's consumer.
-static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
-  return [](const LegalityQuery &Query) {
-    if (Query.Types.size() < 2)
-      return false;
-    const LLT ResultTy = Query.Types[0];
-    const LLT InputTy = Query.Types[1];
-    if (!ResultTy.isInteger() || !InputTy.isInteger())
-      return false;
-    const LLT CarrierTy = getOpcodeIntegerTypeForWidth(
-        Query.Opcode, 1, InputTy.getScalarSizeInBits());
-    return CarrierTy.isValid() &&
-           ResultTy.getScalarSizeInBits() < CarrierTy.getScalarSizeInBits();
-  };
+static bool icmpNeedsCarrierPromotion(const LegalityQuery &Query) {
+  if (Query.Types.size() < 2 || !Query.Types[0].isInteger() ||
+      !Query.Types[1].isInteger())
+    return false;
+  const LLT ResultTy = Query.Types[0];
+  const LLT InputTy = Query.Types[1];
+  const LLT CarrierTy = getICmpCarrierForWidth(InputTy.getScalarSizeInBits());
+  return CarrierTy.isValid() &&
+         ResultTy.getScalarSizeInBits() <= CarrierTy.getScalarSizeInBits() &&
+         (!hasExactType(ResultTy, CarrierTy) || !hasExactType(InputTy, CarrierTy));
 }
 
 static LegalityPredicate fcmpResultNeedsFloatInputWidth() {
@@ -432,8 +324,9 @@ floatTypeNeedsIntegerBitcast(unsigned TypeIdx) {
     if (Query.Types.size() <= TypeIdx)
       return false;
     const LLT Ty = Query.Types[TypeIdx];
-    return Ty.isFloat() && !isNativeFloatType(Ty) &&
-           getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()).isValid();
+    return Ty.isFloat() && !isOpcodeFloatType(Query, TypeIdx) &&
+           getOpcodeIntegerTypeForWidth(Query.Opcode, TypeIdx,
+                                        Ty.getScalarSizeInBits()).isValid();
   };
 }
 
@@ -446,31 +339,29 @@ bitcastFloatToSameWidthInteger(unsigned TypeIdx) {
   };
 }
 
-// These artifact predicates describe exactly the casts/extensions introduced
-// by the generated carrier policy. They do not imply arbitrary cast support.
-static bool isGeneratedIntegerExtension(const LegalityQuery &Query) {
+// Cast artifacts have a fixed carrier contract, independent of instruction
+// candidates and of native fallback. They are not configurable scalar opcodes.
+// ANYEXT reaches a native integer; TRUNC returns from one; floating-point
+// extension/truncation follow the analogous contract.
+static bool isIntegerExtensionArtifact(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
   const LLT DstTy = Query.Types[0];
   const LLT SrcTy = Query.Types[1];
-  if (!DstTy.isInteger() || !SrcTy.isInteger() ||
-      DstTy.getScalarSizeInBits() <= SrcTy.getScalarSizeInBits())
-    return false;
-  return isNativeIntegerType(DstTy) && !isNativeIntegerType(SrcTy);
+  return isNativeIntegerType(DstTy) && SrcTy.isInteger() &&
+         DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
 }
 
-static bool isGeneratedIntegerTruncation(const LegalityQuery &Query) {
+static bool isIntegerTruncationArtifact(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
   const LLT DstTy = Query.Types[0];
   const LLT SrcTy = Query.Types[1];
-  if (!DstTy.isInteger() || !SrcTy.isInteger() ||
-      DstTy.getScalarSizeInBits() >= SrcTy.getScalarSizeInBits())
-    return false;
-  return isNativeIntegerType(SrcTy) && !isNativeIntegerType(DstTy);
+  return DstTy.isInteger() && isNativeIntegerType(SrcTy) &&
+         DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
-static bool isGeneratedRepresentationBitcast(const LegalityQuery &Query) {
+static bool isRepresentationBitcastArtifact(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
   const LLT DstTy = Query.Types[0];
@@ -484,114 +375,24 @@ static bool isGeneratedRepresentationBitcast(const LegalityQuery &Query) {
          getNativeIntegerTypeForWidth(DstTy.getScalarSizeInBits()).isValid();
 }
 
-static bool isNativeIntegerExtension(const LegalityQuery &Query) {
+static bool isFloatExtensionArtifact(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
   const LLT DstTy = Query.Types[0];
   const LLT SrcTy = Query.Types[1];
-  return isNativeIntegerType(DstTy) && isNativeIntegerType(SrcTy) &&
+  return isNativeFloatType(DstTy) && SrcTy.isFloat() &&
          DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
 }
 
-static bool isNativeIntegerTruncation(const LegalityQuery &Query) {
+static bool isFloatTruncationArtifact(const LegalityQuery &Query) {
   if (Query.Types.size() < 2)
     return false;
   const LLT DstTy = Query.Types[0];
   const LLT SrcTy = Query.Types[1];
-  return isNativeIntegerType(DstTy) && isNativeIntegerType(SrcTy) &&
+  return DstTy.isFloat() && isNativeFloatType(SrcTy) &&
          DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
 }
 
-// This target policy deliberately treats the high bits of an integer
-// extension as unspecified. Keep the original source and destination types,
-// but normalize the semantic G_ZEXT/G_SEXT opcodes to G_ANYEXT before
-// instruction selection.
-static bool applyIntegerAnyExtensionRewrite(LegalizerHelper &Helper,
-                                            MachineInstr &MI) {
-  if (MI.getOpcode() != TargetOpcode::G_ZEXT &&
-      MI.getOpcode() != TargetOpcode::G_SEXT)
-    return false;
-
-  // Pointer conversions have defined high-bit semantics. Keep the zero/sign
-  // extension produced while normalizing their integer carrier to the
-  // DataLayout width instead of weakening it to G_ANYEXT.
-  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  if (MI.getNumExplicitOperands() >= 2 && MI.getOperand(0).isReg() &&
-      MI.getOperand(1).isReg()) {
-    const Register DstReg = MI.getOperand(0).getReg();
-    const Register SrcReg = MI.getOperand(1).getReg();
-    if (DstReg.isVirtual()) {
-      for (const MachineInstr &UseMI : MRI.use_nodbg_instructions(DstReg)) {
-        if ((MI.getOpcode() == TargetOpcode::G_ZEXT &&
-             (UseMI.getOpcode() == TargetOpcode::G_INTTOPTR ||
-              UseMI.getOpcode() == TargetOpcode::G_PTRMASK)) ||
-            (MI.getOpcode() == TargetOpcode::G_SEXT &&
-             UseMI.getOpcode() == TargetOpcode::G_PTR_ADD))
-          return true;
-      }
-    }
-    if (MI.getOpcode() == TargetOpcode::G_ZEXT && SrcReg.isVirtual()) {
-      const MachineInstr *DefMI = MRI.getVRegDef(SrcReg);
-      if (DefMI && DefMI->getOpcode() == TargetOpcode::G_PTRTOINT)
-        return true;
-    }
-  }
-
-  Helper.Observer.changingInstr(MI);
-  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_ANYEXT));
-  Helper.Observer.changedInstr(MI);
-  return true;
-}
-
-static bool isNativeFloatExtension(const LegalityQuery &Query) {
-  if (Query.Types.size() < 2)
-    return false;
-  const LLT DstTy = Query.Types[0];
-  const LLT SrcTy = Query.Types[1];
-  return isNativeFloatType(DstTy) && isNativeFloatType(SrcTy) &&
-         DstTy.getScalarSizeInBits() > SrcTy.getScalarSizeInBits();
-}
-
-// These are the G_FPEXT/G_FPTRUNC artifacts introduced when an unsupported
-// low-precision operation is evaluated in one of the target's native IEEE
-// types. The originating opcode may select a wider type than the global
-// narrowest carrier through operation_type_constraints.
-static bool isGeneratedFloatExtension(const LegalityQuery &Query) {
-  if (Query.Types.size() < 2)
-    return false;
-  const LLT DstTy = Query.Types[0];
-  const LLT SrcTy = Query.Types[1];
-  if (!DstTy.isFloat() || !SrcTy.isFloat() ||
-      DstTy.getScalarSizeInBits() <= SrcTy.getScalarSizeInBits())
-    return false;
-  return isNativeFloatType(DstTy) && !isNativeFloatType(SrcTy);
-}
-
-static bool isNativeFloatTruncation(const LegalityQuery &Query) {
-  if (Query.Types.size() < 2)
-    return false;
-  const LLT DstTy = Query.Types[0];
-  const LLT SrcTy = Query.Types[1];
-  return isNativeFloatType(DstTy) && isNativeFloatType(SrcTy) &&
-         DstTy.getScalarSizeInBits() < SrcTy.getScalarSizeInBits();
-}
-
-static bool isGeneratedFloatTruncation(const LegalityQuery &Query) {
-  if (Query.Types.size() < 2)
-    return false;
-  const LLT DstTy = Query.Types[0];
-  const LLT SrcTy = Query.Types[1];
-  if (!DstTy.isFloat() || !SrcTy.isFloat() ||
-      DstTy.getScalarSizeInBits() >= SrcTy.getScalarSizeInBits())
-    return false;
-  return isNativeFloatType(SrcTy) && !isNativeFloatType(DstTy);
-}
-
-// The built-in memory policy only handles an ordinary, non-atomic value and one
-// MMO whose value and memory types are identical. Scalar integer and floating-
-// point values use the G_LOAD/G_STORE opcode type constraints; scalar pointer
-// values and exact vector values are directly legal. Atomic and multi-MMO
-// operations remain target-specific.
 static bool hasPlainMemoryShape(const LegalityQuery &Query) {
   if (Query.Types.size() < 2 || Query.MMODescrs.size() != 1)
     return false;
@@ -647,6 +448,12 @@ static LegalityPredicate plainMemoryFloatNeedsIntegerBitcast() {
 // byte-sized native integer type supported by both G_LOAD and G_STORE. If the
 // access is wider than one byte, the little-endian read/modify/write sequence
 // also needs mask and merge operations.
+static bool canMaterializeIntegerConstant(LLT Ty) {
+  return Ty.isInteger() &&
+         getOpcodeIntegerTypeForWidth(TargetOpcode::G_CONSTANT, 0,
+                                      Ty.getScalarSizeInBits()).isValid();
+}
+
 static LLT getI1MemoryAccessType() {
   unsigned BestWidth = 0;
 {{#native_types.integer_widths}}
@@ -669,6 +476,7 @@ static LLT getI1MemoryAccessType() {
         (getOpcodeIntegerTypeForWidth(TargetOpcode::G_OR, 0,
                                       CandidateWidth).isValid());
     if (HasExactMemoryAccess && HasMask && HasWideMerge &&
+        canMaterializeIntegerConstant(CandidateTy) &&
         (BestWidth == 0 || CandidateWidth < BestWidth))
       BestWidth = CandidateWidth;
   }
@@ -685,111 +493,9 @@ static LegalityPredicate plainI1MemoryNeedsByteAccessRewrite() {
   };
 }
 
-// The memory object remains one byte even when the target can only access a
-// wider integer. A widened load extracts the byte's boolean bit. A widened
-// store reads the surrounding bytes, clears the addressed byte, inserts 0 or
-// 1, and writes the complete access unit back. This is deliberately restricted
-// to non-atomic, non-volatile memory.
-static bool applyI1ByteMemoryRewrite(LegalizerHelper &Helper,
-                                     MachineInstr &MI) {
-  if ((MI.getOpcode() != TargetOpcode::G_LOAD &&
-       MI.getOpcode() != TargetOpcode::G_STORE) ||
-      MI.getNumExplicitOperands() < 2 || MI.memoperands().size() != 1)
-    return false;
-
-  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  MachineMemOperand &MMO = **MI.memoperands_begin();
-  if (MMO.isAtomic() || MMO.isVolatile() ||
-      !MMO.getMemoryType().isInteger(1))
-    return false;
-
-  const LLT AccessTy = getI1MemoryAccessType();
-  if (!AccessTy.isValid())
-    return false;
-  const unsigned AccessBits = AccessTy.getScalarSizeInBits();
-  if (AccessBits < 8 || AccessBits % 8 != 0)
-    return false;
-  if (!Helper.MIRBuilder.getDataLayout().isLittleEndian())
-    return false;
-
-  MachineFunction &MF = Helper.MIRBuilder.getMF();
-  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-
-  auto MakeAccessMMO = [&](MachineMemOperand::Flags Flags) {
-    if (AccessBits == 8) {
-      MachineMemOperand *AccessMMO = MF.getMachineMemOperand(
-          &MMO, MMO.getPointerInfo(), AccessTy);
-      AccessMMO->clearRanges();
-      return AccessMMO;
-    }
-
-    // Metadata and dereferenceability for the original byte do not describe
-    // the adjacent bytes touched by a widened access.
-    return MF.getMachineMemOperand(MMO.getPointerInfo(), Flags, AccessTy,
-                                   MMO.getBaseAlign());
-  };
-
-  const APInt One(AccessBits, 1);
-
-  auto ExtractBoolean = [&](Register AccessReg) {
-    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
-    return Helper.MIRBuilder.buildAnd(AccessTy, AccessReg, OneReg).getReg(0);
-  };
-
-  if (MI.getOpcode() == TargetOpcode::G_LOAD) {
-    const Register OldDstReg = MI.getOperand(0).getReg();
-    const Register PointerReg = MI.getOperand(1).getReg();
-    if (!OldDstReg.isVirtual() || !PointerReg.isValid() ||
-        !MRI.getType(OldDstReg).isInteger(1))
-      return false;
-
-    MachineMemOperand *LoadMMO =
-        MakeAccessMMO(MachineMemOperand::MOLoad);
-    auto AccessLoad =
-        Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
-    const Register BooleanValue = ExtractBoolean(AccessLoad.getReg(0));
-    auto Asserted = Helper.MIRBuilder.buildAssertZExt(
-        AccessTy, BooleanValue, /*Size=*/1);
-    Helper.MIRBuilder.buildTrunc(OldDstReg, Asserted);
-  } else {
-    const Register OldValueReg = MI.getOperand(0).getReg();
-    const Register PointerReg = MI.getOperand(1).getReg();
-    if (!OldValueReg.isVirtual() || !PointerReg.isValid() ||
-        !MRI.getType(OldValueReg).isInteger(1))
-      return false;
-
-    auto ExtendedValue =
-        Helper.MIRBuilder.buildAnyExt(AccessTy, OldValueReg);
-    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
-    Register BooleanValue =
-        Helper.MIRBuilder
-            .buildAnd(AccessTy, ExtendedValue, OneReg)
-            .getReg(0);
-
-    MachineMemOperand *StoreMMO =
-        MakeAccessMMO(MachineMemOperand::MOStore);
-    if (AccessBits == 8) {
-      Helper.MIRBuilder.buildStore(BooleanValue, PointerReg, *StoreMMO);
-    } else {
-      MachineMemOperand *LoadMMO =
-          MakeAccessMMO(MachineMemOperand::MOLoad);
-      auto OldAccessValue =
-          Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
-
-      const APInt ByteMask = APInt::getLowBitsSet(AccessBits, 8);
-      auto PreserveMask =
-          Helper.MIRBuilder.buildConstant(AccessTy, ~ByteMask);
-      auto PreservedValue = Helper.MIRBuilder.buildAnd(
-          AccessTy, OldAccessValue, PreserveMask);
-      auto MergedValue = Helper.MIRBuilder.buildOr(
-          AccessTy, PreservedValue, BooleanValue);
-      Helper.MIRBuilder.buildStore(MergedValue, PointerReg, *StoreMMO);
-    }
-  }
-
-  MI.eraseFromParent();
-  return true;
-}
+//===----------------------------------------------------------------------===//
+// 3. Local carrier selection and coordinated ICMP / BRCOND promotion
+//===----------------------------------------------------------------------===//
 
 // Find the single explicit virtual-register definition described by TypeIdx.
 // The local carrier optimization deliberately excludes variable-def structural
@@ -919,15 +625,16 @@ static bool applyICmpIntegerCarrierPromotion(LegalizerHelper &Helper,
   if (!ResultTy.isInteger() || !InputTy.isInteger())
     return false;
 
-  const LLT DefaultCarrierTy = getOpcodeIntegerTypeForWidth(
-      TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
+  const LLT DefaultCarrierTy =
+      getICmpCarrierForWidth(InputTy.getScalarSizeInBits());
   if (!DefaultCarrierTy.isValid())
     return false;
 
   LLT CarrierTy = getLocallyPreferredIntegerCarrier(
       MI, MRI, 0, DefaultCarrierTy);
   if (CarrierTy.getScalarSizeInBits() < InputTy.getScalarSizeInBits() ||
-      !isOpcodeIntegerCarrier(TargetOpcode::G_ICMP, 1, CarrierTy))
+      !isOpcodeIntegerCarrier(TargetOpcode::G_ICMP, 1, CarrierTy) ||
+      !isOpcodeIntegerCarrier(TargetOpcode::G_ICMP, 0, CarrierTy))
     CarrierTy = DefaultCarrierTy;
   if (ResultTy.getScalarSizeInBits() > CarrierTy.getScalarSizeInBits())
     return false;
@@ -967,10 +674,7 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
         return LLT{};
       const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
       if (InputTy.isInteger())
-        return getOpcodeIntegerTypeForWidth(
-            TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
-      if (InputTy.isPointer())
-        return getNativeIntegerTypeForWidth(1);
+        return getICmpCarrierForWidth(InputTy.getScalarSizeInBits());
       return LLT{};
     }
     case TargetOpcode::G_FCMP: {
@@ -981,8 +685,8 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
       const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
       if (!InputTy.isFloat())
         return LLT{};
-      const LLT CarrierTy = getOpcodeFloatTypeForWidth(
-          TargetOpcode::G_FCMP, 1, InputTy.getScalarSizeInBits());
+      const LLT CarrierTy =
+          getFCmpCarrierForWidth(InputTy.getScalarSizeInBits());
       return getFCmpResultTypeForInput(CarrierTy);
     }
     case TargetOpcode::COPY:
@@ -1033,6 +737,144 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// 4. Instruction expansions and value-dependent simplification
+//===----------------------------------------------------------------------===//
+
+static bool applyIntegerAnyExtensionRewrite(LegalizerHelper &Helper,
+                                            MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_ZEXT &&
+      MI.getOpcode() != TargetOpcode::G_SEXT)
+    return false;
+
+  // This target policy deliberately carries only the low bits. It applies to
+  // the supported scalar extension pairs registered below; it is not a
+  // generally semantics-preserving replacement for arbitrary LLVM extensions.
+  Helper.Observer.changingInstr(MI);
+  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_ANYEXT));
+  Helper.Observer.changedInstr(MI);
+  return true;
+}
+
+// The memory object remains one byte even when the target can only access a
+// wider integer. A widened load extracts the byte's boolean bit. A widened
+// store reads the surrounding bytes, clears the addressed byte, inserts 0 or
+// 1, and writes the complete access unit back. This is deliberately restricted
+// to non-atomic, non-volatile memory.
+static bool applyI1ByteMemoryRewrite(LegalizerHelper &Helper,
+                                     MachineInstr &MI) {
+  if ((MI.getOpcode() != TargetOpcode::G_LOAD &&
+       MI.getOpcode() != TargetOpcode::G_STORE) ||
+      MI.getNumExplicitOperands() < 2 || MI.memoperands().size() != 1)
+    return false;
+
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  MachineMemOperand &MMO = **MI.memoperands_begin();
+  if (MMO.isAtomic() || MMO.isVolatile() ||
+      !MMO.getMemoryType().isInteger(1))
+    return false;
+
+  const LLT AccessTy = getI1MemoryAccessType();
+  if (!AccessTy.isValid())
+    return false;
+  const unsigned AccessBits = AccessTy.getScalarSizeInBits();
+  if (AccessBits < 8 || AccessBits % 8 != 0)
+    return false;
+  if (!Helper.MIRBuilder.getDataLayout().isLittleEndian())
+    return false;
+
+  MachineFunction &MF = Helper.MIRBuilder.getMF();
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+
+  auto MakeAccessMMO = [&](MachineMemOperand::Flags Flags) {
+    if (AccessBits == 8) {
+      MachineMemOperand *AccessMMO = MF.getMachineMemOperand(
+          &MMO, MMO.getPointerInfo(), AccessTy);
+      AccessMMO->clearRanges();
+      return AccessMMO;
+    }
+
+    // Metadata and dereferenceability for the original byte do not describe
+    // the adjacent bytes touched by a widened access.
+    return MF.getMachineMemOperand(MMO.getPointerInfo(), Flags, AccessTy,
+                                   MMO.getBaseAlign());
+  };
+
+  const APInt One(AccessBits, 1);
+
+  auto ExtractBoolean = [&](Register AccessReg) {
+    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
+    return Helper.MIRBuilder.buildAnd(AccessTy, AccessReg, OneReg).getReg(0);
+  };
+
+  if (MI.getOpcode() == TargetOpcode::G_LOAD) {
+    const Register OldDstReg = MI.getOperand(0).getReg();
+    const Register PointerReg = MI.getOperand(1).getReg();
+    if (!OldDstReg.isVirtual() || !PointerReg.isValid() ||
+        !MRI.getType(OldDstReg).isInteger(1))
+      return false;
+
+    MachineMemOperand *LoadMMO =
+        MakeAccessMMO(MachineMemOperand::MOLoad);
+    auto AccessLoad =
+        Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
+    const Register BooleanValue = ExtractBoolean(AccessLoad.getReg(0));
+    auto Asserted = Helper.MIRBuilder.buildAssertZExt(
+        AccessTy, BooleanValue, /*Size=*/1);
+    Helper.MIRBuilder.buildTrunc(OldDstReg, Asserted);
+  } else {
+    const Register OldValueReg = MI.getOperand(0).getReg();
+    const Register PointerReg = MI.getOperand(1).getReg();
+    if (!OldValueReg.isVirtual() || !PointerReg.isValid() ||
+        !MRI.getType(OldValueReg).isInteger(1))
+      return false;
+
+    auto ExtendedValue =
+        Helper.MIRBuilder.buildAnyExt(AccessTy, OldValueReg);
+    auto OneReg = Helper.MIRBuilder.buildConstant(AccessTy, One);
+    Register BooleanValue =
+        Helper.MIRBuilder
+            .buildAnd(AccessTy, ExtendedValue, OneReg)
+            .getReg(0);
+
+    MachineMemOperand *StoreMMO =
+        MakeAccessMMO(MachineMemOperand::MOStore);
+    if (AccessBits == 8) {
+      Helper.MIRBuilder.buildStore(BooleanValue, PointerReg, *StoreMMO);
+    } else {
+      MachineMemOperand *LoadMMO =
+          MakeAccessMMO(MachineMemOperand::MOLoad);
+      auto OldAccessValue =
+          Helper.MIRBuilder.buildLoad(AccessTy, PointerReg, *LoadMMO);
+
+      const APInt ByteMask = APInt::getLowBitsSet(AccessBits, 8);
+      auto PreserveMask =
+          Helper.MIRBuilder.buildConstant(AccessTy, ~ByteMask);
+      auto PreservedValue = Helper.MIRBuilder.buildAnd(
+          AccessTy, OldAccessValue, PreserveMask);
+      auto MergedValue = Helper.MIRBuilder.buildOr(
+          AccessTy, PreservedValue, BooleanValue);
+      Helper.MIRBuilder.buildStore(MergedValue, PointerReg, *StoreMMO);
+    }
+  }
+
+  MI.eraseFromParent();
+  return true;
+}
+
+static bool canExpandSelect(LLT ValueTy, LLT ConditionTy) {
+  if (!ConditionTy.isInteger() ||
+      !getOpcodeIntegerTypeForWidth(TargetOpcode::G_BRCOND, 0,
+                                    ConditionTy.getScalarSizeInBits()).isValid())
+    return false;
+  if (ValueTy.isPointer())
+    return true;
+  if (ValueTy.isInteger())
+    return getOpcodeIntegerTypeForWidth(TargetOpcode::G_PHI, 0,
+                                        ValueTy.getScalarSizeInBits()).isValid();
+  return isOpcodeFloatCarrier(TargetOpcode::G_PHI, 0, ValueTy);
+}
+
 // Expand a scalar select into explicit control flow. The original destination
 // remains in SSA form and is defined by a G_PHI in the merge block:
 //
@@ -1045,9 +887,7 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
 // merge:
 //   %dst = G_PHI %true-value, %true, %false-value, %false
 //
-// This is deliberately a general G_SELECT legalization. It is also used by
-// the G_FMAXIMUM expansion below, but is not restricted to selects introduced
-// by that expansion.
+// Scalar selects share this one expansion, independently of their producer.
 static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
                                           MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::G_SELECT ||
@@ -1069,7 +909,7 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
   const LLT DstTy = MRI.getType(DstReg);
   if (!DstTy.isValid() || !hasExactType(DstTy, MRI.getType(TrueReg)) ||
       !hasExactType(DstTy, MRI.getType(FalseReg)) ||
-      !MRI.getType(ConditionReg).isInteger())
+      !canExpandSelect(DstTy, MRI.getType(ConditionReg)))
     return false;
 
   MachineBasicBlock &HeadMBB = *MI.getParent();
@@ -1121,82 +961,40 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
   return true;
 }
 
-// Force G_FMAXIMUM through the comparison/select form even when the target
-// happens to declare G_FMAXNUM(_IEEE) legal. The extra selects preserve the
-// llvm.maximum contract: NaNs propagate and +0.0 is greater than -0.0. Fast
-// math flags remove the corresponding repair paths.
-static bool applyFMaximumSelectRewrite(LegalizerHelper &Helper,
+// A legal scalar G_UREM is accepted unchanged unless its divisor is known to
+// be a power of two and G_AND supports the same carrier. In that case, replace
+// unsigned remainder by the equivalent low-bit mask operation.
+static bool applyURemPowerOfTwoRewrite(LegalizerHelper &Helper,
                                        MachineInstr &MI) {
-  if (MI.getOpcode() != TargetOpcode::G_FMAXIMUM ||
-      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 3 ||
-      !MI.getOperand(0).isReg() || !MI.getOperand(1).isReg() ||
-      !MI.getOperand(2).isReg())
-    return false;
-
+  assert(MI.getOpcode() == TargetOpcode::G_UREM);
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
   const Register DstReg = MI.getOperand(0).getReg();
-  const Register LHSReg = MI.getOperand(1).getReg();
-  const Register RHSReg = MI.getOperand(2).getReg();
-  if (!DstReg.isVirtual() || !LHSReg.isValid() || !RHSReg.isValid())
-    return false;
-
-  MachineIRBuilder &Builder = Helper.MIRBuilder;
-  MachineRegisterInfo &MRI = *Builder.getMRI();
+  const Register DivisorReg = MI.getOperand(2).getReg();
   const LLT Ty = MRI.getType(DstReg);
-  const LLT CondTy = getNativeIntegerTypeForWidth(1);
-  if (!Ty.isFloat() || !CondTy.isValid() ||
-      !hasExactType(Ty, MRI.getType(LHSReg)) ||
-      !hasExactType(Ty, MRI.getType(RHSReg)))
-    return false;
-  const LLT BitsCmpTy =
-      getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
-  if (!MI.getFlag(MachineInstr::FmNsz) && !BitsCmpTy.isValid())
-    return false;
+  const unsigned TypeBits = Ty.getScalarSizeInBits();
+  if (!isKnownToBeAPowerOfTwo(DivisorReg, MRI, Helper.getValueTracking()) ||
+      !canMaterializeIntegerConstant(Ty) ||
+      !hasExactType(
+          Ty, getOpcodeIntegerTypeForWidth(TargetOpcode::G_AND, 0, TypeBits)))
+    return true;
 
-  Builder.setInstrAndDebugLoc(MI);
-  const unsigned Flags = MI.getFlags();
-  Register Result =
-      Builder
-          .buildSelect(Ty,
-                       Builder.buildFCmp(CmpInst::FCMP_OGT, CondTy, LHSReg,
-                                         RHSReg),
-                       LHSReg, RHSReg, Flags)
-          .getReg(0);
-
-  if (!MI.getFlag(MachineInstr::FmNoNans)) {
-    auto IsOrdered =
-        Builder.buildFCmp(CmpInst::FCMP_ORD, CondTy, LHSReg, RHSReg);
-    APFloat NaNValue = APFloat::getNaN(getFltSemanticForLLT(Ty));
-    Register NaN = Builder.buildFConstant(Ty, NaNValue).getReg(0);
-    Result = Builder.buildSelect(Ty, IsOrdered, Result, NaN, Flags).getReg(0);
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+  Register MaskReg;
+  if (auto Divisor = getIConstantVRegValWithLookThrough(DivisorReg, MRI)) {
+    const APInt Mask = Divisor->Value.zextOrTrunc(TypeBits) - 1;
+    MaskReg = Helper.MIRBuilder.buildConstant(Ty, Mask).getReg(0);
+  } else {
+    if (!hasExactType(
+            Ty, getOpcodeIntegerTypeForWidth(TargetOpcode::G_ADD, 0, TypeBits)))
+      return true;
+    const Register NegOneReg =
+        Helper.MIRBuilder.buildConstant(Ty, -1).getReg(0);
+    MaskReg = Helper.MIRBuilder.buildAdd(Ty, DivisorReg, NegOneReg).getReg(0);
   }
-
-  if (!MI.getFlag(MachineInstr::FmNsz)) {
-    Register Zero = Builder.buildFConstant(Ty, 0.0).getReg(0);
-    auto ResultIsZero =
-        Builder.buildFCmp(CmpInst::FCMP_OEQ, CondTy, Result, Zero);
-    const LLT BitsTy = LLT::integer(Ty.getScalarSizeInBits());
-    auto LHSBits = Builder.buildBitcast(BitsTy, LHSReg);
-    auto RHSBits = Builder.buildBitcast(BitsTy, RHSReg);
-    auto ZeroBits = Builder.buildConstant(BitsTy, 0);
-    auto LHSIsPositiveZero = Builder.buildICmp(
-        CmpInst::ICMP_EQ, BitsCmpTy, LHSBits, ZeroBits);
-    Register PreferLHS =
-        Builder.buildSelect(Ty, LHSIsPositiveZero, LHSReg, Result, Flags)
-            .getReg(0);
-    auto RHSIsPositiveZero = Builder.buildICmp(
-        CmpInst::ICMP_EQ, BitsCmpTy, RHSBits, ZeroBits);
-    Register PreferPositiveZero =
-        Builder
-            .buildSelect(Ty, RHSIsPositiveZero, RHSReg, PreferLHS, Flags)
-            .getReg(0);
-    Result = Builder
-                 .buildSelect(Ty, ResultIsZero, PreferPositiveZero, Result,
-                              Flags)
-                 .getReg(0);
-  }
-
-  Builder.buildCopy(DstReg, Result);
-  MI.eraseFromParent();
+  Helper.Observer.changingInstr(MI);
+  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_AND));
+  MI.getOperand(2).setReg(MaskReg);
+  Helper.Observer.changedInstr(MI);
   return true;
 }
 
@@ -1219,12 +1017,14 @@ static bool applyFConstantRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
 
   const Register FloatDstReg = Dst.getReg();
   const LLT FloatTy = MRI.getType(FloatDstReg);
-  if (!FloatTy.isFloat() || isNativeFloatType(FloatTy))
+  if (!FloatTy.isFloat() ||
+      isOpcodeFloatCarrier(TargetOpcode::G_FCONSTANT, 0, FloatTy))
     return false;
 
   const LLT IntegerTy = LLT::integer(FloatTy.getScalarSizeInBits());
   const bool HasIntegerCarrier =
-      getNativeIntegerTypeForWidth(FloatTy.getScalarSizeInBits()).isValid();
+      getOpcodeIntegerTypeForWidth(TargetOpcode::G_CONSTANT, 0,
+                                   FloatTy.getScalarSizeInBits()).isValid();
   const APFloat &OriginalValue = Value.getFPImm()->getValueAPF();
   const APInt Bits = OriginalValue.bitcastToAPInt();
 
@@ -1246,7 +1046,7 @@ static bool applyFConstantRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
     }
 
     if (UseMI.getOpcode() == TargetOpcode::G_FPEXT &&
-        isNativeFloatType(UseDstTy) &&
+        isOpcodeFloatCarrier(TargetOpcode::G_FCONSTANT, 0, UseDstTy) &&
         UseDstTy.getScalarSizeInBits() > FloatTy.getScalarSizeInBits()) {
       Extensions.push_back(&UseMI);
       continue;
@@ -1296,6 +1096,10 @@ static bool applyFConstantRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// 5. Intrinsic input argument adaptation (not opcode type indices)
+//===----------------------------------------------------------------------===//
+
 struct IntrinsicScalarArgumentRule {
   unsigned ArgumentIndex;
   ArrayRef<LLT> TargetTypes;
@@ -1341,42 +1145,6 @@ static const APInt *getIntegerConstantValue(MachineRegisterInfo &MRI,
   return &DefMI->getOperand(1).getCImm()->getValue();
 }
 
-// A legal scalar G_UREM is accepted unchanged unless its divisor is known to
-// be a power of two and G_AND supports the same carrier. In that case, replace
-// unsigned remainder by the equivalent low-bit mask operation.
-static bool applyURemPowerOfTwoRewrite(LegalizerHelper &Helper,
-                                       MachineInstr &MI) {
-  assert(MI.getOpcode() == TargetOpcode::G_UREM);
-  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  const Register DstReg = MI.getOperand(0).getReg();
-  const Register DivisorReg = MI.getOperand(2).getReg();
-  const LLT Ty = MRI.getType(DstReg);
-  const unsigned TypeBits = Ty.getScalarSizeInBits();
-  if (!isKnownToBeAPowerOfTwo(DivisorReg, MRI, Helper.getValueTracking()) ||
-      !hasExactType(
-          Ty, getOpcodeIntegerTypeForWidth(TargetOpcode::G_AND, 0, TypeBits)))
-    return true;
-
-  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-  Register MaskReg;
-  if (auto Divisor = getIConstantVRegValWithLookThrough(DivisorReg, MRI)) {
-    const APInt Mask = Divisor->Value.zextOrTrunc(TypeBits) - 1;
-    MaskReg = Helper.MIRBuilder.buildConstant(Ty, Mask).getReg(0);
-  } else {
-    if (!hasExactType(
-            Ty, getOpcodeIntegerTypeForWidth(TargetOpcode::G_ADD, 0, TypeBits)))
-      return true;
-    const Register NegOneReg =
-        Helper.MIRBuilder.buildConstant(Ty, -1).getReg(0);
-    MaskReg = Helper.MIRBuilder.buildAdd(Ty, DivisorReg, NegOneReg).getReg(0);
-  }
-  Helper.Observer.changingInstr(MI);
-  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_AND));
-  MI.getOperand(2).setReg(MaskReg);
-  Helper.Observer.changedInstr(MI);
-  return true;
-}
-
 // LLVM integers are signless. Accept a narrowing constant when truncating it
 // to TargetBits can be reversed by either zero extension or sign extension.
 // This admits both 65535 and -1 as i16, but rejects values outside both ranges.
@@ -1397,8 +1165,14 @@ static bool canRewriteIntrinsicScalarArgument(MachineRegisterInfo &MRI,
     return false;
 
   const unsigned TargetBits = TargetTy.getScalarSizeInBits();
-  if (ActualTy.isFloat())
+  if (ActualTy.isFloat()) {
+    const MachineInstr *DefMI = MRI.getVRegDef(Source.getReg());
+    if (DefMI && DefMI->getOpcode() == TargetOpcode::G_FCONSTANT &&
+        !canMaterializeIntegerConstant(
+            LLT::integer(ActualTy.getScalarSizeInBits())))
+      return false;
     return ActualTy.getScalarSizeInBits() <= TargetBits;
+  }
   if (!ActualTy.isInteger())
     return false;
 
@@ -1406,7 +1180,8 @@ static bool canRewriteIntrinsicScalarArgument(MachineRegisterInfo &MRI,
   if (ActualBits <= TargetBits)
     return true;
   const APInt *Value = getIntegerConstantValue(MRI, Source);
-  return Value && integerConstantFits(*Value, TargetBits);
+  return Value && integerConstantFits(*Value, TargetBits) &&
+         canMaterializeIntegerConstant(TargetTy);
 }
 
 static bool isValidIntrinsicTargetType(LLT TargetTy) {
@@ -1577,52 +1352,55 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 }
 } // namespace
 
-{{target}}LegalizerInfo::{{target}}LegalizerInfo(const DataLayout &DL)
-    : DL(DL) {
+//===----------------------------------------------------------------------===//
+// 6. Rule registration: artifacts, operations, and intentional pass-through
+//===----------------------------------------------------------------------===//
+
+{{target}}LegalizerInfo::{{target}}LegalizerInfo() {
   using namespace TargetOpcode;
   using namespace LegalityPredicates;
   using namespace LegalizeMutations;
 
   constexpr unsigned FirstGenericOpcode = PRE_ISEL_GENERIC_OPCODE_START;
   constexpr unsigned LastGenericOpcode = PRE_ISEL_GENERIC_OPCODE_END;
-  bool CoveredOpcodes[LastGenericOpcode - FirstGenericOpcode + 1] = {};
+  constexpr unsigned NumGenericOpcodes =
+      LastGenericOpcode - FirstGenericOpcode + 1;
+  bool CoveredOpcodes[NumGenericOpcodes] = {};
+  unsigned ScalarTypeIndexMasks[NumGenericOpcodes] = {};
 
   // Record every opcode for which this generated policy defines type rules.
   // Opcodes never requested through these helpers are made legal below.
-  auto GetActions = [this, &CoveredOpcodes](unsigned Opcode)
+  auto GetActions = [this, &CoveredOpcodes, &ScalarTypeIndexMasks](
+                        unsigned Opcode, unsigned TypeIndexMask = 1)
       -> LegalizeRuleSet & {
     assert(isPreISelGenericOpcode(Opcode));
-    CoveredOpcodes[Opcode - PRE_ISEL_GENERIC_OPCODE_START] = true;
+    CoveredOpcodes[Opcode - FirstGenericOpcode] = true;
+    ScalarTypeIndexMasks[Opcode - FirstGenericOpcode] = TypeIndexMask;
     return getActionDefinitionsBuilder(Opcode);
   };
-  auto GetActionsFor = [this, &CoveredOpcodes](
-                           std::initializer_list<unsigned> Opcodes)
+  auto GetActionsFor = [this, &CoveredOpcodes, &ScalarTypeIndexMasks](
+                           std::initializer_list<unsigned> Opcodes,
+                           unsigned TypeIndexMask = 1)
       -> LegalizeRuleSet & {
     assert(Opcodes.size() >= 2);
     for (unsigned Opcode : Opcodes) {
       assert(isPreISelGenericOpcode(Opcode));
-      CoveredOpcodes[Opcode - PRE_ISEL_GENERIC_OPCODE_START] = true;
+      CoveredOpcodes[Opcode - FirstGenericOpcode] = true;
+      ScalarTypeIndexMasks[Opcode - FirstGenericOpcode] = TypeIndexMask;
     }
     return getActionDefinitionsBuilder(Opcodes);
   };
 
-  auto IsSupportedIntegerExtension = [](const LegalityQuery &Query) {
-    return isGeneratedIntegerExtension(Query) ||
-           isNativeIntegerExtension(Query);
-  };
-  auto &AnyExtActions = GetActions(G_ANYEXT);
-  AnyExtActions.legalIf(IsSupportedIntegerExtension);
-  auto &DefinedExtActions = GetActionsFor({G_ZEXT, G_SEXT});
-  DefinedExtActions.customIf(IsSupportedIntegerExtension);
-
-  auto &TruncActions = GetActions(G_TRUNC);
-  TruncActions.legalIf([](const LegalityQuery &Query) {
-    return isGeneratedIntegerTruncation(Query) ||
-           isNativeIntegerTruncation(Query);
-  });
-
-  auto &BitcastActions = GetActions(G_BITCAST);
-  BitcastActions.legalIf(isGeneratedRepresentationBitcast);
+  // Fixed artifact rules. Scalar computations (including constants) below
+  // always use the operation-specific query instead.
+  GetActions(G_ANYEXT, /*TypeIndexMask=*/0).legalIf(isIntegerExtensionArtifact);
+  GetActionsFor({G_ZEXT, G_SEXT}, /*TypeIndexMask=*/0)
+      .customIf(isIntegerExtensionArtifact);
+  GetActions(G_TRUNC, /*TypeIndexMask=*/0).legalIf(isIntegerTruncationArtifact);
+  GetActions(G_BITCAST, /*TypeIndexMask=*/0)
+      .legalIf(isRepresentationBitcastArtifact);
+  GetActions(G_FPEXT, /*TypeIndexMask=*/0).legalIf(isFloatExtensionArtifact);
+  GetActions(G_FPTRUNC, /*TypeIndexMask=*/0).legalIf(isFloatTruncationArtifact);
 
   auto &MemoryActions = GetActionsFor({G_LOAD, G_STORE});
   MemoryActions.legalIf(isLegalPlainMemoryValue);
@@ -1631,24 +1409,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                           bitcastFloatToSameWidthInteger(0));
   MemoryActions.fallback();
 
-  addPointerIntegerTypeRules(GetActions(G_PTR_ADD), this->DL, 0, 1,
-                             PointerIntegerWidthKind::Index);
-  addPointerIntegerTypeRules(GetActions(G_INTTOPTR), this->DL, 0, 1,
-                             PointerIntegerWidthKind::Representation);
-  addPointerIntegerTypeRules(GetActions(G_PTRTOINT), this->DL, 1, 0,
-                             PointerIntegerWidthKind::Representation);
-  addPointerIntegerTypeRules(GetActions(G_PTRMASK), this->DL, 0, 1,
-                             PointerIntegerWidthKind::Representation);
-
-  auto &PointerCarrierActions = GetActionsFor(
-      {G_FRAME_INDEX, G_GLOBAL_VALUE, G_CONSTANT_POOL, G_BLOCK_ADDR,
-       G_JUMP_TABLE, G_BRINDIRECT});
-  PointerCarrierActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && Query.Types[0].isPointer();
-  });
-  PointerCarrierActions.fallback();
-
-  GetActions(G_BR).alwaysLegal();
+  GetActions(G_BR, /*TypeIndexMask=*/0).alwaysLegal();
 
   auto &ScalarCarrierActions =
       GetActionsFor(
@@ -1663,8 +1424,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   auto &ConstantActions = GetActions(G_CONSTANT);
   ConstantActions.legalIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() &&
-           (Query.Types[0].isPointer() ||
-            isNativeIntegerType(Query.Types[0]));
+           (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0));
   });
   ConstantActions.customIf(integerTypeNeedsPromotion(0));
 
@@ -1686,7 +1446,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   URemActions.customIf(integerTypeNeedsPromotion(0));
 
   auto &ShiftActions =
-      GetActionsFor({G_SHL, G_LSHR, G_ASHR});
+      GetActionsFor({G_SHL, G_LSHR, G_ASHR}, /*TypeIndexMask=*/3);
   ShiftActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            isOpcodeIntegerType(Query, 1);
@@ -1696,7 +1456,8 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                              promoteIntegerType(1));
 
   auto &BitCountActions = GetActionsFor(
-      {G_CTLZ, G_CTLZ_ZERO_UNDEF, G_CTTZ, G_CTTZ_ZERO_UNDEF, G_CTPOP});
+      {G_CTLZ, G_CTLZ_ZERO_UNDEF, G_CTTZ, G_CTTZ_ZERO_UNDEF, G_CTPOP},
+      /*TypeIndexMask=*/3);
   BitCountActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            isOpcodeIntegerType(Query, 1);
@@ -1707,16 +1468,15 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &FConstantActions = GetActions(G_FCONSTANT);
   FConstantActions.legalIf([](const LegalityQuery &Query) {
-    return !Query.Types.empty() && isNativeFloatType(Query.Types[0]);
+    return isOpcodeFloatType(Query, 0);
   });
   FConstantActions.customIf([](const LegalityQuery &Query) {
-    if (Query.Types.empty())
+    if (Query.Types.empty() || !Query.Types[0].isFloat() ||
+        isOpcodeFloatType(Query, 0))
       return false;
-    const LLT Ty = Query.Types[0];
-    if (!Ty.isFloat() || isNativeFloatType(Ty))
-      return false;
-    return getNativeFloatTypeForWidth(Ty.getScalarSizeInBits()).isValid() ||
-           getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits()).isValid();
+    const unsigned Bits = Query.Types[0].getScalarSizeInBits();
+    return getOpcodeFloatTypeForWidth(G_FCONSTANT, 0, Bits).isValid() ||
+           getOpcodeIntegerTypeForWidth(G_CONSTANT, 0, Bits).isValid();
   });
 
   auto &FAddActions = GetActions(G_FADD);
@@ -1739,40 +1499,21 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
 
   auto &FloatActions = GetActionsFor({
       G_FREM, G_FMA, G_FMAD, G_FABS, G_FCANONICALIZE, G_FMINNUM,
-      G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM,
+      G_FMAXNUM, G_FMINNUM_IEEE, G_FMAXNUM_IEEE, G_FMINIMUM, G_FMAXIMUM,
       G_FMINIMUMNUM, G_FMAXIMUMNUM, G_FCEIL, G_FFLOOR, G_FRINT,
       G_FNEARBYINT});
   FloatActions.legalIf([](const LegalityQuery &Query) {
     return isOpcodeFloatType(Query, 0);
   });
 
-  auto &FMaximumActions = GetActions(G_FMAXIMUM);
-  FMaximumActions.customIf([](const LegalityQuery &Query) {
-    return isOpcodeFloatType(Query, 0);
-  });
-  FMaximumActions.widenScalarIf(floatTypeNeedsPromotion(0),
-                                promoteFloatType(0));
-
-  auto &FCopySignActions = GetActions(G_FCOPYSIGN);
+  auto &FCopySignActions = GetActions(G_FCOPYSIGN, /*TypeIndexMask=*/3);
   FCopySignActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeFloatType(Query, 0) &&
            isOpcodeFloatType(Query, 1);
   });
 
-  auto &FPExtActions = GetActions(G_FPEXT);
-  FPExtActions.legalIf([](const LegalityQuery &Query) {
-    return isNativeFloatExtension(Query) ||
-           isGeneratedFloatExtension(Query);
-  });
-
-  auto &FPTruncActions = GetActions(G_FPTRUNC);
-  FPTruncActions.legalIf([](const LegalityQuery &Query) {
-    return isNativeFloatTruncation(Query) ||
-           isGeneratedFloatTruncation(Query);
-  });
-
   auto &IntToFPActions =
-      GetActionsFor({G_SITOFP, G_UITOFP});
+      GetActionsFor({G_SITOFP, G_UITOFP}, /*TypeIndexMask=*/3);
   IntToFPActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeFloatType(Query, 0) &&
            isOpcodeIntegerType(Query, 1);
@@ -1781,7 +1522,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                promoteIntegerType(1));
 
   auto &FPToIntActions =
-      GetActionsFor({G_FPTOSI, G_FPTOUI});
+      GetActionsFor({G_FPTOSI, G_FPTOUI}, /*TypeIndexMask=*/3);
   FPToIntActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
            isOpcodeFloatType(Query, 1);
@@ -1789,38 +1530,36 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   FPToIntActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                promoteIntegerType(0));
 
-  const LLT CondTy = getNativeIntegerTypeForWidth(1);
-  assert(CondTy.isValid() && "condition legalization needs an integer type");
-
-  auto &ICmpActions = GetActions(G_ICMP);
-  ICmpActions.legalIf([CondTy](const LegalityQuery &Query) {
-    if (Query.Types.size() < 2)
-      return false;
-    if (Query.Types[1].isPointer())
-      return hasExactType(Query.Types[0], CondTy);
-    return isOpcodeIntegerType(Query, 1) &&
+  auto &ICmpActions = GetActions(G_ICMP, /*TypeIndexMask=*/3);
+  ICmpActions.legalIf([](const LegalityQuery &Query) {
+    return Query.Types.size() > 1 && isOpcodeIntegerType(Query, 0) &&
+           isOpcodeIntegerType(Query, 1) &&
            hasExactType(Query.Types[0], Query.Types[1]);
   });
-  ICmpActions.customIf(icmpResultNeedsIntegerInputCarrier());
-  ICmpActions.widenScalarIf(
-      [CondTy](const LegalityQuery &Query) {
-        return Query.Types.size() > 1 && Query.Types[1].isPointer() &&
-               Query.Types[0].isInteger() &&
-               Query.Types[0].getScalarSizeInBits() <
-                   CondTy.getScalarSizeInBits();
-      },
-      changeTo(0, CondTy));
-  ICmpActions.widenScalarIf(integerTypeNeedsPromotion(1),
-                            promoteIntegerType(1));
+  ICmpActions.customIf(icmpNeedsCarrierPromotion);
 
-  auto &FCmpActions = GetActions(G_FCMP);
+  auto &FCmpActions = GetActions(G_FCMP, /*TypeIndexMask=*/3);
   FCmpActions.legalIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 && isOpcodeFloatType(Query, 1) &&
            hasExactType(Query.Types[0],
                         getFCmpResultTypeForInput(Query.Types[1]));
   });
-  FCmpActions.widenScalarIf(floatTypeNeedsPromotion(1),
-                            promoteFloatType(1));
+  FCmpActions.widenScalarIf(
+      [](const LegalityQuery &Query) {
+        if (Query.Types.size() < 2 || !Query.Types[0].isInteger() ||
+            !Query.Types[1].isFloat())
+          return false;
+        const LLT CarrierTy =
+            getFCmpCarrierForWidth(Query.Types[1].getScalarSizeInBits());
+        return CarrierTy.isValid() &&
+               Query.Types[0].getScalarSizeInBits() <=
+                   CarrierTy.getScalarSizeInBits() &&
+               !hasExactType(Query.Types[1], CarrierTy);
+      },
+      [](const LegalityQuery &Query) {
+        return std::pair<unsigned, LLT>(
+            1, getFCmpCarrierForWidth(Query.Types[1].getScalarSizeInBits()));
+      });
   FCmpActions.widenScalarIf(fcmpResultNeedsFloatInputWidth(),
                             widenFCmpResultToFloatInputWidth());
 
@@ -1830,12 +1569,13 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   });
   BrCondActions.customIf(integerTypeNeedsPromotion(0));
 
-  auto &SelectActions = GetActions(G_SELECT);
+  auto &SelectActions = GetActions(G_SELECT, /*TypeIndexMask=*/3);
   SelectActions.customIf([](const LegalityQuery &Query) {
     return Query.Types.size() > 1 &&
            (Query.Types[0].isPointer() || isOpcodeIntegerType(Query, 0) ||
             isOpcodeFloatType(Query, 0)) &&
-           isOpcodeIntegerType(Query, 1);
+           isOpcodeIntegerType(Query, 1) &&
+           canExpandSelect(Query.Types[0], Query.Types[1]);
   });
   SelectActions.widenScalarIf(integerTypeNeedsPromotion(1),
                               promoteIntegerType(1));
@@ -1852,9 +1592,32 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));
 
-  // This simplified policy intentionally leaves completely unlisted generic
-  // opcodes unchanged. Rules for a listed opcode still fail closed when none
-  // of that opcode's predicates or transformations match.
+  // Reject configuration for artifact-only, removed, unhandled, or non-scalar
+  // indices instead of silently ignoring it. Native membership is also required
+  // because the cast artifact contract is expressed in native carriers.
+  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
+    if (Capability.Width == 0)
+      continue; // Sentinel.
+    if (Capability.Opcode < FirstGenericOpcode ||
+        Capability.Opcode > LastGenericOpcode ||
+        Capability.TypeIndex >= 2 ||
+        !(ScalarTypeIndexMasks[Capability.Opcode - FirstGenericOpcode] &
+          (1u << Capability.TypeIndex)))
+      report_fatal_error(
+          "generated scalar constraint has no configurable opcode/type index");
+    const LLT Ty = Capability.TypeKind == ScalarTypeKind::Integer
+                       ? LLT::integer(Capability.Width)
+                       : LLT::floatIEEE(Capability.Width);
+    if (!(Capability.TypeKind == ScalarTypeKind::Integer
+              ? isNativeIntegerType(Ty)
+              : isNativeFloatType(Ty)))
+      report_fatal_error("generated scalar constraint is not a native carrier");
+  }
+
+  // Intentional pass-through is separate from native scalar fallback. Opcodes
+  // outside this template (including pointer arithmetic and address formation)
+  // belong to target integration. Pointer ICMP has no scalar rule here.
+  // Covered rules fail closed when no predicate or transformation matches.
   for (unsigned Opcode = FirstGenericOpcode; Opcode <= LastGenericOpcode;
        ++Opcode) {
     if (!CoveredOpcodes[Opcode - FirstGenericOpcode])
@@ -1922,8 +1685,6 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     }
     return applySelectControlFlowRewrite(Helper, MI);
   }
-  case TargetOpcode::G_FMAXIMUM:
-    return applyFMaximumSelectRewrite(Helper, MI);
   case TargetOpcode::G_FCONSTANT:
     return applyFConstantRewrite(Helper, MI);
   case TargetOpcode::G_UREM: {

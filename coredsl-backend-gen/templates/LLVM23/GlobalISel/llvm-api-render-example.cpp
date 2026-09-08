@@ -150,13 +150,21 @@ static Error renderTemplate(StringRef TemplatePath, const json::Value &Data,
 }
 
 int main(int Argc, char **Argv) {
-  if (Argc != 2) {
-    errs() << "usage: llvm-api-render-example <template.mustache>\n";
+  if (Argc != 2 && Argc != 3) {
+    errs() << "usage: llvm-api-render-example <template.mustache> [input.json]\n";
     return 1;
   }
 
   ExitOnError ExitOnErr("llvm-api-render-example: ");
   json::Value Data = makeLegalizerInput();
+  if (Argc == 3) {
+    auto Input = MemoryBuffer::getFile(Argv[2]);
+    if (!Input) {
+      errs() << Argv[2] << ": " << Input.getError().message() << '\n';
+      return 1;
+    }
+    Data = ExitOnErr(json::parse((*Input)->getBuffer()));
+  }
   ExitOnErr(renderTemplate(Argv[1], Data, outs()));
   return 0;
 }
