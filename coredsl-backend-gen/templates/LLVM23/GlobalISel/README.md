@@ -217,7 +217,9 @@ extension policy described below may separately normalize a supported scalar
 `G_ZEXT`/`G_SEXT` to `G_ANYEXT` before visiting its producer; after that
 intentional weakening, the resulting `G_ANYEXT` may participate in local
 coalescing. An integer type that is already legal is never widened by this
-local optimization.
+local optimization. `G_ICMP` is the coordinated exception: while its original
+result is still missing-width, a wider local result preference widens both its
+integer inputs and result to preserve the rule that they share one carrier.
 
 An omitted opcode/type-index pair inherits the full matching derived carrier
 union. A configured pair replaces that union. For example, if the collected
@@ -378,19 +380,25 @@ as does a known power of two when a required replacement carrier is
 unavailable.
 
 The smallest derived integer carrier is the default condition type where there
-is no integer value type to follow. For integer `G_ICMP`, the result uses the
-same carrier as the legalized inputs: with derived integers `[16, 32]`, both
-`G_ICMP (i1, i8)` and `G_ICMP (i1, i16)` become `G_ICMP (i16, i16)`, while
-`G_ICMP (i1, i32)` becomes `G_ICMP (i32, i32)`. The result carrier is computed
-from the original input width so a missing input width does not first become an
-unsupported result width. Pointer inputs cannot be used as a result type and
-therefore retain the smallest derived integer result while their pointer type is
-unchanged. Non-integer results, non-integer/non-pointer inputs, result types
-wider than the required carrier, and widths exceeding every derived integer fail
-closed. `G_FCMP` promotes an unsupported floating-point input to its narrowest
-wider carrier supported for that opcode, then gives the comparison result the
-exact same width as that legalized input: `f16 -> i16`, `f32 -> i32`, and so
-on. The
+is no integer value type to follow. For integer `G_ICMP`, the result normally
+uses the same default carrier as the legalized inputs: with derived integers
+`[16, 32]`, both `G_ICMP (i1, i8)` and `G_ICMP (i1, i16)` become
+`G_ICMP (i16, i16)`, while `G_ICMP (i1, i32)` becomes
+`G_ICMP (i32, i32)`. The default is computed from the original input width so
+a missing input width does not first become an unsupported result width. If the
+single same-block result use has already been widened with `G_ANYEXT`, the
+comparison instead adopts that wider carrier when it is supported for both
+`G_ICMP` type indices and is wide enough for the inputs. For example, when
+`G_BRCOND` supports only `i32`, `G_ICMP (i1, i8) -> G_BRCOND i1` becomes
+`G_ICMP (i32, i32) -> G_BRCOND i32` without an intervening conversion. Defined
+extensions required to preserve the comparison inputs are not bypassed.
+Pointer inputs cannot be used as a result type and therefore retain the
+smallest derived integer result while their pointer type is unchanged.
+Non-integer results, non-integer/non-pointer inputs, result types wider than the
+required carrier, and widths exceeding every derived integer fail closed.
+`G_FCMP` promotes an unsupported floating-point input to its narrowest wider
+carrier supported for that opcode, then gives the comparison result the exact
+same width as that legalized input: `f16 -> i16`, `f32 -> i32`, and so on. The
 corresponding exact integer type must be supported for `G_FCMP`; a merely wider
 integer does not substitute for it. The condition input of `G_SELECT` uses the
 smallest condition carrier. Pointer values are also accepted by `G_SELECT` and
@@ -449,12 +457,15 @@ through copies or integer casts), branch legalization predicts the compare's
 eventual result carrier instead of selecting the smallest carrier in
 isolation. For `G_FCMP`, that prediction first determines the legalized float
 input and then uses its same-width integer type. This compensates for LLVM's
-bottom-up legalization order. When `i64` is also a configured `G_BRCOND`
-carrier, an `i64` integer comparison can therefore become `G_ICMP i64`
-followed directly by `G_BRCOND i64`. If the branch list excludes `i64`, the
-branch instead uses its own smallest fitting carrier and retains the necessary
-conversion. An `f32` comparison similarly reaches `G_BRCOND i32` when `i32` is
-configured for both operations.
+bottom-up legalization order. If the predicted integer-compare carrier is not
+accepted by the branch and the branch chooses a wider fallback, the later
+`G_ICMP` local-carrier step can adopt that fallback in turn. When `i64` is also
+a configured `G_BRCOND` carrier, an `i64` integer comparison can therefore
+become `G_ICMP i64` followed directly by `G_BRCOND i64`. If the branch list
+excludes `i64`, the branch instead uses its own smaller carrier and retains the
+necessary conversion because the comparison cannot narrow its inputs. An
+`f32` comparison similarly reaches `G_BRCOND i32` when `i32` is configured for
+both operations.
 
 The generated constructor receives and stores the target's LLVM `DataLayout`.
 For each pointer operation it reads the address space from the pointer LLT.

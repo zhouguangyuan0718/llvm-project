@@ -379,10 +379,11 @@ promoteFloatType(unsigned TypeIdx) {
   };
 }
 
-// Give an integer G_ICMP result the same native carrier selected for its
-// operands. Computing the carrier from the original operand width avoids an
-// intermediate unsupported result type, for example (i1, i8) -> (i16, i8)
-// when i16 is the narrowest native integer.
+// Give an integer G_ICMP result the same carrier selected for its operands.
+// Computing the default from the original operand width avoids an intermediate
+// unsupported result type, for example (i1, i8) -> (i16, i8) when i16 is the
+// narrowest native integer. Custom legalization may replace that default with
+// a wider locally preferred carrier shared with the result's consumer.
 static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
   return [](const LegalityQuery &Query) {
     if (Query.Types.size() < 2)
@@ -395,15 +396,6 @@ static LegalityPredicate icmpResultNeedsIntegerInputCarrier() {
         Query.Opcode, 1, InputTy.getScalarSizeInBits());
     return CarrierTy.isValid() &&
            ResultTy.getScalarSizeInBits() < CarrierTy.getScalarSizeInBits();
-  };
-}
-
-static LegalizeMutation widenICmpResultToIntegerInputCarrier() {
-  return [](const LegalityQuery &Query) {
-    return std::pair<unsigned, LLT>(
-        0, getOpcodeIntegerTypeForWidth(
-               Query.Opcode, 1,
-               Query.Types[1].getScalarSizeInBits()));
   };
 }
 
@@ -900,10 +892,58 @@ static bool applyLocalIntegerCarrierPromotion(LegalizerHelper &Helper,
          LegalizerHelper::Legalized;
 }
 
-// Legalization visits ordinary instructions bottom-up, so G_BRCOND normally
+// G_ICMP's integer result carrier must match its input carrier. Treat both
+// type indices as one local-carrier decision so a branch-only carrier selected
+// by a previously legalized G_BRCOND can propagate into the comparison. Widen
+// the inputs first; the next legalization step widens the result to the same
+// carrier and the artifact combiner removes the G_ANYEXT(G_TRUNC) bridge to the
+// branch. Any defined extensions needed by the comparison inputs remain normal
+// local-coalescing boundaries.
+static bool applyICmpIntegerCarrierPromotion(LegalizerHelper &Helper,
+                                             MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_ICMP ||
+      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() < 4 ||
+      !MI.getOperand(0).isReg() || !MI.getOperand(2).isReg() ||
+      !MI.getOperand(3).isReg() ||
+      !MI.getOperand(0).getReg().isVirtual())
+    return false;
+
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const LLT ResultTy = MRI.getType(MI.getOperand(0).getReg());
+  const LLT InputTy = MRI.getType(MI.getOperand(2).getReg());
+  if (!ResultTy.isInteger() || !InputTy.isInteger())
+    return false;
+
+  const LLT DefaultCarrierTy = getOpcodeIntegerTypeForWidth(
+      TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
+  if (!DefaultCarrierTy.isValid())
+    return false;
+
+  LLT CarrierTy = getLocallyPreferredIntegerCarrier(
+      MI, MRI, 0, DefaultCarrierTy);
+  if (CarrierTy.getScalarSizeInBits() < InputTy.getScalarSizeInBits() ||
+      !isOpcodeIntegerCarrier(TargetOpcode::G_ICMP, 1, CarrierTy))
+    CarrierTy = DefaultCarrierTy;
+  if (ResultTy.getScalarSizeInBits() > CarrierTy.getScalarSizeInBits())
+    return false;
+
+  if (!hasExactType(InputTy, CarrierTy))
+    return Helper.widenScalar(MI, 1, CarrierTy) ==
+           LegalizerHelper::Legalized;
+  if (!hasExactType(ResultTy, CarrierTy))
+    return Helper.widenScalar(MI, 0, CarrierTy) ==
+           LegalizerHelper::Legalized;
+  return false;
+}
+
+// G_BRCOND has no result definition, so it is the consumer half of local
+// carrier coalescing rather than a caller of the producer helper above.
+// Legalization visits ordinary instructions bottom-up, so the branch normally
 // chooses a carrier before its defining compare is widened. Predict the
 // compare's eventual result carrier to keep both instructions on one type and
-// let the artifact combiner remove the temporary trunc/extension pair.
+// let the artifact combiner remove the temporary trunc/extension pair. If the
+// branch has to choose a wider opcode-specific carrier, the later G_ICMP custom
+// action observes that choice through the inserted G_ANYEXT and adopts it.
 static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
                                    Register ConditionReg) {
   constexpr unsigned MaxLookThroughDepth = 8;
@@ -1756,8 +1796,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
     return isOpcodeIntegerType(Query, 1) &&
            hasExactType(Query.Types[0], Query.Types[1]);
   });
-  ICmpActions.widenScalarIf(icmpResultNeedsIntegerInputCarrier(),
-                            widenICmpResultToIntegerInputCarrier());
+  ICmpActions.customIf(icmpResultNeedsIntegerInputCarrier());
   ICmpActions.widenScalarIf(
       [CondTy](const LegalityQuery &Query) {
         return Query.Types.size() > 1 && Query.Types[1].isPointer() &&
@@ -1863,6 +1902,8 @@ bool {{target}}LegalizerInfo::legalizeCustom(
   case TargetOpcode::G_LOAD:
   case TargetOpcode::G_STORE:
     return applyI1ByteMemoryRewrite(Helper, MI);
+  case TargetOpcode::G_ICMP:
+    return applyICmpIntegerCarrierPromotion(Helper, MI);
   case TargetOpcode::G_BRCOND:
     return applyBrCondCarrierRewrite(Helper, MI);
   case TargetOpcode::G_SELECT: {

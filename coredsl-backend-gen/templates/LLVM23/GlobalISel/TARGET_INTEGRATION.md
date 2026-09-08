@@ -380,6 +380,9 @@ Inspect that, for the derived integer carriers `[16, 32]`:
 - a branch using an integer `G_ICMP` result chooses the same predicted carrier
   as that comparison, so an `i32` comparison reaches `G_BRCOND i32` without an
   intervening conversion after artifact combining;
+- when the `G_BRCOND` list is temporarily restricted to `[i32]`, an
+  `G_ICMP (i1, i8)` feeding it adopts `(i32, i32)`, and the combined result is
+  a direct `G_ICMP i32` to `G_BRCOND i32` edge;
 - a branch using an `f32 G_FCMP` result likewise reaches `G_BRCOND i32`; an
   `f16 G_FCMP` promoted to `f32` also returns and branches on `i32`;
 - a value wider than `i32` fails closed instead of narrowing.
