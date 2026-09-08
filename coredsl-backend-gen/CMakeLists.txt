@@ -62,6 +62,49 @@ if(BUILD_TESTING)
     COMMAND coredsl-legalizer-mustache-example
       ${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel/LegalizerInfo.cpp.mustache)
 
+  if(TARGET LLVM${LLVM_NATIVE_ARCH}CodeGen)
+    set(BranchTestDirectory "${CMAKE_CURRENT_BINARY_DIR}/icmp-brcond-test")
+    set(BranchTestTemplates "${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel")
+    file(MAKE_DIRECTORY "${BranchTestDirectory}")
+    add_custom_command(
+      OUTPUT
+        "${BranchTestDirectory}/ExampleLegalizerInfo.h"
+        "${BranchTestDirectory}/ExampleLegalizerInfo.cpp"
+      COMMAND ${CMAKE_COMMAND}
+        -DRENDERER=$<TARGET_FILE:coredsl-legalizer-mustache-example>
+        -DTEMPLATES=${BranchTestTemplates}
+        -DOUTPUT_DIRECTORY=${BranchTestDirectory}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RenderLegalizerExample.cmake
+      DEPENDS
+        coredsl-legalizer-mustache-example
+        ${BranchTestTemplates}/LegalizerInfo.h.mustache
+        ${BranchTestTemplates}/LegalizerInfo.cpp.mustache
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/RenderLegalizerExample.cmake
+      VERBATIM)
+    add_executable(coredsl-icmp-brcond-test
+      "${BranchTestDirectory}/ExampleLegalizerInfo.cpp"
+      "${BranchTestDirectory}/ExampleLegalizerInfo.h"
+      test/GlobalISel/ICmpBrCondTest.cpp)
+    target_include_directories(coredsl-icmp-brcond-test PRIVATE
+      "${BranchTestDirectory}" test/GlobalISel/Inputs)
+    target_include_directories(coredsl-icmp-brcond-test
+      SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_link_libraries(coredsl-icmp-brcond-test
+      PRIVATE LLVMGlobalISel LLVM${LLVM_NATIVE_ARCH}CodeGen)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+      target_compile_options(coredsl-icmp-brcond-test
+        PRIVATE ${COREDSL_LLVM_DEFINITIONS})
+    endif()
+    if(NOT LLVM_ENABLE_RTTI)
+      if(MSVC)
+        target_compile_options(coredsl-icmp-brcond-test PRIVATE /GR-)
+      else()
+        target_compile_options(coredsl-icmp-brcond-test PRIVATE -fno-rtti)
+      endif()
+    endif()
+    add_test(NAME coredsl-icmp-brcond COMMAND coredsl-icmp-brcond-test)
+  endif()
+
   add_test(
     NAME coredsl-parser-basic
     COMMAND ${CMAKE_COMMAND}

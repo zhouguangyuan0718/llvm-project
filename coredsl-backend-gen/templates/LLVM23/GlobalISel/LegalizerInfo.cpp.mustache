@@ -2,6 +2,7 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
@@ -21,6 +22,7 @@
 #include <cassert>
 #include <initializer_list>
 #include <iterator>
+#include <utility>
 
 namespace llvm {
 
@@ -686,6 +688,89 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
   return LLT{};
 }
 
+// Only look through operations preserving the comparison's boolean value.
+// Do not cross arithmetic, PHIs or FREEZE. Other users of the narrow result or
+// of these adapters keep their original registers and types.
+static MachineInstr *findBrCondICmp(MachineRegisterInfo &MRI,
+                                    Register ConditionReg) {
+  SmallPtrSet<MachineInstr *, 8> Visited;
+  while (ConditionReg.isVirtual()) {
+    MachineInstr *DefMI = MRI.getVRegDef(ConditionReg);
+    if (!DefMI || !Visited.insert(DefMI).second)
+      return nullptr;
+    if (DefMI->getOpcode() == TargetOpcode::G_ICMP)
+      return DefMI;
+    switch (DefMI->getOpcode()) {
+    case TargetOpcode::COPY:
+    case TargetOpcode::G_TRUNC:
+    case TargetOpcode::G_ANYEXT:
+    case TargetOpcode::G_ZEXT:
+    case TargetOpcode::G_SEXT:
+      break;
+    default:
+      return nullptr;
+    }
+    if (DefMI->getNumExplicitDefs() != 1 ||
+        DefMI->getNumExplicitOperands() != 2 ||
+        !DefMI->getOperand(1).isReg() ||
+        !DefMI->getOperand(1).getReg().isVirtual())
+      return nullptr;
+    const Register SourceReg = DefMI->getOperand(1).getReg();
+    const LLT DstTy = MRI.getType(ConditionReg);
+    const LLT SrcTy = MRI.getType(SourceReg);
+    if (!DstTy.isInteger() || !SrcTy.isInteger() ||
+        (DefMI->getOpcode() == TargetOpcode::COPY &&
+         !hasExactType(DstTy, SrcTy)))
+      return nullptr;
+    ConditionReg = SourceReg;
+  }
+  return nullptr;
+}
+
+// Preflight the existing ICMP rules before touching MIR. On this policy an
+// integer compare needs at most one result widening and one input widening;
+// pointer comparisons only widen the result. No new comparison type policy is
+// introduced here, and the branch must already accept the resulting carrier.
+static bool legalizeBrCondICmp(LegalizerHelper &Helper, MachineInstr &Cmp) {
+  if (Cmp.getNumExplicitDefs() != 1 || Cmp.getNumExplicitOperands() != 4 ||
+      !Cmp.getOperand(0).isReg() || !Cmp.getOperand(0).getReg().isVirtual() ||
+      !Cmp.getOperand(2).isReg() || !Cmp.getOperand(2).getReg().isVirtual() ||
+      !Cmp.getOperand(3).isReg() || !Cmp.getOperand(3).getReg().isVirtual())
+    return false;
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  LLT Types[] = {MRI.getType(Cmp.getOperand(0).getReg()),
+                 MRI.getType(Cmp.getOperand(2).getReg())};
+  if (!Types[0].isInteger() ||
+      (!Types[1].isInteger() && !Types[1].isPointer()) ||
+      !hasExactType(Types[1], MRI.getType(Cmp.getOperand(3).getReg())))
+    return false;
+
+  const LegalizerInfo &LI = Helper.getLegalizerInfo();
+  SmallVector<std::pair<unsigned, LLT>, 2> Widenings;
+  for (;;) {
+    const auto Step = LI.getAction({TargetOpcode::G_ICMP, Types});
+    if (Step.Action == LegalizeActions::Legal)
+      break;
+    if (Step.Action != LegalizeActions::WidenScalar || Step.TypeIdx >= 2 ||
+        Widenings.size() == 2 || !Types[Step.TypeIdx].isInteger() ||
+        !Step.NewType.isInteger() ||
+        Step.NewType.getScalarSizeInBits() <=
+            Types[Step.TypeIdx].getScalarSizeInBits())
+      return false;
+    Widenings.emplace_back(Step.TypeIdx, Step.NewType);
+    Types[Step.TypeIdx] = Step.NewType;
+  }
+  if (!isNativeIntegerType(Types[0]))
+    return false;
+
+  for (const auto &[TypeIdx, Ty] : Widenings) {
+    Helper.MIRBuilder.setInstrAndDebugLoc(Cmp);
+    if (Helper.widenScalar(Cmp, TypeIdx, Ty) != LegalizerHelper::Legalized)
+      return false;
+  }
+  return true;
+}
+
 static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
                                       MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::G_BRCOND ||
@@ -698,6 +783,23 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   const LLT ConditionTy = MRI.getType(ConditionReg);
   if (!ConditionTy.isInteger())
     return false;
+
+  // Finalize the producer first, then select its actual result register rather
+  // than predicting a width and extending the old narrow result. This also
+  // handles a branch whose adapter already has a native (but smaller) type.
+  if (MachineInstr *Cmp = findBrCondICmp(MRI, ConditionReg)) {
+    if (legalizeBrCondICmp(Helper, *Cmp)) {
+      const Register CompareReg = Cmp->getOperand(0).getReg();
+      if (CompareReg != ConditionReg) {
+        Helper.Observer.changingInstr(MI);
+        MI.getOperand(0).setReg(CompareReg);
+        MI.getOperand(0).setIsKill(false);
+        Helper.Observer.changedInstr(MI);
+      }
+      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+      return true;
+    }
+  }
   if (isNativeIntegerType(ConditionTy))
     return true;
 
@@ -1487,7 +1589,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                             widenFCmpResultToFloatInputWidth());
 
   auto &BrCondActions = GetActions(G_BRCOND);
-  BrCondActions.legalIf([](const LegalityQuery &Query) {
+  BrCondActions.customIf([](const LegalityQuery &Query) {
     return !Query.Types.empty() && isNativeIntegerType(Query.Types[0]);
   });
   BrCondActions.customIf(nativeIntegerTypeNeedsPromotion(0));

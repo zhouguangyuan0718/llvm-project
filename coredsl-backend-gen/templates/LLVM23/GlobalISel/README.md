@@ -377,16 +377,29 @@ condition and branches driven by an already-native wider integer. Non-integer
 conditions and integer conditions wider than every native type fail closed.
 Opcode-specific capability constraints do not restrict this rule.
 
-When a missing-width condition is defined by `G_ICMP` or `G_FCMP` (possibly
-through copies or integer casts), branch legalization predicts the compare's
-eventual result carrier instead of selecting the smallest carrier in
-isolation. For `G_FCMP`, that prediction first determines the legalized float
-input and then uses its same-width integer type. This compensates for LLVM's
-bottom-up legalization order. With an `i64` integer comparison, the artifact
-combiner can therefore reduce the temporary `G_TRUNC`/boolean-extension chain
-to `G_ICMP i64` followed directly by `G_BRCOND i64` rather than retaining an
-`i64`-to-`i16` conversion; an `f32` comparison similarly reaches
-`G_BRCOND i32`.
+For a condition defined by `G_ICMP`, branch legalization first completes that
+comparison's existing result/input widening rules, then connects `G_BRCOND`
+directly to its legalized result register. This also runs when an intermediate
+condition already has a native type: `ICMP i32 -> cast i16 -> BRCOND i16` can
+become `ICMP i32 -> BRCOND i32`. The comparison's final type must be accepted
+by the unchanged native branch policy. The complete widening plan is checked
+before modifying the comparison; unsupported plans retain the old fallback.
+
+The local lookup can follow same-type copies and integer boolean adapters
+(`TRUNC/ANYEXT/ZEXT/SEXT`), including across blocks. It does not cross arithmetic,
+PHIs or FREEZE. Other users retain their original narrow registers and types;
+only the branch edge bypasses the adapters. LLVM's global worklist order and
+all ordinary ICMP type rules are unchanged.
+
+For `G_FCMP`, the previous prediction path is unchanged: a missing-width branch
+condition uses the legalized float input's same-width integer carrier. An
+`f32` comparison therefore reaches `G_BRCOND i32` through artifact combining.
+
+When the native target's CodeGen library is available, CTest's
+`coredsl-icmp-brcond` test compiles the rendered example and checks both visit
+orders, native adapters, long copy chains, other users, cross-block edges and
+non-comparison boundaries. These MIR tests do not validate another target's
+instruction selector.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is
 promoted to the narrowest native integer; the generic legalizer may first
