@@ -7,6 +7,7 @@
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
+#include "llvm/CodeGen/GlobalISel/Utils.h"
 #include "llvm/CodeGen/LowLevelTypeUtils.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -688,17 +689,19 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
   return LLT{};
 }
 
-// Only look through operations preserving the comparison's boolean value.
+// Only look through adapters to ICMP or a candidate AND-by-one producer.
+// The latter's constant mask is checked before modifying either instruction.
 // Do not cross arithmetic, PHIs or FREEZE. Other users of the narrow result or
 // of these adapters keep their original registers and types.
-static MachineInstr *findBrCondICmp(MachineRegisterInfo &MRI,
+static MachineInstr *findBrCondBooleanProducer(MachineRegisterInfo &MRI,
                                     Register ConditionReg) {
   SmallPtrSet<MachineInstr *, 8> Visited;
   while (ConditionReg.isVirtual()) {
     MachineInstr *DefMI = MRI.getVRegDef(ConditionReg);
     if (!DefMI || !Visited.insert(DefMI).second)
       return nullptr;
-    if (DefMI->getOpcode() == TargetOpcode::G_ICMP)
+    if (DefMI->getOpcode() == TargetOpcode::G_ICMP ||
+        DefMI->getOpcode() == TargetOpcode::G_AND)
       return DefMI;
     switch (DefMI->getOpcode()) {
     case TargetOpcode::COPY:
@@ -771,6 +774,79 @@ static bool legalizeBrCondICmp(LegalizerHelper &Helper, MachineInstr &Cmp) {
   return true;
 }
 
+// AND x, 1 (or AND 1, x) produces exactly zero or one, so its native
+// result can replace any integer truncation/extension on the branch edge.
+static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_AND ||
+      MI.getNumExplicitDefs() != 1 || MI.getNumExplicitOperands() != 3)
+    return false;
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  for (unsigned I = 0; I != 3; ++I)
+    if (!MI.getOperand(I).isReg() ||
+        !MI.getOperand(I).getReg().isVirtual() ||
+        !MRI.getType(MI.getOperand(I).getReg()).isInteger())
+      return false;
+  const LLT OriginalTy = MRI.getType(MI.getOperand(0).getReg());
+  if (!hasExactType(OriginalTy, MRI.getType(MI.getOperand(1).getReg())) ||
+      !hasExactType(OriginalTy, MRI.getType(MI.getOperand(2).getReg())))
+    return false;
+
+  unsigned MaskIndex = 0;
+  for (unsigned I = 1; I != 3; ++I) {
+    const auto Constant =
+        getIConstantVRegValWithLookThrough(MI.getOperand(I).getReg(), MRI);
+    // The constant lookup deliberately does not look through ANYEXT: its high
+    // bits are unspecified, so it is not proof of an exact numeric mask of 1.
+    if (Constant && Constant->Value.isOne()) {
+      MaskIndex = I;
+      break;
+    }
+  }
+  if (!MaskIndex)
+    return false;
+
+  const LegalizerInfo &LI = Helper.getLegalizerInfo();
+  const auto Step = LI.getAction(MI, MRI);
+  LLT CarrierTy = OriginalTy;
+  if (Step.Action == LegalizeActions::Legal) {
+    if (!isNativeIntegerType(CarrierTy))
+      return false;
+  } else {
+    if (Step.Action != LegalizeActions::WidenScalar || Step.TypeIdx != 0 ||
+        !isNativeIntegerType(Step.NewType) ||
+        LI.getAction({TargetOpcode::G_AND, {Step.NewType}}).Action !=
+            LegalizeActions::Legal)
+      return false;
+    CarrierTy = Step.NewType;
+  }
+  if (LI.getAction({TargetOpcode::G_CONSTANT, {CarrierTy}}).Action !=
+          LegalizeActions::Legal)
+    return false;
+
+  if (Step.Action == LegalizeActions::WidenScalar) {
+    Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+    if (Helper.widenScalar(MI, 0, CarrierTy) != LegalizerHelper::Legalized)
+      return false;
+  }
+  const MachineInstr *MaskDef =
+      MRI.getVRegDef(MI.getOperand(MaskIndex).getReg());
+  if (MaskDef && MaskDef->getOpcode() == TargetOpcode::G_CONSTANT &&
+      MaskDef->getOperand(1).isCImm() &&
+      MaskDef->getOperand(1).getCImm()->getValue().isOne())
+    return true;
+  // LLVM's generic AND widening any-extends both inputs. Materialize an exact
+  // wide 1 here instead: extending an i1 mask could otherwise set upper bits.
+  // Also stabilize masks recognized through casts before those casts legalize.
+  // Keep the old result/truncation for other users, just as ICMP widening does.
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+  Register One = Helper.MIRBuilder.buildConstant(CarrierTy, 1).getReg(0);
+  Helper.Observer.changingInstr(MI);
+  MI.getOperand(MaskIndex).setReg(One);
+  MI.getOperand(MaskIndex).setIsKill(false);
+  Helper.Observer.changedInstr(MI);
+  return true;
+}
+
 static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
                                       MachineInstr &MI) {
   if (MI.getOpcode() != TargetOpcode::G_BRCOND ||
@@ -787,12 +863,15 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   // Finalize the producer first, then select its actual result register rather
   // than predicting a width and extending the old narrow result. This also
   // handles a branch whose adapter already has a native (but smaller) type.
-  if (MachineInstr *Cmp = findBrCondICmp(MRI, ConditionReg)) {
-    if (legalizeBrCondICmp(Helper, *Cmp)) {
-      const Register CompareReg = Cmp->getOperand(0).getReg();
-      if (CompareReg != ConditionReg) {
+  if (MachineInstr *Producer = findBrCondBooleanProducer(MRI, ConditionReg)) {
+    const bool Legalized = Producer->getOpcode() == TargetOpcode::G_ICMP
+                               ? legalizeBrCondICmp(Helper, *Producer)
+                               : legalizeBrCondAndOne(Helper, *Producer);
+    if (Legalized) {
+      const Register ProducerReg = Producer->getOperand(0).getReg();
+      if (ProducerReg != ConditionReg) {
         Helper.Observer.changingInstr(MI);
-        MI.getOperand(0).setReg(CompareReg);
+        MI.getOperand(0).setReg(ProducerReg);
         MI.getOperand(0).setIsKill(false);
         Helper.Observer.changedInstr(MI);
       }
@@ -814,6 +893,43 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   Helper.Observer.changingInstr(MI);
   Helper.MIRBuilder.setInstrAndDebugLoc(MI);
   Helper.widenScalarSrc(MI, CarrierTy, 0, TargetOpcode::G_ANYEXT);
+  Helper.Observer.changedInstr(MI);
+  return true;
+}
+
+// Keep otherwise legal unsigned remainder unchanged unless the divisor is a
+// known power of two and every replacement operation is legal at this width.
+static bool applyURemPowerOfTwoRewrite(LegalizerHelper &Helper,
+                                       MachineInstr &MI) {
+  assert(MI.getOpcode() == TargetOpcode::G_UREM);
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const Register DivisorReg = MI.getOperand(2).getReg();
+  const LLT Ty = MRI.getType(MI.getOperand(0).getReg());
+  const LegalizerInfo &LI = Helper.getLegalizerInfo();
+  if (!Ty.isInteger() ||
+      !isKnownToBeAPowerOfTwo(DivisorReg, MRI, Helper.getValueTracking()) ||
+      LI.getAction({TargetOpcode::G_AND, {Ty}}).Action !=
+          LegalizeActions::Legal ||
+      LI.getAction({TargetOpcode::G_CONSTANT, {Ty}}).Action !=
+          LegalizeActions::Legal)
+    return true;
+
+  Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+  Register MaskReg;
+  if (auto Divisor = getIConstantVRegValWithLookThrough(DivisorReg, MRI)) {
+    const APInt Mask = Divisor->Value.zextOrTrunc(Ty.getScalarSizeInBits()) - 1;
+    MaskReg = Helper.MIRBuilder.buildConstant(Ty, Mask).getReg(0);
+  } else {
+    if (LI.getAction({TargetOpcode::G_ADD, {Ty}}).Action !=
+        LegalizeActions::Legal)
+      return true;
+    const Register NegOne = Helper.MIRBuilder.buildConstant(Ty, -1).getReg(0);
+    MaskReg = Helper.MIRBuilder.buildAdd(Ty, DivisorReg, NegOne).getReg(0);
+  }
+  Helper.Observer.changingInstr(MI);
+  MI.setDesc(Helper.MIRBuilder.getTII().get(TargetOpcode::G_AND));
+  MI.getOperand(2).setReg(MaskReg);
+  MI.getOperand(2).setIsKill(false);
   Helper.Observer.changedInstr(MI);
   return true;
 }
@@ -1437,7 +1553,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
                                 promoteIntegerType(0));
 
   auto &IntegerActions = GetActionsFor({
-      G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_UREM, G_AND, G_OR,
+      G_ADD, G_SUB, G_MUL, G_SDIV, G_UDIV, G_SREM, G_AND, G_OR,
       G_XOR, G_SMIN, G_SMAX, G_UMIN, G_UMAX, G_ABS, G_SEXT_INREG, G_BSWAP,
       G_BITREVERSE});
   IntegerActions.legalIf([](const LegalityQuery &Query) {
@@ -1445,6 +1561,13 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   });
   IntegerActions.widenScalarIf(integerTypeNeedsPromotion(0),
                                promoteIntegerType(0));
+
+  auto &URemActions = GetActions(G_UREM);
+  URemActions.customIf([](const LegalityQuery &Query) {
+    return isOpcodeIntegerType(Query, 0);
+  });
+  URemActions.widenScalarIf(integerTypeNeedsPromotion(0),
+                            promoteIntegerType(0));
 
   auto &ShiftActions =
       GetActionsFor({G_SHL, G_LSHR, G_ASHR});
@@ -1636,6 +1759,8 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_UREM:
+    return applyURemPowerOfTwoRewrite(Helper, MI);
   case TargetOpcode::G_ZEXT:
   case TargetOpcode::G_SEXT:
     return applyIntegerAnyExtensionRewrite(Helper, MI);

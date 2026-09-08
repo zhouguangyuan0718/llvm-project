@@ -391,6 +391,26 @@ PHIs or FREEZE. Other users retain their original narrow registers and types;
 only the branch edge bypasses the adapters. LLVM's global worklist order and
 all ordinary ICMP type rules are unchanged.
 
+The same direct-result optimization also recognizes `G_AND x, 1` and
+`G_AND 1, x`: their results are exactly zero or one, so branch-edge truncation
+is unnecessary. If AND needs widening, its mask is explicitly materialized as
+the numeric value `1` in the native carrier rather than any-extending the old
+mask. Masks recognized through constant copies or defined casts are stabilized
+the same way. Other masks and variable masks are not optimized; ANYEXT's
+unspecified high bits are not treated as proof of a mask equal to one. Other
+users still keep their original result types. No general arithmetic-result
+optimization is enabled.
+
+Scalar `G_UREM x, y` uses the existing opcode-specific type and promotion
+rules, but its accepted scalar form now has a value-dependent custom step.
+When `y` is known to be a power of two and same-width `G_AND` and `G_CONSTANT`
+are legal, it becomes `G_AND x, y - 1`. Constant divisors use a constant mask;
+dynamic known powers of two additionally require a legal same-width `G_ADD`
+to form the mask with `y + (-1)`. Zero, non-power-of-two and unknown divisors,
+or missing replacement operations, leave the accepted remainder unchanged.
+Signed remainder is unaffected. In particular, remainder by two produces
+`AND x, 1`, which can use the direct branch-result optimization above.
+
 For `G_FCMP`, the previous prediction path is unchanged: a missing-width branch
 condition uses the legalized float input's same-width integer carrier. An
 `f32` comparison therefore reaches `G_BRCOND i32` through artifact combining.
@@ -398,7 +418,10 @@ condition uses the legalized float input's same-width integer carrier. An
 When the native target's CodeGen library is available, CTest's
 `coredsl-icmp-brcond` test compiles the rendered example and checks both visit
 orders, native adapters, long copy chains, other users, cross-block edges and
-non-comparison boundaries. These MIR tests do not validate another target's
+non-comparison boundaries, plus AND-by-one widening and negative mask cases.
+It also checks constant and dynamic power-of-two remainder, non-rewritten
+divisors, missing replacement operations, and remainder-by-two branch edges.
+These MIR tests do not validate another target's
 instruction selector.
 
 `G_PTR_ADD` preserves its pointer type. A missing integer offset width is

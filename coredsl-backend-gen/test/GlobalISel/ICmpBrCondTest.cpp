@@ -6,6 +6,7 @@
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/LostDebugLocObserver.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
+#include "llvm/CodeGen/GlobalISel/Utils.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
@@ -265,6 +266,235 @@ static void checkNonCompare(TestContext &TC, unsigned Bits, bool Arithmetic) {
     fail("branch bypassed an arithmetic operation", MF);
 }
 
+static void checkAndOne(TestContext &TC, unsigned Bits, bool MaskFirst,
+                        bool OtherUse, bool FullPassFirst,
+                        unsigned MaskAdapter = 0) {
+  MachineFunction &MF = TC.makeFunction("and_one_branch");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Target);
+  Entry->addSuccessor(Target);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const LLT Ty = LLT::integer(Bits);
+  const LLT CarrierTy = LLT::integer(Bits < 16 ? 16 : Bits);
+  Register Input = B.buildUndef(Ty).getReg(0);
+  Register One =
+      B.buildConstant(
+           MaskAdapter == TargetOpcode::G_ZEXT ? LLT::integer(1) : Ty, 1)
+          .getReg(0);
+  if (MaskAdapter == TargetOpcode::COPY) {
+    Register Copied = MRI.createGenericVirtualRegister(Ty);
+    B.buildCopy(Copied, One);
+    One = Copied;
+  } else if (MaskAdapter == TargetOpcode::G_ZEXT) {
+    One = B.buildZExt(Ty, One).getReg(0);
+  }
+  MachineInstr *And =
+      B.buildAnd(Ty, MaskFirst ? One : Input, MaskFirst ? Input : One)
+          .getInstr();
+  const Register OriginalResult = And->getOperand(0).getReg();
+  MachineInstr *Other = nullptr;
+  if (OtherUse) {
+    Register Sink = MRI.createGenericVirtualRegister(Ty);
+    Other = B.buildCopy(Sink, OriginalResult).getInstr();
+  }
+  Register Condition = OriginalResult;
+  if (Bits > 1)
+    Condition = B.buildTrunc(LLT::integer(1), Condition).getReg(0);
+  // The branch already has a native carrier, just like the original ICMP bug.
+  Condition = B.buildZExt(LLT::integer(16), Condition).getReg(0);
+  MachineInstr *Branch = B.buildBrCond(Condition, *Target).getInstr();
+  if (!FullPassFirst) {
+    GISelObserverWrapper Observer;
+    LegalizerHelper Helper(MF, TC.LI, Observer, B);
+    LostDebugLocObserver LocObserver("and-one-step");
+    if (Helper.legalizeInstrStep(*Branch, LocObserver) ==
+        LegalizerHelper::UnableToLegalize)
+      fail("AND-by-one branch could not be legalized", MF);
+    if (TC.LI.getAction(*And, MRI).Action != LegalizeActions::Legal ||
+        Branch->getOperand(0).getReg() != And->getOperand(0).getReg())
+      fail("branch did not directly use AND-by-one after a single step", MF);
+    const auto Size = Entry->size();
+    Helper.legalizeInstrStep(*Branch, LocObserver);
+    if (Entry->size() != Size)
+      fail("AND-by-one rewrite is not idempotent", MF);
+  }
+  legalizeAll(TC, MF);
+  const Register Result = And->getOperand(0).getReg();
+  if (MRI.getType(Result) != CarrierTy ||
+      Branch->getOperand(0).getReg() != Result)
+    fail("AND-by-one retained a branch truncation/extension", MF);
+  const Register MaskReg = And->getOperand(MaskFirst ? 1 : 2).getReg();
+  const auto Constant = getIConstantVRegValWithLookThrough(MaskReg, MRI);
+  if (!Constant || !Constant->Value.isOne() ||
+      MRI.getType(MaskReg) != CarrierTy)
+    fail("AND-by-one mask gained unspecified or sign-extended upper bits", MF);
+  if (Other && MRI.getType(Other->getOperand(1).getReg()) != Ty)
+    fail("AND-by-one changed another user's original type", MF);
+}
+
+static void checkOtherAndMasks(TestContext &TC, int MaskValue, bool Variable,
+                               bool AnyExtended) {
+  MachineFunction &MF = TC.makeFunction("other_and_mask");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Target);
+  Entry->addSuccessor(Target);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  const LLT I32 = LLT::integer(32);
+  Register Input = B.buildUndef(I32).getReg(0);
+  Register Mask;
+  if (Variable)
+    Mask = B.buildUndef(I32).getReg(0);
+  else if (AnyExtended) {
+    Mask = B.buildConstant(LLT::integer(1), 1).getReg(0);
+    Mask = B.buildAnyExt(I32, Mask).getReg(0);
+  } else
+    Mask = B.buildConstant(I32, MaskValue).getReg(0);
+  MachineInstr *And = B.buildAnd(I32, Input, Mask).getInstr();
+  Register Result = And->getOperand(0).getReg();
+  Register Narrow = B.buildTrunc(LLT::integer(1), Result).getReg(0);
+  Register Condition = B.buildZExt(LLT::integer(16), Narrow).getReg(0);
+  MachineInstr *Branch = B.buildBrCond(Condition, *Target).getInstr();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("other-and-mask-step");
+  const auto Size = Entry->size();
+  if (Helper.legalizeInstrStep(*Branch, LocObserver) ==
+          LegalizerHelper::UnableToLegalize ||
+      Branch->getOperand(0).getReg() != Condition || Entry->size() != Size ||
+      And->getOperand(2).getReg() != Mask)
+    fail("AND with a mask other than exact one was rewritten", MF);
+}
+
+static void checkURem(TestContext &TC, unsigned Bits, uint64_t DivisorValue,
+                      bool Dynamic = false, bool Unknown = false,
+                      bool Signed = false, bool BranchUse = false) {
+  MachineFunction &MF = TC.makeFunction("urem_power_of_two");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const LLT Ty = LLT::integer(Bits);
+  Register Input = B.buildUndef(Ty).getReg(0);
+  Register Divisor;
+  if (Unknown)
+    Divisor = B.buildUndef(Ty).getReg(0);
+  else if (Dynamic) {
+    Register One = B.buildConstant(Ty, 1).getReg(0);
+    Register Shift = B.buildUndef(LLT::integer(16)).getReg(0);
+    Divisor = B.buildShl(Ty, One, Shift).getReg(0);
+  } else {
+    Register Constant = B.buildConstant(Ty, DivisorValue).getReg(0);
+    Divisor = MRI.createGenericVirtualRegister(Ty);
+    B.buildCopy(Divisor, Constant);
+  }
+  MachineInstr *Rem =
+      B.buildInstr(Signed ? TargetOpcode::G_SREM : TargetOpcode::G_UREM, {Ty},
+                   {Input, Divisor})
+          .getInstr();
+  Register OriginalResult = Rem->getOperand(0).getReg();
+  Register Sink = MRI.createGenericVirtualRegister(Ty);
+  MachineInstr *Other = B.buildCopy(Sink, OriginalResult).getInstr();
+  MachineInstr *Branch = nullptr;
+  if (BranchUse) {
+    MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
+    MF.push_back(Target);
+    Entry->addSuccessor(Target);
+    Register Narrow = B.buildTrunc(LLT::integer(1), OriginalResult).getReg(0);
+    Register Condition = B.buildZExt(LLT::integer(16), Narrow).getReg(0);
+    Branch = B.buildBrCond(Condition, *Target).getInstr();
+  }
+  const bool Expected = !Signed && !Unknown &&
+                        (Dynamic || APInt(Bits, DivisorValue).isPowerOf2());
+  legalizeAll(TC, MF);
+  if (Rem->getOpcode() != (Expected ? TargetOpcode::G_AND
+                           : Signed ? TargetOpcode::G_SREM
+                                    : TargetOpcode::G_UREM) ||
+      Rem->getOperand(0).getReg() != OriginalResult ||
+      Rem->getOperand(1).getReg() != Input ||
+      Other->getOperand(1).getReg() != OriginalResult)
+    fail("remainder rewrite changed opcode or preserved operands incorrectly",
+         MF);
+  if (!Expected) {
+    if (Rem->getOperand(2).getReg() != Divisor)
+      fail("non-power-of-two remainder divisor changed", MF);
+    return;
+  }
+  Register MaskReg = Rem->getOperand(2).getReg();
+  if (Dynamic) {
+    MachineInstr *Add = MRI.getVRegDef(MaskReg);
+    if (Add->getOpcode() != TargetOpcode::G_ADD ||
+        Add->getOperand(1).getReg() != Divisor)
+      fail("dynamic power-of-two remainder did not use divisor minus one", MF);
+    auto NegOne = getIConstantVRegVal(Add->getOperand(2).getReg(), MRI);
+    if (!NegOne || !NegOne->isAllOnes())
+      fail("dynamic remainder mask addend is not minus one", MF);
+  } else {
+    auto Mask = getIConstantVRegVal(MaskReg, MRI);
+    if (!Mask || *Mask != APInt(Bits, DivisorValue) - 1)
+      fail("constant power-of-two remainder has the wrong mask", MF);
+  }
+  if (Branch && Branch->getOperand(0).getReg() != OriginalResult)
+    fail("remainder by two did not connect AND one directly to BRCOND", MF);
+}
+
+// Model missing replacement operations without changing the example's policy.
+struct URemDependencyInfo : LegalizerInfo {
+  const ExampleLegalizerInfo &Delegate;
+  URemDependencyInfo(const ExampleLegalizerInfo &Delegate, unsigned Missing)
+      : Delegate(Delegate) {
+    getActionDefinitionsBuilder(TargetOpcode::G_UREM).custom();
+    for (unsigned Op :
+         {TargetOpcode::G_AND, TargetOpcode::G_CONSTANT, TargetOpcode::G_ADD}) {
+      auto &Rules = getActionDefinitionsBuilder(Op);
+      if (Op == Missing)
+        Rules.unsupported();
+      else
+        Rules.alwaysLegal();
+    }
+  }
+  bool legalizeCustom(LegalizerHelper &Helper, MachineInstr &MI,
+                      LostDebugLocObserver &Observer) const override {
+    return Delegate.legalizeCustom(Helper, MI, Observer);
+  }
+};
+
+static void checkURemDependencies(TestContext &TC, unsigned Missing,
+                                  bool Dynamic) {
+  MachineFunction &MF = TC.makeFunction("urem_missing_dependency");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  const LLT Ty = LLT::integer(32);
+  Register Input = B.buildUndef(Ty).getReg(0);
+  Register Divisor = B.buildConstant(Ty, Dynamic ? 1 : 8).getReg(0);
+  if (Dynamic)
+    Divisor = B.buildShl(Ty, Divisor, Input).getReg(0);
+  MachineInstr *Rem = B.buildURem(Ty, Input, Divisor).getInstr();
+  URemDependencyInfo LI(TC.LI, Missing);
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, LI, Observer, B);
+  LostDebugLocObserver LocObserver("urem-dependency-step");
+  const auto Size = Entry->size();
+  bool Expected = !Dynamic && Missing == TargetOpcode::G_ADD;
+  if (Helper.legalizeInstrStep(*Rem, LocObserver) !=
+          LegalizerHelper::Legalized ||
+      Rem->getOpcode() !=
+          (Expected ? TargetOpcode::G_AND : TargetOpcode::G_UREM))
+    fail("remainder replacement dependency guard failed", MF);
+  if (!Expected &&
+      (Entry->size() != Size || Rem->getOperand(2).getReg() != Divisor))
+    fail("skipped remainder rewrite left partial instructions behind", MF);
+}
+
 int main() {
   LLT::setUseExtended(true);
   InitializeNativeTarget();
@@ -283,6 +513,30 @@ int main() {
   if (!TM)
     return 1;
   TestContext TC(std::move(TM));
+  for (unsigned Bits : {16u, 32u}) {
+    for (uint64_t Divisor :
+         {uint64_t(0), uint64_t(1), uint64_t(2), uint64_t(3), uint64_t(8),
+          uint64_t(1) << (Bits - 1), (uint64_t(1) << Bits) - 1})
+      checkURem(TC, Bits, Divisor);
+    checkURem(TC, Bits, 0, true);
+    checkURem(TC, Bits, 0, false, true);
+    checkURem(TC, Bits, 8, false, false, true);
+    checkURem(TC, Bits, 2, false, false, false, true);
+  }
+  for (unsigned Missing :
+       {TargetOpcode::G_AND, TargetOpcode::G_CONSTANT, TargetOpcode::G_ADD})
+    for (bool Dynamic : {false, true})
+      checkURemDependencies(TC, Missing, Dynamic);
+  for (unsigned Bits : {1u, 8u, 16u, 32u})
+    for (bool MaskFirst : {false, true})
+      for (bool FullPassFirst : {false, true})
+        checkAndOne(TC, Bits, MaskFirst, true, FullPassFirst);
+  checkAndOne(TC, 32, false, false, false, TargetOpcode::COPY);
+  checkAndOne(TC, 32, true, false, true, TargetOpcode::G_ZEXT);
+  for (int Mask : {0, 2, 3, -1})
+    checkOtherAndMasks(TC, Mask, false, false);
+  checkOtherAndMasks(TC, 0, true, false);
+  checkOtherAndMasks(TC, 1, false, true);
   checkCompareBranch(TC, 32, Bridge::ZExt, false, false, false,
                      CmpInst::ICMP_EQ, true);
   for (unsigned Bits : {8u, 16u, 32u})
@@ -308,5 +562,5 @@ int main() {
   checkBarrier(TC, TargetOpcode::G_PHI);
   checkBarrier(TC, TargetOpcode::G_FREEZE);
   checkFloatCompare(TC);
-  outs() << "ICMP/BRCOND direct-carrier and boundary tests passed\n";
+  outs() << "ICMP/AND-one BRCOND and power-of-two UREM tests passed\n";
 }
