@@ -614,6 +614,128 @@ static void checkSelectComparisons(TestContext &TC, unsigned InputBits) {
                                        Pred);
 }
 
+static void checkTruncBranchProof(TestContext &TC, int MaskValue,
+                                  unsigned Adapter, unsigned Bits = 32) {
+  MachineFunction &MF = TC.makeFunction("trunc_branch_proof");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Target);
+  Entry->addSuccessor(Target);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  auto &MRI = MF.getRegInfo();
+  LLT Ty = LLT::integer(Bits), I1 = LLT::integer(1);
+  Register A = B.buildUndef(Ty).getReg(0);
+  Register C = B.buildUndef(Ty).getReg(0);
+  Register Mask;
+  if (Adapter == TargetOpcode::G_ANYEXT || Adapter == TargetOpcode::G_ZEXT ||
+      Adapter == TargetOpcode::G_SEXT) {
+    Register One = B.buildConstant(I1, 1).getReg(0);
+    Mask = B.buildInstr(Adapter, {Ty}, {One}).getReg(0);
+  } else {
+    Mask = B.buildConstant(Ty, MaskValue).getReg(0);
+  }
+  MachineInstr *Inner = B.buildAnd(Ty, C, Mask).getInstr();
+  Register DynamicMask = Inner->getOperand(0).getReg();
+  if (Adapter == TargetOpcode::G_FREEZE)
+    DynamicMask = B.buildInstr(Adapter, {Ty}, {DynamicMask}).getReg(0);
+  MachineInstr *Outer = B.buildAnd(Ty, A, DynamicMask).getInstr();
+  Register Value = Outer->getOperand(0).getReg();
+  MachineInstr *Trunc = B.buildTrunc(I1, Value).getInstr();
+  Register Narrow = Trunc->getOperand(0).getReg();
+  Register Sink = MRI.createGenericVirtualRegister(I1);
+  MachineInstr *Other = B.buildCopy(Sink, Narrow).getInstr();
+  MachineInstr *Branch = B.buildBrCond(Narrow, *Target).getInstr();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("trunc-branch-proof-step");
+  const bool Expected =
+      Bits == 32 && !Adapter && (MaskValue == 0 || MaskValue == 1);
+  const auto Size = Entry->size();
+  for (unsigned I = 0; I != 2; ++I)
+    if (Helper.legalizeInstrStep(*Trunc, LocObserver) !=
+            LegalizerHelper::Legalized ||
+        Branch->getOperand(0).getReg() != (Expected ? Value : Narrow) ||
+        Entry->size() != Size)
+      fail("late truncation proof failed or was not idempotent", MF);
+  if (Outer->getOperand(1).getReg() != A ||
+      Outer->getOperand(2).getReg() != DynamicMask ||
+      Inner->getOperand(2).getReg() != Mask ||
+      Other->getOperand(1).getReg() != Narrow || MRI.getType(Narrow) != I1)
+    fail("late truncation proof changed arithmetic or another user", MF);
+}
+
+static void checkLateSelectAnd(TestContext &TC, bool UseCSE, bool OtherUse,
+                               bool SelectFirst) {
+  MachineFunction &MF = TC.makeFunction("issue_22_select_and");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const LLT I1 = LLT::integer(1), I16 = LLT::integer(16),
+            I32 = LLT::integer(32);
+  Register Input = B.buildUndef(I16).getReg(0);
+  Register Extended = B.buildAnyExt(I32, Input).getReg(0);
+  Register Two = B.buildConstant(I32, 2).getReg(0);
+  // The issue does not show %85's definition. Remainder by two provides a
+  // concrete producer that legalizes later into exactly its posted AND-one
+  // mask, rather than starting the test with an already formed AND chain.
+  MachineInstr *Remainder = B.buildURem(I32, Extended, Two).getInstr();
+  Register Right =
+      B.buildTrunc(I1, Remainder->getOperand(0).getReg()).getReg(0);
+  Register A = B.buildUndef(I32).getReg(0);
+  Register C = B.buildUndef(I32).getReg(0);
+  MachineInstr *Cmp = B.buildICmp(CmpInst::ICMP_SLE, I1, A, C).getInstr();
+  MachineInstr *And =
+      B.buildAnd(I1, Cmp->getOperand(0).getReg(), Right).getInstr();
+  Register Condition = And->getOperand(0).getReg();
+  MachineInstr *Other = nullptr;
+  if (OtherUse) {
+    Register Sink = MRI.createGenericVirtualRegister(I1);
+    Other = B.buildCopy(Sink, Condition).getInstr();
+  }
+  const LLT F32 = LLT::floatIEEE(32);
+  Register TrueValue = B.buildFConstant(F32, 1.0).getReg(0);
+  Register FalseValue = B.buildFConstant(F32, 2.0).getReg(0);
+  MachineInstr *Select =
+      B.buildSelect(F32, Condition, TrueValue, FalseValue).getInstr();
+  Register Sink = MRI.createGenericVirtualRegister(F32);
+  B.buildCopy(Sink, Select->getOperand(0).getReg());
+  if (SelectFirst) {
+    GISelObserverWrapper Observer;
+    LegalizerHelper Helper(MF, TC.LI, Observer, B);
+    LostDebugLocObserver LocObserver("issue-22-select-first");
+    if (Helper.legalizeInstrStep(*Select, LocObserver) !=
+        LegalizerHelper::Legalized)
+      fail("issue 22 SELECT expansion failed", MF);
+  }
+  legalizeAll(TC, MF, UseCSE);
+  MachineInstr &Branch = *Entry->getFirstTerminatorForward();
+  Register WideAnd = And->getOperand(0).getReg();
+  if (Branch.getOpcode() != TargetOpcode::G_BRCOND ||
+      Branch.getOperand(0).getReg() != WideAnd || MRI.getType(WideAnd) != I32)
+    fail("issue 22 retained TRUNC i32-to-i1 on the generated branch", MF);
+  if (Remainder->getOpcode() != TargetOpcode::G_AND ||
+      And->getOperand(2).getReg() != Remainder->getOperand(0).getReg())
+    fail("issue 22 dynamic mask was replaced or remainder was not lowered", MF);
+  MachineInstr *CmpTrunc = MRI.getVRegDef(And->getOperand(1).getReg());
+  if (CmpTrunc->getOpcode() != TargetOpcode::G_TRUNC ||
+      CmpTrunc->getOperand(1).getReg() != Cmp->getOperand(0).getReg() ||
+      MRI.getType(Cmp->getOperand(0).getReg()) != LLT::integer(64))
+    fail("issue 22 changed the comparison-to-i32 AND conversion", MF);
+  if (Other && (Other->getOperand(1).getReg() != Condition ||
+                MRI.getType(Condition) != I1))
+    fail("issue 22 changed another user's original i1 value", MF);
+  if (!OtherUse)
+    for (const auto &BB : MF)
+      for (const auto &MI : BB)
+        if (MI.getOpcode() == TargetOpcode::G_TRUNC &&
+            MRI.getType(MI.getOperand(0).getReg()) == I1)
+          fail("issue 22 left a dead boolean truncation behind", MF);
+}
+
 int main() {
   LLT::setUseExtended(true);
   InitializeNativeTarget();
@@ -632,6 +754,20 @@ int main() {
   if (!TM)
     return 1;
   TestContext TC(std::move(TM));
+#ifdef COREDSL_SELECT_AND_TEST
+  for (int Mask : {0, 1, 2, 3, -1})
+    checkTruncBranchProof(TC, Mask, 0);
+  for (unsigned Adapter : {TargetOpcode::G_ANYEXT, TargetOpcode::G_ZEXT,
+                           TargetOpcode::G_SEXT, TargetOpcode::G_FREEZE})
+    checkTruncBranchProof(TC, 1, Adapter);
+  checkTruncBranchProof(TC, 1, 0, 16);
+  for (bool UseCSE : {false, true})
+    for (bool OtherUse : {false, true})
+      for (bool SelectFirst : {false, true})
+        checkLateSelectAnd(TC, UseCSE, OtherUse, SelectFirst);
+  outs() << "late SELECT/AND branch truncation tests passed\n";
+  return 0;
+#endif
 #ifdef COREDSL_SELECT_I64_TEST
   checkSelectComparisons(TC, 64);
   outs() << "i64 comparison SELECT-generated branch tests passed\n";

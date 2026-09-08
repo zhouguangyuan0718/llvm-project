@@ -14,11 +14,14 @@
 
 using namespace llvm;
 
-static json::Value makeLegalizerInput(bool IncludeI64 = false) {
+static json::Value makeLegalizerInput(bool IncludeI64 = false,
+                                      bool SelectAndRegression = false) {
   json::Object Root;
   Root["target"] = "Example";
 
   json::Array IntegerWidths;
+  if (SelectAndRegression)
+    IntegerWidths.emplace_back(1);
   IntegerWidths.emplace_back(16);
   IntegerWidths.emplace_back(32);
   if (IncludeI64)
@@ -92,6 +95,18 @@ static json::Value makeLegalizerInput(bool IncludeI64 = false) {
   ShlScalarTypes.emplace_back(MakeScalarType(1, std::move(ShlAmountTypes)));
 
   json::Array OperationTypeConstraints;
+  if (SelectAndRegression) {
+    // Reproduce an i1 condition whose AND needs i32, while its integer
+    // comparison needs i64. BRCOND itself still accepts native i1.
+    json::Array AndTypes;
+    AndTypes.emplace_back(IntegerType(32));
+    OperationTypeConstraints.emplace_back(MakeOperation(
+        "opcode_cpp", "G_AND", SingleScalarType(0, std::move(AndTypes))));
+    json::Array CompareTypes;
+    CompareTypes.emplace_back(IntegerType(64));
+    OperationTypeConstraints.emplace_back(MakeOperation(
+        "opcode_cpp", "G_ICMP", SingleScalarType(1, std::move(CompareTypes))));
+  }
   OperationTypeConstraints.emplace_back(MakeOperation(
       "opcode_cpp", "G_LOAD", SingleScalarType(0, MemoryTypes())));
   OperationTypeConstraints.emplace_back(MakeOperation(
@@ -138,13 +153,17 @@ static Error renderTemplate(StringRef TemplatePath, const json::Value &Data,
 }
 
 int main(int Argc, char **Argv) {
-  if (Argc != 2 && !(Argc == 3 && StringRef(Argv[2]) == "--native-i64")) {
-    errs() << "usage: llvm-api-render-example <template.mustache> [--native-i64]\n";
+  const bool SelectAndRegression =
+      Argc == 3 && StringRef(Argv[2]) == "--select-and-regression";
+  if (Argc != 2 && !(Argc == 3 && (StringRef(Argv[2]) == "--native-i64" ||
+                                 SelectAndRegression))) {
+    errs() << "usage: llvm-api-render-example <template.mustache> "
+              "[--native-i64|--select-and-regression]\n";
     return 1;
   }
 
   ExitOnError ExitOnErr("llvm-api-render-example: ");
-  json::Value Data = makeLegalizerInput(Argc == 3);
+  json::Value Data = makeLegalizerInput(Argc == 3, SelectAndRegression);
   ExitOnErr(renderTemplate(Argv[1], Data, outs()));
   return 0;
 }

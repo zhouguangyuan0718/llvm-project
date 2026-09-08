@@ -2,9 +2,11 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
+#include "llvm/CodeGen/GlobalISel/GISelValueTracking.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/GlobalISel/Utils.h"
@@ -897,6 +899,124 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   return true;
 }
 
+// Track only zero bits that remain valid after this target's legalization.
+// In particular, do not rely on ZEXT/SEXT's high bits: this policy later
+// normalizes those instructions to ANYEXT. Unsupported/unfinalized producers
+// and operations outside this small set contribute no known bits.
+static APInt getStableBranchKnownZeroes(
+    LegalizerHelper &Helper, Register Reg, unsigned &Budget,
+    DenseMap<Register, APInt> &Cache) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const LLT Ty = MRI.getType(Reg);
+  const unsigned Bits = Ty.getScalarSizeInBits();
+  auto It = Cache.find(Reg);
+  if (It != Cache.end())
+    return It->second;
+  APInt Zeroes(Bits, 0);
+  if (!Budget)
+    return Zeroes;
+  --Budget;
+  Cache.try_emplace(Reg, Zeroes); // Also break cycles conservatively.
+  MachineInstr *Def = MRI.getVRegDef(Reg);
+  if (!Def || Def->getNumExplicitDefs() != 1)
+    return Zeroes;
+  const unsigned Opcode = Def->getOpcode();
+  if (Opcode != TargetOpcode::COPY) {
+    if (!isPreISelGenericOpcode(Opcode))
+      return Zeroes;
+    const auto Action = Helper.getLegalizerInfo().getAction(*Def, MRI).Action;
+    if (Action != LegalizeActions::Legal &&
+        !(Opcode == TargetOpcode::G_TRUNC && Action == LegalizeActions::Custom))
+      return Zeroes;
+  }
+  auto IsIntegerUse = [&](unsigned I) {
+    return I < Def->getNumExplicitOperands() && Def->getOperand(I).isReg() &&
+           Def->getOperand(I).getReg().isVirtual() &&
+           MRI.getType(Def->getOperand(I).getReg()).isInteger();
+  };
+  auto SourceZeroes = [&](unsigned I) {
+    return getStableBranchKnownZeroes(Helper, Def->getOperand(I).getReg(),
+                                     Budget, Cache);
+  };
+  switch (Opcode) {
+  case TargetOpcode::G_CONSTANT:
+    if (Def->getOperand(1).isCImm())
+      Zeroes = ~Def->getOperand(1).getCImm()->getValue().zextOrTrunc(Bits);
+    break;
+  case TargetOpcode::COPY:
+  case TargetOpcode::G_TRUNC:
+  case TargetOpcode::G_ANYEXT:
+    if (IsIntegerUse(1) &&
+        (Opcode != TargetOpcode::COPY ||
+         hasExactType(Ty, MRI.getType(Def->getOperand(1).getReg()))))
+      Zeroes = SourceZeroes(1).zextOrTrunc(Bits);
+    break;
+  case TargetOpcode::G_AND:
+  case TargetOpcode::G_OR:
+  case TargetOpcode::G_XOR:
+    if (!IsIntegerUse(1) || !IsIntegerUse(2) ||
+        !hasExactType(Ty, MRI.getType(Def->getOperand(1).getReg())) ||
+        !hasExactType(Ty, MRI.getType(Def->getOperand(2).getReg())))
+      break;
+    Zeroes = SourceZeroes(2);
+    if (Opcode == TargetOpcode::G_AND) {
+      if (Zeroes.countLeadingOnes() < Bits - 1)
+        Zeroes |= SourceZeroes(1);
+    } else {
+      Zeroes &= SourceZeroes(1);
+    }
+    break;
+  case TargetOpcode::G_ICMP:
+  case TargetOpcode::G_FCMP:
+    if (auto *VT = Helper.getValueTracking()) {
+      Zeroes = VT->getKnownZeroes(Reg);
+    } else {
+      GISelValueTracking LocalVT(Helper.MIRBuilder.getMF());
+      Zeroes = LocalVT.getKnownZeroes(Reg);
+    }
+    break;
+  default:
+    break;
+  }
+  Cache[Reg] = Zeroes;
+  return Zeroes;
+}
+
+// TRUNC artifacts are revisited after ordinary producer legalization. Recheck
+// their branch users here: a SELECT-created branch may already have accepted
+// its i1 condition before an AND was widened and a masking AND was generated.
+static bool applyTruncBrCondRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  Register Dst = MI.getOperand(0).getReg();
+  Register Src = MI.getOperand(1).getReg();
+  if (MRI.getType(Dst) != LLT::integer(1) ||
+      !isNativeIntegerType(MRI.getType(Src)))
+    return true;
+  SmallVector<MachineInstr *, 4> Branches;
+  for (MachineInstr &Use : MRI.use_instructions(Dst))
+    if (Use.getOpcode() == TargetOpcode::G_BRCOND &&
+        Use.getOperand(0).getReg() == Dst)
+      Branches.push_back(&Use);
+  if (Branches.empty())
+    return true;
+  unsigned Budget = 64;
+  DenseMap<Register, APInt> Cache;
+  const APInt Zeroes = getStableBranchKnownZeroes(Helper, Src, Budget, Cache);
+  if (Zeroes.countLeadingOnes() < Zeroes.getBitWidth() - 1)
+    return true;
+  for (MachineInstr *Branch : Branches) {
+    Helper.Observer.changingInstr(*Branch);
+    Branch->getOperand(0).setReg(Src);
+    Branch->getOperand(0).setIsKill(false);
+    Helper.Observer.changedInstr(*Branch);
+  }
+  // Other users still require the original narrow result. Remove the artifact
+  // only when no use remains; never rewrite the boolean-producing arithmetic.
+  if (MRI.use_empty(Dst))
+    MI.eraseFromParent();
+  return true;
+}
+
 // Keep otherwise legal unsigned remainder unchanged unless the divisor is a
 // known power of two and every replacement operation is legal at this width.
 static bool applyURemPowerOfTwoRewrite(LegalizerHelper &Helper,
@@ -1488,7 +1608,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   DefinedExtActions.customIf(IsSupportedIntegerExtension);
 
   auto &TruncActions = GetActions(G_TRUNC);
-  TruncActions.legalIf([](const LegalityQuery &Query) {
+  TruncActions.customIf([](const LegalityQuery &Query) {
     return isGeneratedIntegerTruncation(Query) ||
            isNativeIntegerTruncation(Query);
   });
@@ -1769,6 +1889,8 @@ bool {{target}}LegalizerInfo::legalizeCustom(
     LostDebugLocObserver &LocObserver) const {
   (void)LocObserver;
   switch (MI.getOpcode()) {
+  case TargetOpcode::G_TRUNC:
+    return applyTruncBrCondRewrite(Helper, MI);
   case TargetOpcode::G_UREM:
     return applyURemPowerOfTwoRewrite(Helper, MI);
   case TargetOpcode::G_ZEXT:
