@@ -7,14 +7,26 @@ required GlobalISel components: `CallLowering`, `RegisterBankInfo`, and an
 
 ## 1. Construct the renderer input
 
-The generator supplies only the target name and one instruction-collected
-scalar capability table shared by generic opcodes and intrinsics. The generated
-legalizer derives its global integer and floating-point carrier sets from the
-union of these candidates:
+The generator supplies the target name, target-native scalar carriers, and one
+instruction-collected scalar capability table shared by generic opcodes and
+intrinsics. Operation-specific candidates must be members of the matching
+native carrier list:
 
 ```cpp
 llvm::json::Object Root;
 Root["target"] = "Toy16";
+
+llvm::json::Array IntegerWidths;
+IntegerWidths.emplace_back(16);
+IntegerWidths.emplace_back(32);
+
+llvm::json::Array FloatingPointWidths;
+FloatingPointWidths.emplace_back(32);
+
+llvm::json::Object NativeTypes;
+NativeTypes["integer_widths"] = std::move(IntegerWidths);
+NativeTypes["floating_point_widths"] = std::move(FloatingPointWidths);
+Root["native_types"] = std::move(NativeTypes);
 
 auto IntegerType = [](unsigned Width) {
   llvm::json::Object Type;
@@ -107,7 +119,7 @@ register results and operands, grouped by the mapped generic opcode or
 intrinsic and scalar index. Do not collect immediate widths, memory-only widths,
 or source IR types that are converted before reaching the target instruction.
 Types repeated by different instructions are harmless: the generated table
-derives the global integer and floating-point carrier unions automatically.
+keeps the operation-specific entries independent of `native_types`.
 `G_BRCOND` is a normal typed opcode with condition type index 0; preserve its
 entry instead of replacing it with an inferred target-wide branch type set.
 
@@ -183,6 +195,14 @@ The generated legalizer has no Subtarget constructor argument. CPU or feature
 dependent legality is intentionally outside this simplified policy. It does
 take the target's `DataLayout`, which supplies pointer representation and index
 widths without adding fields to the renderer input.
+
+The generated source registers the process-wide
+`-Toy16-use-legalizer` option. It defaults to false: an opcode/type-index pair
+absent from the collected table falls back to the matching `native_types`
+list. Set `-Toy16-use-legalizer=true` to make an absent pair fail closed.
+Explicit operation entries take priority and remain closed in both modes. The
+option does not remove native carrier validation for structural legalization
+artifacts such as constants, extensions, or scalar `i1` memory accesses.
 
 The generated constructor also finalizes the embedded legacy tables required
 by `llvmorg-23-init`. Do not remove its
@@ -294,13 +314,15 @@ cmake --build <llvm-build> --target LLVMToy16CodeGen llc
   -verify-machineinstrs -stop-after=legalizer input.ll -o -
 ```
 
-Inspect that, for the derived integer carriers `[16, 32]`:
+First run without `-Toy16-use-legalizer`, or pass
+`-Toy16-use-legalizer=false` explicitly, and inspect that for native integer
+carriers `[16, 32]`:
 
 - an `i8 G_CONSTANT` is promoted to the `i16` carrier while `i16` remains legal;
 - `i1` and `i8` integer operations are promoted to `i16`;
 - an `i24` integer operation is promoted to `i32`;
 - the constrained `G_MUL` accepts `i16`, widens `i8` to `i16`, and rejects
-  `i32` instead of treating every derived integer carrier as legal;
+  `i32` instead of treating every native integer carrier as legal;
 - when an unsupported-width integer producer has one same-block use through
   `G_ANYEXT`, it adopts that wider consumer carrier if the producer supports it;
   after artifact combining, a chain such as an `i8 G_ADD` feeding an operation
@@ -315,7 +337,7 @@ Inspect that, for the derived integer carriers `[16, 32]`:
   `i16` at type index 1; an `i8` shift amount widens to `i16`, while an `i32`
   shift amount is rejected;
 - an `f16 G_FCONSTANT` becomes a bit-identical `i16 G_CONSTANT` with no
-  remaining `G_BITCAST` when `f16` is not collected;
+  remaining `G_BITCAST` when `f16` is not native;
 - an ordinary `f16 G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`,
   `G_FSQRT`, or `G_FEXP` is evaluated as `f32` and truncated back to `f16`,
   and an `f16 G_FCMP` compares exactly extended `f32` inputs and returns `i32`;
@@ -323,7 +345,7 @@ Inspect that, for the derived integer carriers `[16, 32]`:
   unchanged without a vector entry in the scalar capability table; the target
   selector must support that complete vector operation;
 - the constrained `G_FDIV` accepts `f32` and widens `f16` to `f32`; adding a
-  wider global float carrier without listing it for `G_FDIV` does not make that
+  wider native float carrier without listing it for `G_FDIV` does not make that
   type legal for division;
 - an `f16 G_FCONSTANT` feeding one of those promoted operations is folded with
   its `G_FPEXT` into an exact `f32 G_FCONSTANT`, leaving no low-precision
@@ -350,7 +372,7 @@ Inspect that, for the derived integer carriers `[16, 32]`:
   DataLayout;
 - an `i8` load/store remains unsupported rather than being changed into a
   mismatched `value i16, memory i8` operation;
-- a derived register carrier omitted from the corresponding `G_LOAD` or
+- a native register carrier omitted from the corresponding `G_LOAD` or
   `G_STORE` index-0 constraint is not directly legal for that memory opcode;
 - assuming Toy16's DataLayout has a 32-bit index, `G_PTR_ADD` keeps its pointer
   type and promotes an `i8` offset to exactly `i32`; its required signed
@@ -386,6 +408,12 @@ Inspect that, for the derived integer carriers `[16, 32]`:
 - a branch using an `f32 G_FCMP` result likewise reaches `G_BRCOND i32`; an
   `f16 G_FCMP` promoted to `f32` also returns and branches on `i32`;
 - a value wider than `i32` fails closed instead of narrowing.
+
+Repeat focused legality queries with `-Toy16-use-legalizer=true`. A built-in
+opcode/type-index pair omitted from `operation_type_constraints`, such as this
+example's `G_ADD` index 0, must fail closed instead of inheriting `[i16, i32]`.
+Configured pairs such as `G_MUL` index 0 and `G_BRCOND` index 0 must retain the
+same legal and rejected carriers in both modes.
 
 Then run through instruction selection:
 

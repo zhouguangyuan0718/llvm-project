@@ -64,6 +64,12 @@ if(BUILD_TESTING)
   set_tests_properties(coredsl-legalizer-mustache-source PROPERTIES
     PASS_REGULAR_EXPRESSION
       "static_cast<unsigned>\\(TargetOpcode::G_BRCOND\\)")
+  add_test(
+    NAME coredsl-legalizer-mustache-fallback-option
+    COMMAND coredsl-legalizer-mustache-example
+      ${CMAKE_CURRENT_SOURCE_DIR}/templates/LLVM23/GlobalISel/LegalizerInfo.cpp.mustache)
+  set_tests_properties(coredsl-legalizer-mustache-fallback-option PROPERTIES
+    PASS_REGULAR_EXPRESSION "Example-use-legalizer")
 
   add_test(
     NAME coredsl-parser-basic

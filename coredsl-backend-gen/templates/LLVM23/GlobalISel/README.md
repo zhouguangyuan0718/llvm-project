@@ -1,13 +1,15 @@
 # LLVM 23 GlobalISel legalizer templates
 
 This package generates one target-specific `LegalizerInfo` class. The renderer
-input contains one target name and one instruction-collected scalar capability
-table shared by generic opcodes and intrinsics. Integer and floating-point
-carrier sets are derived as the unions of the types in that table; callers do
-not separately declare fallback types. File names, the class name, the include
-guard, the `llvm` namespace, and all legalization policies are derived or built
-into the templates. Pointer and pointer-index widths are read from the target's
-LLVM `DataLayout`; they are not renderer inputs.
+input contains one target name, the target-native scalar carrier types, and one
+instruction-collected operation type table shared by generic opcodes and
+intrinsics. An operation/type-index entry takes priority; the native types are
+the fallback for an unmentioned pair while the generated
+`-{{target}}-use-legalizer` option is false, and also describe structural
+legalization artifacts. File names, the class name, the include guard, the
+`llvm` namespace, and all legalization policies are derived or built into the
+templates. Pointer and pointer-index widths are read from the target's LLVM
+`DataLayout`; they are not renderer inputs.
 
 The templates use standard `{{...}}` tags and can be rendered directly with
 `llvm::mustache::Template` from `LLVMSupport`. A C++ example is provided in
@@ -21,6 +23,10 @@ The complete input shape is:
 ```json
 {
   "target": "Example",
+  "native_types": {
+    "integer_widths": [16, 32, 64],
+    "floating_point_widths": [32]
+  },
   "operation_type_constraints": [
     {
       "opcode_cpp": "G_LOAD",
@@ -121,10 +127,10 @@ The complete input shape is:
 }
 ```
 
-This example derives integer carriers `[16, 32, 64]` and the floating-point
-carrier `[32]`; neither set is supplied separately. The `G_BRCOND` entry is
-rendered as an ordinary opcode/type-index capability and restricts branch
-conditions to `i16` and `i32`.
+This example declares native integer carriers `[16, 32, 64]` and the native
+floating-point carrier `[32]`. The `G_BRCOND` entry is rendered as an ordinary
+opcode/type-index capability and restricts branch conditions to `i16` and
+`i32`, despite the native `i64` fallback available to unmentioned pairs.
 
 `target` is the single naming input. For `"Example"`, the templates derive:
 
@@ -149,21 +155,19 @@ Template.registerLambda("target_upper", [Upper = Target.upper()]() {
 The header template uses `{{target_upper}}` only for its include guard. This is
 renderer-derived state; callers still provide only the single `target` field.
 
-The generated global integer carrier set is the union of every
-`integer_width` candidate in `operation_type_constraints`. It must be non-empty.
-Candidate order and duplicates across different operations have no semantic
-effect. A missing integer width is promoted to the narrowest wider collected
-integer. A value wider than the largest collected integer is not handled; this
-policy never narrows or splits nonconstant integers.
+`native_types.integer_widths` must be non-empty and unique. Input order has no
+semantic effect. A missing integer width is promoted to the narrowest wider
+native integer. A value wider than the largest native integer is not handled;
+this policy never narrows or splits nonconstant integers.
 
-The floating-point carrier set is similarly derived from every
-`floating_point_width` candidate. Floating candidates must use the supported
-IEEE widths `16`, `32`, `64`, and `128`; each is converted to an exact
-ExtendedLLT type with `LLT::floatIEEE(N)`. An unlisted IEEE type used by
-`G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FNEG`, `G_FSQRT`, `G_FEXP`, or as
-the input of `G_FCMP` is promoted to the narrowest wider collected type. A type
-wider than every collected type is not handled. An empty floating-point union
-represents a target without floating-point register types.
+`native_types.floating_point_widths` must contain only the supported IEEE widths
+`16`, `32`, `64`, and `128`; entries must be unique, and their order has no
+semantic effect. Each width is converted to an exact ExtendedLLT type with
+`LLT::floatIEEE(N)`. An unlisted IEEE type used by `G_FADD`, `G_FSUB`, `G_FMUL`,
+`G_FDIV`, `G_FNEG`, `G_FSQRT`, `G_FEXP`, or as the input of `G_FCMP` is
+promoted to the narrowest wider supported type. A type wider than every native
+type is not handled. An empty array represents a target without floating-point
+register types.
 Non-IEEE formats such as `bf16`, x87 extended precision, and PPC double-double
 are intentionally outside this compact input contract.
 
@@ -189,11 +193,11 @@ type spelling:
 ```
 
 Every candidate describes a target register carrier accepted by at least one
-collected instruction alternative and automatically contributes to the global
-carrier union. Source IR types that merely need conversion must not be added.
-Duplicate operation identifiers, duplicate indices within one operation,
-duplicate candidate types within one index, entries containing both/neither
-identifiers, and empty arrays must be rejected by the input producer.
+collected instruction alternative and must occur in the matching `native_types`
+list. Source IR types that merely need conversion must not be added. Duplicate
+operation identifiers, duplicate indices within one operation, duplicate
+candidate types within one index, entries containing both/neither identifiers,
+and empty arrays must be rejected by the input producer.
 
 For `opcode_cpp`, `index` is a `LegalityQuery::Types` index, not a MachineInstr
 operand index. Opcode names and indices must already be covered by the built-in
@@ -221,19 +225,31 @@ local optimization. `G_ICMP` is the coordinated exception: while its original
 result is still missing-width, a wider local result preference widens both its
 integer inputs and result to preserve the rule that they share one carrier.
 
-An omitted opcode/type-index pair inherits the full matching derived carrier
-union. A configured pair replaces that union. For example, if the collected
-integer union is `[16, 32]`, constraining `G_MUL` type index 0 to `[16]` makes
+An opcode/type-index entry takes priority and replaces the matching native list.
+An omitted pair falls back to all matching `native_types` only when the
+generated `-{{target}}-use-legalizer` option is false, which is the default.
+Setting the option to true makes an omitted pair fail closed. For example, with
+native integers `[16, 32]`, constraining `G_MUL` type index 0 to `[16]` makes
 `G_MUL i16` legal but not `G_MUL i32`; an `i8` multiply still widens to `i16`.
-Conversely, constraining it to `[32]` widens both `i8` and `i16` multiplies to
-`i32`. The policy never narrows an input merely because a smaller
-opcode-specific type is available.
+It does not fall back to native `i32`, because the collected instruction
+information explicitly restricts that operation. Conversely, constraining it
+to `[32]` widens both `i8` and `i16` multiplies to `i32`. The policy never
+narrows an input merely because a smaller opcode-specific type is available.
+
+For `target = "Example"`, the process-wide option is
+`-Example-use-legalizer`. With its default value, an unconfigured `G_ADD` type
+index can use the native integer list. With `-Example-use-legalizer=true`, that
+same pair has no generated carrier and is rejected. Explicit entries such as
+`G_MUL` and `G_BRCOND` are closed and take priority in both modes. The option
+gates only this missing-pair lookup; `native_types` still defines the carriers
+used to validate structural artifacts such as constants, extensions, and
+scalar `i1` memory accesses.
 
 `G_BRCOND` uses the same opcode/type-index lookup as other integer operations.
 When present, its index-0 entry is preserved in `ScalarTypeCapabilities` and
 defines the legal branch-condition carriers. Missing widths are promoted to its
-narrowest wider candidate. Only an omitted `G_BRCOND` entry inherits the full
-derived integer union.
+narrowest wider candidate. An omitted `G_BRCOND` entry inherits the full native
+integer list only while `-{{target}}-use-legalizer` is false.
 
 Opcode-specific floating-point sets use the same promotion boundary as their
 built-in opcode rule. Thus `G_FDIV`, `G_FNEG`, `G_FSQRT`, or `G_FEXP`
@@ -246,7 +262,7 @@ candidates while restricting index 1 to `i16`.
 
 `G_FADD` additionally accepts an exact floating-point vector type directly.
 This applies to both fixed and scalable vectors and is independent of the
-derived scalar carrier union and opcode-specific candidate lists. The template
+native scalar types and opcode-specific candidate lists. The template
 does not widen vector elements, change their representation, or split the
 vector; instruction selection must support every vector form that reaches this
 rule.
@@ -255,9 +271,9 @@ Plain non-atomic scalar `G_LOAD` and `G_STORE` use this same mechanism. Type
 index 0 describes both the value type and, under this template's required
 shape, the identical MMO memory type. Configure the two opcodes separately if
 loads and stores have different capabilities, or give them identical lists if
-the target uses one common memory capability set. Each configured scalar width
-automatically contributes to the global carrier union. Exact pointer-valued and
-vector-valued loads and stores remain directly legal regardless of the index-0
+the target uses one common memory capability set. Every configured scalar width
+must also be globally native. Exact pointer-valued and vector-valued loads and
+stores remain directly legal regardless of the index-0
 constraint; their address operand is a pointer and is preserved. Vector types
 are not inferred from the scalar candidate lists and are not transformed
 element-by-element. The generated policy does not infer extending loads or
@@ -315,7 +331,7 @@ iN, N < M --------------------------------------> G_ANYEXT iM -> intrinsic
 G_CONSTANT iN, N > M and value fits ------------> G_CONSTANT iM -> intrinsic
 ```
 
-Extensions pass through the narrowest derived carrier when needed, so every
+Extensions pass through the narrowest native carrier when needed, so every
 generated artifact remains covered by the built-in extension rules. Thus a
 half constant requested as `i16` becomes one `G_CONSTANT i16` whose value is the
 exact `APFloat::bitcastToAPInt()` result; no `G_BITCAST` is emitted. The original
@@ -340,8 +356,8 @@ The following scalar and pointer-carrier rules are always emitted:
 
 - value carriers: `G_IMPLICIT_DEF`, `G_FREEZE`,
   `G_CONSTANT_FOLD_BARRIER`; pointer values are accepted directly, while
-  integer and floating-point values must use derived carrier types;
-- constants: derived-carrier-width integer and pointer `G_CONSTANT`;
+  integer and floating-point values must use native carrier types;
+- constants: native-carrier-width integer and pointer `G_CONSTANT`;
 - integer type index 0: `G_ADD`, `G_SUB`, `G_MUL`, `G_SDIV`,
   `G_UDIV`, `G_SREM`, `G_UREM`, `G_AND`, `G_OR`, `G_XOR`, `G_SMIN`,
   `G_SMAX`, `G_UMIN`, `G_UMAX`, `G_ABS`, `G_SEXT_INREG`, `G_BSWAP`,
@@ -349,8 +365,8 @@ The following scalar and pointer-carrier rules are always emitted:
 - integer type indices 0 and 1: `G_SHL`, `G_LSHR`, `G_ASHR`;
 - integer result and input types: `G_CTLZ`, `G_CTLZ_ZERO_UNDEF`, `G_CTTZ`,
   `G_CTTZ_ZERO_UNDEF`, `G_CTPOP`;
-- floating-point constants and operations: `G_FCONSTANT`; collected scalar forms
-  of `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
+- floating-point constants and operations: `G_FCONSTANT`; operation-supported
+  native scalar forms of `G_FADD`, `G_FSUB`, `G_FMUL`, `G_FDIV`, `G_FREM`, `G_FMA`,
   `G_FMAD`, `G_FNEG`, `G_FABS`, `G_FCANONICALIZE`, all standard
   `G_FMIN*`/`G_FMAX*` variants, `G_FSQRT`, `G_FEXP`, `G_FCEIL`, `G_FFLOOR`,
   `G_FRINT`, `G_FNEARBYINT`, `G_FCOPYSIGN`; and wider-carrier promotion for
@@ -360,8 +376,8 @@ The following scalar and pointer-carrier rules are always emitted:
 - scalar casts: supported integer `G_ANYEXT` pairs and `G_TRUNC`; `G_ZEXT` and
   `G_SEXT` on those same pairs are custom-normalized to `G_ANYEXT`, except for
   extensions that implement the defined high bits of a pointer operation;
-  collected `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
-  `G_FPTOUI` when their floating-point side is collected;
+  native `G_FPEXT`/`G_FPTRUNC` pairs, and `G_SITOFP`, `G_UITOFP`, `G_FPTOSI`,
+  `G_FPTOUI` when their floating-point side is native;
 - pointer representation: `G_PTR_ADD`, `G_INTTOPTR`, `G_PTRTOINT`, and
   `G_PTRMASK`; their integer operand or result follows the pointer address
   space's `DataLayout` width and must have an exact target integer carrier;
@@ -379,9 +395,9 @@ also supported. A zero, non-power-of-two, or unknown divisor remains `G_UREM`,
 as does a known power of two when a required replacement carrier is
 unavailable.
 
-The smallest derived integer carrier is the default condition type where there
+The smallest native integer carrier is the default condition type where there
 is no integer value type to follow. For integer `G_ICMP`, the result normally
-uses the same default carrier as the legalized inputs: with derived integers
+uses the same default carrier as the legalized inputs: with native integers
 `[16, 32]`, both `G_ICMP (i1, i8)` and `G_ICMP (i1, i16)` become
 `G_ICMP (i16, i16)`, while `G_ICMP (i1, i32)` becomes
 `G_ICMP (i32, i32)`. The default is computed from the original input width so
@@ -393,9 +409,9 @@ comparison instead adopts that wider carrier when it is supported for both
 `G_ICMP (i32, i32) -> G_BRCOND i32` without an intervening conversion. Defined
 extensions required to preserve the comparison inputs are not bypassed.
 Pointer inputs cannot be used as a result type and therefore retain the
-smallest derived integer result while their pointer type is unchanged.
+smallest native integer result while their pointer type is unchanged.
 Non-integer results, non-integer/non-pointer inputs, result types wider than the
-required carrier, and widths exceeding every derived integer fail closed.
+required carrier, and widths exceeding every native integer fail closed.
 `G_FCMP` promotes an unsupported floating-point input to its narrowest wider
 carrier supported for that opcode, then gives the comparison result the exact
 same width as that legalized input: `f16 -> i16`, `f32 -> i32`, and so on. The
@@ -445,12 +461,12 @@ For an input and store carrier of `i16`, the legal form is one `G_ICMP i16`
 followed by `G_STORE i16`; no mask with constant one is required. Other boolean
 content conventions do not satisfy the generated boolean-memory contract.
 
-`G_BRCOND` accepts exactly its configured index-0 integer carriers, or the full
-derived integer union when that entry is absent. A missing condition width is
-promoted to the narrowest supported branch carrier at least as wide as the
-original condition; the custom branch rewrite uses `G_ANYEXT` for this carrier
-conversion. Non-integer conditions and conditions wider than every supported
-branch carrier fail closed.
+`G_BRCOND` accepts exactly its configured index-0 integer carriers. When that
+entry is absent and `-{{target}}-use-legalizer` is false, it uses the full native
+integer list. A missing condition width is promoted to the narrowest supported
+branch carrier at least as wide as the original condition; the custom branch
+rewrite uses `G_ANYEXT` for this carrier conversion. Non-integer conditions and
+conditions wider than every supported branch carrier fail closed.
 
 When a missing-width condition is defined by `G_ICMP` or `G_FCMP` (possibly
 through copies or integer casts), branch legalization predicts the compare's
@@ -476,10 +492,10 @@ For each pointer operation it reads the address space from the pointer LLT.
 distinct: a layout such as `p1:64:64:64:32` has a 64-bit pointer
 representation but a 32-bit index.
 
-The exact required integer type must occur in the derived carrier union and in
-that opcode/index's explicit constraint when one exists. The policy never
+The exact required integer type must occur in `native_types` and in that
+opcode/index's explicit constraint when one exists. The policy never
 substitutes another carrier width for a DataLayout-required width. Thus a target
-with `p0:64` but no collected `i64` carrier cannot use this generic `G_PTR_ADD`
+with `p0:64` but no native `i64` carrier cannot use this generic `G_PTR_ADD`
 rule and needs a target-specific split or custom lowering.
 
 Narrow and wide pointer casts retain LLVM's defined conversion semantics.
@@ -498,14 +514,14 @@ constant-pool, block-address, jump-table, and indirect-branch forms.
 
 `G_BR` has no register type to legalize, so it is always legal at this layer.
 
-`G_CONSTANT` uses the same integer-width policy: a derived-carrier-width
+`G_CONSTANT` uses the same integer-width policy: a native-carrier-width
 constant is legal, while a missing integer width is promoted to the smallest
-wider derived integer. LLVM's generic legalizer handles the corresponding
+wider native integer. LLVM's generic legalizer handles the corresponding
 constant widening.
 
-A collected `G_FCONSTANT` is legal. An unsupported floating-point constant used
+A native `G_FCONSTANT` is legal. An unsupported floating-point constant used
 by a promoted numeric operation is folded with its generated extension into an
-exactly extended collected constant:
+exactly extended native constant:
 
 ```text
 %lo:fN = G_FCONSTANT value
@@ -514,7 +530,7 @@ exactly extended collected constant:
 %hi:fM = G_FCONSTANT fpext(value)
 ```
 
-Here `fM` is the narrowest collected IEEE type wider than `fN`. IEEE widening of
+Here `fM` is the selected native IEEE type wider than `fN`. IEEE widening of
 the constant is exact, and the unsupported `G_FCONSTANT` plus `G_FPEXT` are
 removed. An unsupported constant with an available integer carrier can also be
 folded directly into an integer constant:
@@ -527,10 +543,10 @@ folded directly into an integer constant:
 ```
 
 The result registers and all their uses are preserved. Every non-debug use of
-the unsupported constant must be either one of these generated collected
+the unsupported constant must be either one of these generated native
 `G_FPEXT`s or an equal-width integer carrier bitcast; mixed uses are supported.
 The resulting `G_CONSTANT iN` is promoted by the integer-width policy when
-`iN` itself is not collected. Floating-point operations outside the promotion
+`iN` itself is not native. Floating-point operations outside the promotion
 list still fail closed for unsupported types; none are reinterpreted as
 integer arithmetic.
 
@@ -541,10 +557,10 @@ floating-point operations.
 `G_PHI` promotes integer values but does not bitcast unsupported float values.
 
 The templates also cover the artifacts introduced by this policy: integer
-extensions to a derived carrier are normalized to `G_ANYEXT`, while inverse
+extensions to a native carrier are normalized to `G_ANYEXT`, while inverse
 truncations and equal-width integer/floating-point bitcasts are legal. The
 `G_FPEXT`/`G_FPTRUNC` pair between an unsupported low IEEE type and its selected
-collected computation type remains legal, as do the collected floating-point
+native computation type remains legal, as do the native floating-point
 conversion pairs listed above.
 
 A pre-isel generic opcode not listed by this generated policy is marked
@@ -559,8 +575,9 @@ configured scalar argument.
 
 Plain non-atomic `G_LOAD` and `G_STORE` require identical value and MMO memory
 types. A scalar integer or floating-point operation is directly legal only when
-its type occurs in the derived carrier union and is present in that opcode's
-index-0 type constraint (or inherited from the union when no constraint exists).
+its type is native and is present in that opcode's index-0 type constraint (or
+inherited from `native_types` when no constraint exists and
+`-{{target}}-use-legalizer` is false).
 Exact pointer and vector operations are directly legal without a separate
 capability field. The address pointer operand, alignment, ordering, and other
 MMO flags are preserved.
@@ -569,8 +586,8 @@ does not legalize their element types, split them, or use scalar carrier rules.
 
 Scalar `i1` is the one built-in exception during legalization. Its ABI memory
 object always occupies exactly one byte; booleans are not bit-packed. The
-legalizer selects the narrowest byte-sized integer type available to both the
-`G_LOAD` and `G_STORE` index-0 constraints. It also requires legalizable
+legalizer selects the narrowest byte-sized native integer type available to both
+the `G_LOAD` and `G_STORE` index-0 constraints. It also requires legalizable
 `G_AND` and, for an access wider than one byte, `G_OR` carriers. With an `i8`
 access type, the value and MMO are changed to `i8` and a mask canonicalizes the
 stored byte to zero or one:
@@ -621,7 +638,7 @@ Here `fN` and `iN` have identical bit widths. Except for the scalar `i1` byte
 access expansion above, there is deliberately no integer widening rule for
 memory operations: an unsupported `G_LOAD/G_STORE i8` does
 not become a mismatched `value i16, memory i8` operation. When `fN` is also not
-a collected floating-point register type, a stored `G_FCONSTANT` can
+a native floating-point register type, a stored `G_FCONSTANT` can
 subsequently fold with its generated bitcast into a `G_CONSTANT`, using the
 same constant-carrier rule described above.
 
@@ -647,10 +664,10 @@ generated constructor therefore finishes with
 target adds no legacy actions; omitting it triggers the `TablesInitialized`
 assertion on the first such query.
 
-Collecting a carrier type does not by itself prove instruction-selector coverage
-for every opcode that inherits the global union. Every built-in opcode that can
-reach legalization must still be selected, lowered, or otherwise eliminated by
-the target.
+Declaring a native carrier type does not by itself prove instruction-selector
+coverage for every opcode that inherits the fallback list. Every built-in
+opcode that can reach legalization must still be selected, lowered, or
+otherwise eliminated by the target.
 
 ## Rendering with LLVM APIs
 
@@ -674,11 +691,15 @@ llvm-api-render-example LegalizerInfo.cpp.mustache > ExampleLegalizerInfo.cpp
 The example JSON is only a compact description of the input shape. An
 LLVM-based input producer does not need to serialize through JSON text. It
 should collect target register result/operand carrier types, group them by the
-mapped generic opcode or intrinsic and scalar index, and emit only
-`operation_type_constraints`. Immediate widths, memory-only widths, and source
-IR types that are converted before the target instruction must not be treated
-as register carriers. The generated C++ table computes its global carrier
-unions directly, so no separately derived Mustache field is required.
+mapped generic opcode or intrinsic and scalar index, and emit
+`operation_type_constraints` alongside the target-wide `native_types` fallback.
+Immediate widths, memory-only widths, and source IR types that are converted
+before the target instruction must not be treated as register carriers. Every
+operation candidate must also occur in the matching native list.
+The generated source also registers a process-wide Boolean option named from
+the exact target spelling: `-Example-use-legalizer` for this example. It
+defaults to false so omitted opcode/type-index pairs use `native_types`; set it
+to true to require an explicit generated entry for every such lookup.
 `DataLayout` is supplied when the rendered legalizer is constructed, so the
 renderer data remains identical for 32-bit and 64-bit pointer targets:
 
@@ -691,8 +712,9 @@ Legalizer = std::make_unique<ExampleLegalizerInfo>(TM.createDataLayout());
 1. Validate the target spelling; exactly one operation identifier per entry;
    duplicate opcode/intrinsic IDs and indices; non-empty `scalar_types` and
    candidate lists; duplicate candidates; exactly one type variant per
-   candidate; at least one collected integer carrier; and that floating widths
-   are drawn from `16`, `32`, `64`, and `128`.
+   candidate; non-empty unique native integer widths; unique native floating
+   widths drawn from `16`, `32`, `64`, and `128`; and that every operation
+   candidate occurs in the matching native list.
 2. Disable HTML escaping before rendering C++ values.
 3. Run `clang-format` on the generated source.
 4. Compile against the exact LLVM payload.
@@ -700,16 +722,19 @@ Legalizer = std::make_unique<ExampleLegalizerInfo>(TM.createDataLayout());
    has an exact integer carrier for that opcode.
 6. Confirm that target TableGen uses `-gisel-extended-llt` and target runtime
    setup calls `LLT::setUseExtended(true)` before GlobalISel creates LLTs.
-7. Test every derived integer carrier, every gap below the largest integer,
-   collected and unsupported floating-point types, and a width above the
+7. Test every native integer carrier, every gap below the largest integer,
+   native and unsupported floating-point types, and a width above the
    largest integer.
-8. Inspect post-legalization MIR and run instruction selection for every
+8. Run legality queries in both option modes: an omitted opcode/type-index pair
+   must use `native_types` when the option is false and fail closed when it is
+   true, while an explicit pair must remain identically constrained.
+9. Inspect post-legalization MIR and run instruction selection for every
    generated artifact, intrinsic, comparison, branch, and `G_PHI`; also verify
    that `G_FMAXIMUM` and `G_SELECT` have been eliminated.
-9. Test a single-use integer chain whose consumer requires a wider carrier and
+10. Test a single-use integer chain whose consumer requires a wider carrier and
    confirm that no `G_TRUNC`/`G_ANYEXT` pair remains between producer and
    consumer. Also test that multiple uses, cross-block uses, and any
    `G_ZEXT`/`G_SEXT` retained by target policy keep the default carrier.
-10. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
+11. Check that one unlisted pre-isel generic opcode and one unlisted intrinsic
    pass legalization unchanged, then independently confirm that the target can
    select, lower, or eliminate them.
