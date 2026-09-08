@@ -18,11 +18,9 @@
 #include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics.h"
-{{#operation_type_constraints}}
-{{#intrinsic_id_cpp}}
+#if __has_include("llvm/IR/Intrinsics{{target}}.h")
 #include "llvm/IR/Intrinsics{{target}}.h"
-{{/intrinsic_id_cpp}}
-{{/operation_type_constraints}}
+#endif
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -37,7 +35,7 @@ namespace {
 
 static cl::opt<bool> {{target}}UseLegalizer(
     "{{target}}-use-legalizer",
-    cl::desc("Disable native fallback for generated scalar opcode rules"),
+    cl::desc("Use generated legalization instead of the generic fallback policy"),
     cl::init(false));
 
 static bool hasExactType(LLT ActualTy, LLT ExpectedTy) {
@@ -125,17 +123,14 @@ static LLT getNativeFloatTypeForWidth(unsigned Bits) {
   return BestWidth == 0 ? LLT{} : LLT::floatIEEE(BestWidth);
 }
 
-// The sole fallback decision for operation-specific scalar types. A present
-// pair is closed even if it contains only the other scalar kind. A missing pair
-// may inherit native types only in compatibility mode.
-static LLT getOpcodeTypeForWidth(unsigned Opcode, unsigned TypeIdx,
-                                 unsigned Bits, ScalarTypeKind Kind) {
-  bool HasConstraint = false;
+// The generated policy is closed: neither missing pairs nor unsupported kinds
+// or widths inherit a generic carrier.
+static LLT getGeneratedScalarTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                         unsigned Bits, ScalarTypeKind Kind) {
   unsigned BestWidth = 0;
   for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
     if (Capability.Opcode != Opcode || Capability.TypeIndex != TypeIdx)
       continue;
-    HasConstraint = true;
     if (Capability.TypeKind != Kind || Bits > Capability.Width)
       continue;
     if (BestWidth == 0 || Capability.Width < BestWidth)
@@ -144,10 +139,42 @@ static LLT getOpcodeTypeForWidth(unsigned Opcode, unsigned TypeIdx,
   if (BestWidth != 0)
     return Kind == ScalarTypeKind::Integer ? LLT::integer(BestWidth)
                                            : LLT::floatIEEE(BestWidth);
-  if (HasConstraint || {{target}}UseLegalizer)
-    return LLT{};
+  return LLT{};
+}
+
+// The generic policy never consults ScalarTypeCapabilities, even when an
+// explicit opcode/type-index pair is present. It implements the original
+// native-carrier rules for the complete generic legalization path.
+static LLT getGenericScalarTypeForWidth(unsigned, unsigned, unsigned Bits,
+                                       ScalarTypeKind Kind) {
   return Kind == ScalarTypeKind::Integer ? getNativeIntegerTypeForWidth(Bits)
                                          : getNativeFloatTypeForWidth(Bits);
+}
+
+static bool legalizeGenericIntrinsic(LegalizerHelper &Helper, MachineInstr &MI);
+static bool legalizeGeneratedIntrinsic(LegalizerHelper &Helper,
+                                       MachineInstr &MI);
+
+// Select a complete policy, not a missing-type fallback. Registration and
+// custom rewrites share the transformation engine; their dependency queries
+// and intrinsic entry point must all use the same policy.
+struct LegalizationPolicy {
+  LLT (*SelectScalarType)(unsigned, unsigned, unsigned, ScalarTypeKind);
+  bool (*LegalizeIntrinsic)(LegalizerHelper &, MachineInstr &);
+  bool UsesGeneratedConstraints;
+};
+
+static const LegalizationPolicy &getLegalizationPolicy() {
+  static const LegalizationPolicy Generic = {
+      getGenericScalarTypeForWidth, legalizeGenericIntrinsic, false};
+  static const LegalizationPolicy Generated = {
+      getGeneratedScalarTypeForWidth, legalizeGeneratedIntrinsic, true};
+  return {{target}}UseLegalizer ? Generated : Generic;
+}
+
+static LLT getOpcodeTypeForWidth(unsigned Opcode, unsigned TypeIdx,
+                                 unsigned Bits, ScalarTypeKind Kind) {
+  return getLegalizationPolicy().SelectScalarType(Opcode, TypeIdx, Bits, Kind);
 }
 
 static LLT getOpcodeIntegerTypeForWidth(unsigned Opcode, unsigned TypeIdx,
@@ -1350,6 +1377,38 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   Helper.Observer.changedInstr(MI);
   return true;
 }
+
+static bool legalizeGenericIntrinsic(LegalizerHelper &Helper, MachineInstr &MI) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const unsigned FirstArgumentOperand = MI.getNumExplicitDefs() + 1;
+  const unsigned NumExplicitOperands = MI.getNumExplicitOperands();
+  if (FirstArgumentOperand > NumExplicitOperands)
+    return false;
+
+  // Derive inputs from this instruction, never from the generated ID/index/type
+  // list. Preserve result types, pointers, vectors, immediates and metadata.
+  // Scalar payloads use the original integer-carrier convention, including
+  // float bit representations rather than numeric float-to-integer conversion.
+  SmallVector<LLT, 8> CarrierTypes;
+  SmallVector<IntrinsicScalarArgumentRule, 8> Arguments;
+  CarrierTypes.reserve(NumExplicitOperands - FirstArgumentOperand);
+  for (unsigned I = FirstArgumentOperand; I < NumExplicitOperands; ++I) {
+    const MachineOperand &MO = MI.getOperand(I);
+    if (!MO.isReg() || !MO.getReg().isVirtual() || MO.isDef())
+      continue;
+    const LLT Ty = MRI.getType(MO.getReg());
+    if (!Ty.isInteger() && !Ty.isFloat())
+      continue;
+    const LLT CarrierTy = getNativeIntegerTypeForWidth(Ty.getScalarSizeInBits());
+    if (!CarrierTy.isValid())
+      return false;
+    CarrierTypes.push_back(CarrierTy);
+    Arguments.push_back(
+        {I - FirstArgumentOperand, ArrayRef<LLT>(&CarrierTypes.back(), 1)});
+  }
+  // All candidates and required materializations are validated before mutation.
+  return applyIntrinsicCarrierRewrites(Helper, MI, Arguments);
+}
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -1392,7 +1451,7 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   };
 
   // Fixed artifact rules. Scalar computations (including constants) below
-  // always use the operation-specific query instead.
+  // use the selected policy, as do their custom rewrites and dependencies.
   GetActions(G_ANYEXT, /*TypeIndexMask=*/0).legalIf(isIntegerExtensionArtifact);
   GetActionsFor({G_ZEXT, G_SEXT}, /*TypeIndexMask=*/0)
       .customIf(isIntegerExtensionArtifact);
@@ -1592,29 +1651,24 @@ static void widenIntrinsicIntegerSource(LegalizerHelper &Helper,
   PhiActions.widenScalarIf(integerTypeNeedsPromotion(0),
                            promoteIntegerType(0));
 
-  // Reject configuration for artifact-only, removed, unhandled, or non-scalar
-  // indices instead of silently ignoring it. Native membership is also required
-  // because the cast artifact contract is expressed in native carriers.
-  for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
-    if (Capability.Width == 0)
-      continue; // Sentinel.
-    if (Capability.Opcode < FirstGenericOpcode ||
-        Capability.Opcode > LastGenericOpcode ||
-        Capability.TypeIndex >= 2 ||
-        !(ScalarTypeIndexMasks[Capability.Opcode - FirstGenericOpcode] &
-          (1u << Capability.TypeIndex)))
-      report_fatal_error(
-          "generated scalar constraint has no configurable opcode/type index");
-    const LLT Ty = Capability.TypeKind == ScalarTypeKind::Integer
-                       ? LLT::integer(Capability.Width)
-                       : LLT::floatIEEE(Capability.Width);
-    if (!(Capability.TypeKind == ScalarTypeKind::Integer
-              ? isNativeIntegerType(Ty)
-              : isNativeFloatType(Ty)))
-      report_fatal_error("generated scalar constraint is not a native carrier");
+  // Only the generated policy validates the instruction list. The generic
+  // fallback must not depend on it. Check metadata only: ExtendedLLT may not
+  // be enabled yet when this constructor runs.
+  if (getLegalizationPolicy().UsesGeneratedConstraints) {
+    for (const ScalarTypeCapability &Capability : ScalarTypeCapabilities) {
+      if (Capability.Width == 0)
+        continue; // Sentinel.
+      if (Capability.Opcode < FirstGenericOpcode ||
+          Capability.Opcode > LastGenericOpcode ||
+          Capability.TypeIndex >= 2 ||
+          !(ScalarTypeIndexMasks[Capability.Opcode - FirstGenericOpcode] &
+            (1u << Capability.TypeIndex)))
+        report_fatal_error(
+            "generated scalar constraint has no configurable opcode/type index");
+    }
   }
 
-  // Intentional pass-through is separate from native scalar fallback. Opcodes
+  // Intentional pass-through is shared by the two policies. Opcodes
   // outside this template (including pointer arithmetic and address formation)
   // belong to target integration. Pointer ICMP has no scalar rule here.
   // Covered rules fail closed when no predicate or transformation matches.
@@ -1705,6 +1759,12 @@ bool {{target}}LegalizerInfo::legalizeCustom(
 
 bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
                                                 MachineInstr &MI) const {
+  return getLegalizationPolicy().LegalizeIntrinsic(Helper, MI);
+}
+
+namespace {
+static bool legalizeGeneratedIntrinsic(LegalizerHelper &Helper,
+                                       MachineInstr &MI) {
   switch (cast<GIntrinsic>(MI).getIntrinsicID()) {
 {{#operation_type_constraints}}
 {{#intrinsic_id_cpp}}
@@ -1732,5 +1792,7 @@ bool {{target}}LegalizerInfo::legalizeIntrinsic(LegalizerHelper &Helper,
     return true;
   }
 }
+
+} // namespace
 
 } // namespace llvm

@@ -55,35 +55,46 @@ An opcode entry's `index` is a `LegalityQuery::Types` index. An intrinsic
 entry's `index` is a zero-based explicit input argument index, excluding
 definitions and the intrinsic-ID operand. These are not interchangeable.
 
-The generated constructor rejects opcode constraints for removed/unhandled
-operations, fixed artifacts, or indices without a configurable scalar rule.
-It also checks native membership. These checks supplement input-producer
-validation; they do not make arbitrary C++ strings safe renderer input.
+In generated-policy mode, the constructor rejects opcode constraints for
+removed/unhandled operations, fixed artifacts, or indices without a
+configurable scalar rule. Generic mode does not inspect that list.
+These checks inspect only configuration metadata, not LLT/native membership:
+ExtendedLLT may not be enabled yet during construction. They supplement
+input-producer validation; they do not make arbitrary C++ strings safe renderer
+input.
 
-## Three rule domains
+## Two legalization policies
+
+`-Example-use-legalizer` selects a complete policy, not a missing-type fallback:
+
+| Option | Ordinary operations and rewrite dependencies | Intrinsics |
+| --- | --- | --- |
+| `false` (default) | Original generic rules using `native_types`; ignore all opcode candidates, even explicitly configured ones. | Derive scalar input operands from MIR and adapt them to native integer payload carriers; ignore all intrinsic ID/index/type entries. |
+| `true` | Generated opcode/type-index candidates only; a missing pair, unsupported kind, or unavailable width has no carrier. | Use generated ID/argument-index candidates; unlisted intrinsic IDs pass through. |
+
+`getLegalizationPolicy` selects the scalar query and intrinsic legalization
+entry point together. Both policies share the existing transformation engine
+(promotion, comparisons, local carrier coalescing, constants, memory and CFG
+rewrites), so every dependency query uses the same policy as its producer.
+The generic query never reads `ScalarTypeCapabilities`; the generated query
+never falls back to native types. Changing instruction-list constraints cannot
+change generic-mode legalization.
+
+The process-wide option preserves the exact target spelling. It selects the
+policy used by this class, not whether LLVM runs its Legalizer pass.
+
+### Shared rule domains
 
 The domains are deliberately separate:
 
-| Domain | Type policy | Effect of `-Example-use-legalizer=true` |
+| Domain | Generic policy | Generated policy |
 | --- | --- | --- |
-| Configurable scalar operations | Opcode/type-index candidates, including constants and both compare indices. | Missing pairs have no carrier. |
-| Fixed cast artifacts | Native-carrier extension/truncation and representation-bitcast contracts. | Unchanged; these are built-in rules, not missing-pair fallback. |
-| Intentional pass-through | Unlisted generic opcodes, unlisted intrinsics, unconditional branch, and explicitly accepted pointer/vector value forms. | Unchanged; instruction selection remains the target's responsibility. |
+| Scalar operations | Native carriers under the general rules below. | Opcode/type-index candidates, including constants and both compare indices. |
+| Fixed cast artifacts | Native-carrier extension/truncation and representation-bitcast contracts. | Same built-in artifact contracts. |
+| Intentional pass-through | Unhandled generic opcodes, unconditional branch, and explicitly accepted pointer/vector value forms. | Same opcode pass-through; unlisted intrinsic IDs also pass through. |
 
 Do not supply scalar constraints for fixed artifacts or unlisted opcodes and
 expect them to change those domains.
-
-For configurable scalar operations, `getOpcodeTypeForWidth` is the only native
-fallback decision:
-
-1. If the opcode/type-index pair exists, use only its candidates. An unavailable
-   width or scalar kind does not fall back.
-2. If the pair is absent and `-Example-use-legalizer=false` (the default), use
-   the matching `native_types` list.
-3. If the pair is absent and the option is true, return no carrier.
-
-The process-wide option name preserves the exact target spelling. It controls
-native scalar fallback, not whether LLVM runs its Legalizer pass.
 
 An integer missing width chooses the smallest supported width at least as large
 as the original. Candidate ordering has no effect. Ordinary nonconstant integer
@@ -202,7 +213,20 @@ replacement capabilities leave the supported `UREM` unchanged.
 
 ## Intrinsic input adaptation
 
-For each configured scalar input:
+Both policies handle `G_INTRINSIC`, its side-effecting form, and both convergent
+forms through LLVM's intrinsic legalization hook.
+
+Generic mode examines every explicit virtual-register scalar input after the
+definitions and intrinsic-ID operand. It selects the smallest native integer
+carrier no narrower than the input. Integers widen with the existing ANYEXT
+low-bit convention; floats become integer bit representations, including when
+the float type is native. Float constants materialize their exact bits.
+No scalar is narrowed. A scalar with no carrier rejects the whole rewrite.
+Pointers, vectors, immediates, metadata and result definitions are preserved.
+This is the target's payload convention, not a universal ABI or semantic rule
+for arbitrary LLVM intrinsics.
+
+Generated mode uses each configured scalar input's candidates:
 
 1. Preserve an exact type.
 2. Prefer an equal-width floating-to-integer bit representation.
@@ -215,9 +239,10 @@ constants may narrow only when the value fits the destination signed or
 unsigned range; nonconstant integers cannot narrow. Required constant
 materialization is checked before changing arguments.
 
-All configured arguments are validated before mutation. Intrinsic result
+In both modes, all affected arguments are validated before mutation. Intrinsic result
 adaptation, numeric float-to-integer conversion, and generic software floating
-point are outside this policy. Unlisted intrinsics pass through.
+point are outside these policies. Only generated mode leaves unlisted
+intrinsics unchanged; generic mode adapts scalar inputs regardless of ID.
 
 ## Removed pointer policy and testing
 
@@ -231,16 +256,22 @@ checks the function's layout through `MachineIRBuilder`.
 
 The source is organized into capability lookup, type predicates/artifacts,
 local carrier coalescing, instruction rewrites, intrinsic adaptation, and rule
-registration/dispatch. The scalar query owns fallback; registration separately
-records which scalar indices are configurable.
+registration/dispatch. Policy selection owns both the scalar query and intrinsic
+dispatch; registration separately records configurable scalar indices.
 
 CTest compiles the rendered templates and runs configured/missing-constraint
-fixtures with the default option, explicit false, and true. Query checks cover
+fixtures with the default option, explicit false, and true. A third fixture has
+deliberately unusable generated constraints and runs only the generic policy.
+All three share the same native types and generic-mode expectations, including
+construction before ExtendedLLT is enabled. Query checks cover
 both scalar kinds, constants, compare constraints, FMAXIMUM, removed pointer
 rules, casts, memory, and SELECT dependencies. When the native target's CodeGen
 library is available, the same tests also exercise complete MIR legalization,
 local coalescing and its boundaries, constant folding, CFG expansion, i1
-read/modify/write, and UREM dependency guards.
+read/modify/write, and UREM dependency guards. Intrinsic tests cover both
+policies, all four opcode forms, listed/unlisted IDs, integer promotion, float
+bit patterns, constant narrowing, operand preservation, idempotence, and
+failure without partial mutation.
 
 These tests validate the generated policy. They do not establish another
 target's instruction-selector coverage or physical memory-access guarantees.

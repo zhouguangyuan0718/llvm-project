@@ -1,6 +1,6 @@
 {
   "target": "Example",
-  "native_types": {"integer_widths":[16,32],"floating_point_widths":[32]},
+  "native_types": {"integer_widths":[64,16,32],"floating_point_widths":[64,32]},
   "operation_type_constraints": [
     {"opcode_cpp":"G_MUL","scalar_types":[{"index":0,"types":[{"integer_width":16}]}]},
     {"opcode_cpp":"G_AND","scalar_types":[{"index":0,"types":[{"integer_width":16},{"integer_width":32}]}]},

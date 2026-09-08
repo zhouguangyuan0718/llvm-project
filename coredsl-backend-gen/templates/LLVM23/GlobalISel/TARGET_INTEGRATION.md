@@ -30,9 +30,9 @@ LegalizerInfo.cpp.mustache -> GISel/Toy16LegalizerInfo.cpp
 ```
 
 The generated class is `llvm::Toy16LegalizerInfo`. If the input contains
-intrinsics, the source includes `llvm/IR/IntrinsicsToy16.h`; its enum names must
-match those emitted from the target intrinsic TableGen definitions. Inputs
-without intrinsics do not need that header.
+intrinsics, their enum names must match the target intrinsic TableGen output.
+The source includes `llvm/IR/IntrinsicsToy16.h` when available; configurations
+using only LLVM's built-in intrinsic IDs do not need a target intrinsic header.
 
 ## 2. Enable ExtendedLLT
 
@@ -83,18 +83,19 @@ Keep the standard GlobalISel pipeline: IRTranslator, Legalizer, RegBankSelect,
 InstructionSelect, plus normal target/pass registration. This template does
 not install those components.
 
-## 4. Choose the fallback mode
+## 4. Choose the legalization policy
 
 The generated source registers `-Toy16-use-legalizer`, default false.
 
 | Configuration | Result |
 | --- | --- |
-| Explicit opcode/type-index entry | Always use only that entry. |
-| Missing scalar pair, option false | Native scalar fallback permitted. |
-| Missing scalar pair, option true | No scalar carrier. |
+| Option false | Complete generic legalization using native carriers; all instruction-list constraints are ignored. |
+| Option true | Generated opcode/type-index rules; missing pairs have no scalar carrier. |
+| Intrinsics, option false | Adapt every scalar input using the generic integer-payload convention, regardless of ID. |
+| Intrinsics, option true | Apply generated ID/input-index candidates; unlisted IDs pass through. |
 | Fixed cast artifacts or intentional pass-through | Their built-in policy applies in both modes. |
 
-Strict mode requires explicit entries for scalar operations that legalization
+Generated mode requires explicit entries for scalar operations that legalization
 can produce, including `G_CONSTANT`, `G_FCONSTANT`, and `G_IMPLICIT_DEF`
 when used. Both compare indices require compatible carriers.
 
@@ -105,9 +106,12 @@ For example:
 - constant UREM masking needs AND and constants; a dynamic mask also needs ADD;
 - intrinsic argument conversion may need operation-supported constants.
 
-Do not configure scalar entries for artifact-only instructions
+In generated mode, do not configure scalar entries for artifact-only instructions
 (`ANYEXT/ZEXT/SEXT/TRUNC/BITCAST/FPEXT/FPTRUNC`), unconditional BR, or removed
-pointer opcodes. Their type indices are not scalar capability inputs.
+pointer opcodes. Their type indices are not scalar capability inputs. Generic
+mode skips instruction-list validation entirely. Neither mode constructs LLTs
+to validate native membership during initialization: ExtendedLLT may be enabled
+after this class is constructed, but must be enabled before legalizing MIR.
 
 Pointer arithmetic, conversions, address formation, and pointer-comparison
 legalization must be handled by the integrating target when needed. Removed

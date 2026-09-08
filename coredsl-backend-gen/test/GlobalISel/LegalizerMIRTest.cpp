@@ -11,6 +11,7 @@
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -110,12 +111,12 @@ static void checkSingleUseCoalescing(TestContext &TC) {
   legalizeAll(TC, MF);
   MachineInstr *Add = findUniqueOpcode(MF, TargetOpcode::G_ADD);
   MachineInstr *Xor = findUniqueOpcode(MF, TargetOpcode::G_XOR);
-  if (MRI.getType(Add->getOperand(0).getReg()) != LLT::integer(32) ||
-      MRI.getType(Xor->getOperand(0).getReg()) != LLT::integer(32))
-    fail("single-use chain did not converge on s32", &MF);
+  if (MRI.getType(Add->getOperand(0).getReg()) != LLT::integer(16) ||
+      MRI.getType(Xor->getOperand(0).getReg()) != LLT::integer(16))
+    fail("generic chain consulted the configured XOR s32 constraint", &MF);
   if (Xor->getOperand(1).getReg() != Add->getOperand(0).getReg() &&
       Xor->getOperand(2).getReg() != Add->getOperand(0).getReg())
-    fail("an artifact remained between the s32 producer and consumer", &MF);
+    fail("an artifact remained between the generic producer and consumer", &MF);
 }
 
 static void checkCopyLookThrough(TestContext &TC) {
@@ -145,7 +146,7 @@ static void checkCopyLookThrough(TestContext &TC) {
 
   legalizeAll(TC, MF);
   MachineInstr *Add = findUniqueOpcode(MF, TargetOpcode::G_ADD);
-  if (MRI.getType(Add->getOperand(0).getReg()) != LLT::integer(32))
+  if (MRI.getType(Add->getOperand(0).getReg()) != LLT::integer(16))
     fail("same-type COPY blocked local carrier propagation", &MF);
 }
 
@@ -260,7 +261,7 @@ static void checkRawDefinedExtensionBoundary(TestContext &TC) {
     fail("raw G_ZEXT was incorrectly treated as a carrier preference", &MF);
 }
 
-static void checkBrCondConfiguredPromotion(TestContext &TC) {
+static void checkBrCondConfiguredPromotion(TestContext &TC, bool Strict) {
   MachineFunction &MF = TC.makeFunction("brcond_configured_promotion");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
   MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
@@ -277,8 +278,9 @@ static void checkBrCondConfiguredPromotion(TestContext &TC) {
 
   legalizeAll(TC, MF);
   MachineInstr *BrCond = findUniqueOpcode(MF, TargetOpcode::G_BRCOND);
-  if (MRI.getType(BrCond->getOperand(0).getReg()) != LLT::integer(32))
-    fail("G_BRCOND i8 did not use its narrowest configured carrier", &MF);
+  if (MRI.getType(BrCond->getOperand(0).getReg()) !=
+      LLT::integer(Strict ? 32 : 16))
+    fail("G_BRCOND i8 did not use the selected policy's carrier", &MF);
 }
 
 static void checkBrCondCompareCarrier(TestContext &TC) {
@@ -311,7 +313,7 @@ static void checkBrCondCompareCarrier(TestContext &TC) {
     fail("G_BRCOND did not coalesce with its supported compare carrier", &MF);
 }
 
-static void checkSelectEmitsSupportedBrCond(TestContext &TC) {
+static void checkSelectEmitsSupportedBrCond(TestContext &TC, bool Strict) {
   MachineFunction &MF = TC.makeFunction("select_emits_supported_brcond");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
   MF.push_back(Entry);
@@ -337,11 +339,11 @@ static void checkSelectEmitsSupportedBrCond(TestContext &TC) {
         fail("G_SELECT remained after control-flow expansion", &MF);
   MachineInstr *BrCond = findUniqueOpcode(MF, TargetOpcode::G_BRCOND);
   const LLT BrCondTy = MRI.getType(BrCond->getOperand(0).getReg());
-  if (BrCondTy != LLT::integer(32))
-    fail("G_SELECT emitted a G_BRCOND outside its configured types", &MF);
+  if (BrCondTy != LLT::integer(Strict ? 32 : 16))
+    fail("G_SELECT emitted a G_BRCOND outside the selected policy", &MF);
 }
 
-static void checkICmpUsesWiderBrCondCarrier(TestContext &TC) {
+static void checkICmpUsesWiderBrCondCarrier(TestContext &TC, bool Strict) {
   MachineFunction &MF = TC.makeFunction("icmp_uses_wider_brcond_carrier");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
   MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
@@ -353,7 +355,7 @@ static void checkICmpUsesWiderBrCondCarrier(TestContext &TC) {
   B.setMBB(*Entry);
   MachineRegisterInfo &MRI = MF.getRegInfo();
   const LLT I8 = LLT::integer(8);
-  const LLT I32 = LLT::integer(32);
+  const LLT CarrierTy = LLT::integer(Strict ? 32 : 16);
   Register LHS = MRI.createGenericVirtualRegister(I8);
   Register RHS = MRI.createGenericVirtualRegister(I8);
   B.buildInstr(TargetOpcode::G_IMPLICIT_DEF, {LHS}, {});
@@ -366,14 +368,14 @@ static void checkICmpUsesWiderBrCondCarrier(TestContext &TC) {
   MachineInstr *ICmp = findUniqueOpcode(MF, TargetOpcode::G_ICMP);
   MachineInstr *BrCond = findUniqueOpcode(MF, TargetOpcode::G_BRCOND);
   const Register ICmpResult = ICmp->getOperand(0).getReg();
-  if (MRI.getType(ICmpResult) != I32 ||
-      MRI.getType(ICmp->getOperand(2).getReg()) != I32 ||
-      MRI.getType(BrCond->getOperand(0).getReg()) != I32 ||
+  if (MRI.getType(ICmpResult) != CarrierTy ||
+      MRI.getType(ICmp->getOperand(2).getReg()) != CarrierTy ||
+      MRI.getType(BrCond->getOperand(0).getReg()) != CarrierTy ||
       BrCond->getOperand(0).getReg() != ICmpResult)
     fail("G_ICMP did not adopt the wider G_BRCOND carrier", &MF);
 }
 
-static void checkFloatConstantAndComparison(TestContext &TC) {
+static void checkFloatConstantAndComparison(TestContext &TC, bool Strict) {
   MachineFunction &MF = TC.makeFunction("float_constant_and_compare");
   MachineBasicBlock *MBB = MF.CreateMachineBasicBlock();
   MF.push_back(MBB);
@@ -385,11 +387,12 @@ static void checkFloatConstantAndComparison(TestContext &TC) {
   keepAlive(B, MF.getRegInfo(), Extended);
   legalizeAll(TC, MF);
   MachineInstr *FC = findUniqueOpcode(MF, TargetOpcode::G_FCONSTANT);
-  if (MF.getRegInfo().getType(FC->getOperand(0).getReg()) != F64 ||
+  if (MF.getRegInfo().getType(FC->getOperand(0).getReg()) !=
+          (Strict ? F64 : F32) ||
       FC->getOperand(1).getFPImm()->getValueAPF().convertToDouble() != 1.5)
     fail("explicit FCONSTANT constraint did not fold to exact f64", &MF);
   for (MachineInstr &MI : *MBB)
-    if (MI.getOpcode() == TargetOpcode::G_FPEXT)
+    if (Strict && MI.getOpcode() == TargetOpcode::G_FPEXT)
       fail("constant extension survived folding", &MF);
 
   MachineFunction &CompareMF = TC.makeFunction("float_compare_intersection");
@@ -405,8 +408,9 @@ static void checkFloatConstantAndComparison(TestContext &TC) {
   legalizeAll(TC, CompareMF);
   MachineInstr *Cmp = findUniqueOpcode(CompareMF, TargetOpcode::G_FCMP);
   if (CompareMF.getRegInfo().getType(Cmp->getOperand(0).getReg()) !=
-          LLT::integer(64) ||
-      CompareMF.getRegInfo().getType(Cmp->getOperand(2).getReg()) != F64)
+          LLT::integer(Strict ? 64 : 32) ||
+      CompareMF.getRegInfo().getType(Cmp->getOperand(2).getReg()) !=
+          (Strict ? F64 : F32))
     fail("FCMP did not use a common result/input width", &CompareMF);
 }
 
@@ -561,6 +565,175 @@ static void checkICmpMultipleUseBoundary(TestContext &TC) {
     fail("multiple-use G_ICMP crossed the local carrier boundary", &MF);
 }
 
+static void checkIntrinsicPolicies(TestContext &TC, bool Strict, bool Missing) {
+  MachineFunction &MF = TC.makeFunction("intrinsic_policies");
+  MachineBasicBlock *MBB = MF.CreateMachineBasicBlock();
+  MF.push_back(MBB);
+  MachineIRBuilder B(MF);
+  B.setMBB(*MBB);
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("intrinsic-policies");
+  const LLT I8 = LLT::integer(8), I16 = LLT::integer(16);
+  const LLT I32 = LLT::integer(32), I64 = LLT::integer(64);
+  const LLT F32 = LLT::floatIEEE(32);
+  const bool Configured = Strict && !Missing;
+
+  // Built-in IDs are opaque fixture dispatch keys here. We test the target's
+  // low-bit payload convention, not these LLVM intrinsics' IR signatures or
+  // their instruction selection. Exercise LLVM's actual intrinsic entry point.
+  auto Step = [&](MachineInstr &MI, bool Success) {
+    if (Helper.legalizeInstrStep(MI, LocObserver) !=
+        (Success ? LegalizerHelper::Legalized
+                 : LegalizerHelper::UnableToLegalize))
+      fail("intrinsic selected the wrong legalization policy", &MF);
+  };
+  for (unsigned Opcode :
+       {TargetOpcode::G_INTRINSIC, TargetOpcode::G_INTRINSIC_W_SIDE_EFFECTS,
+        TargetOpcode::G_INTRINSIC_CONVERGENT,
+        TargetOpcode::G_INTRINSIC_CONVERGENT_W_SIDE_EFFECTS}) {
+    for (Intrinsic::ID ID : {Intrinsic::smax, Intrinsic::umax}) {
+      B.setInsertPt(*MBB, MBB->end());
+      Register Result = MRI.createGenericVirtualRegister(I8);
+      Register A = B.buildUndef(I8).getReg(0);
+      Register C = B.buildUndef(I8).getReg(0);
+      Register Ptr = B.buildUndef(LLT::pointer(0, 64)).getReg(0);
+      Register Vec = B.buildUndef(LLT::fixed_vector(4, I8)).getReg(0);
+      MachineInstr *MI = B.buildInstr(Opcode)
+                             .addDef(Result)
+                             .addIntrinsicID(ID)
+                             .addUse(A)
+                             .addUse(C)
+                             .addUse(Ptr)
+                             .addUse(Vec)
+                             .addImm(7)
+                             .getInstr();
+      Step(*MI, true);
+      const bool HasRule = Configured && ID == Intrinsic::smax;
+      const LLT Expected0 = !Strict ? I16 : HasRule ? I32 : I8;
+      const LLT Expected1 = !Strict || HasRule ? I16 : I8;
+      if (MI->getOpcode() != Opcode ||
+          MI->getOperand(1).getIntrinsicID() != ID ||
+          MRI.getType(MI->getOperand(2).getReg()) != Expected0 ||
+          MRI.getType(MI->getOperand(3).getReg()) != Expected1 ||
+          MI->getOperand(0).getReg() != Result || MRI.getType(Result) != I8 ||
+          MI->getOperand(4).getReg() != Ptr ||
+          MI->getOperand(5).getReg() != Vec || MI->getOperand(6).getImm() != 7)
+        fail("intrinsic inputs or preserved operands are incorrect", &MF);
+      const auto Size = MBB->size();
+      Step(*MI, true);
+      if (MBB->size() != Size)
+        fail("intrinsic legalization is not idempotent", &MF);
+    }
+  }
+
+  // Generic float inputs always use integer bit representations, even when a
+  // generated entry explicitly requires f32. Test constants and nonconstants.
+  for (bool Constant : {false, true}) {
+    B.setInsertPt(*MBB, MBB->end());
+    Register Source = Constant ? B.buildFConstant(F32, 1.5).getReg(0)
+                               : B.buildUndef(F32).getReg(0);
+    Register Result = MRI.createGenericVirtualRegister(F32);
+    MachineInstr *MI = B.buildInstr(TargetOpcode::G_INTRINSIC)
+                           .addDef(Result)
+                           .addIntrinsicID(Intrinsic::sqrt)
+                           .addUse(Source)
+                           .getInstr();
+    Step(*MI, true);
+    Register Rewritten = MI->getOperand(2).getReg();
+    if (MRI.getType(Rewritten) != (Strict ? F32 : I32) ||
+        (Strict && Rewritten != Source) || MRI.getType(Result) != F32)
+      fail("intrinsic float policy or result preservation is incorrect", &MF);
+    if (!Strict) {
+      MachineInstr *Def = MRI.getVRegDef(Rewritten);
+      if (Def->getOpcode() !=
+          (Constant ? TargetOpcode::G_CONSTANT : TargetOpcode::G_BITCAST))
+        fail("intrinsic float input was not bit-represented", &MF);
+      if (Constant && Def->getOperand(1).getCImm()->getValue() != 0x3fc00000)
+        fail("intrinsic float constant changed its bit pattern", &MF);
+    }
+  }
+
+  // No partial argument edits when a later nonconstant cannot be narrowed.
+  B.setInsertPt(*MBB, MBB->end());
+  Register A = B.buildUndef(I8).getReg(0);
+  Register TooWide = B.buildUndef(LLT::integer(128)).getReg(0);
+  MachineInstr *Rejected = B.buildInstr(TargetOpcode::G_INTRINSIC)
+                               .addIntrinsicID(Intrinsic::smax)
+                               .addUse(A)
+                               .addUse(TooWide)
+                               .getInstr();
+  const auto Size = MBB->size();
+  Step(*Rejected, Strict && Missing);
+  if (MBB->size() != Size || Rejected->getOperand(1).getReg() != A ||
+      Rejected->getOperand(2).getReg() != TooWide)
+    fail("intrinsic failure left a partial rewrite", &MF);
+
+  // Generated constant narrowing retains its signed-or-unsigned fit rule.
+  for (int64_t Value : {-1, 65535, 65536}) {
+    B.setInsertPt(*MBB, MBB->end());
+    Register First = B.buildUndef(I32).getReg(0);
+    Register Source = B.buildConstant(I64, Value).getReg(0);
+    MachineInstr *MI = B.buildInstr(TargetOpcode::G_INTRINSIC)
+                           .addIntrinsicID(Intrinsic::smax)
+                           .addUse(First)
+                           .addUse(Source)
+                           .getInstr();
+    const bool Narrow = Configured && Value != 65536;
+    Step(*MI, !Configured || Narrow);
+    Register Rewritten = MI->getOperand(2).getReg();
+    if (MRI.getType(Rewritten) != (Narrow ? I16 : I64) ||
+        (!Narrow && Rewritten != Source))
+      fail("intrinsic constant narrowing violated the selected policy", &MF);
+    if (Narrow &&
+        MRI.getVRegDef(Rewritten)->getOperand(1).getCImm()->getValue() != 65535)
+      fail("intrinsic narrowing changed the constant payload", &MF);
+  }
+
+  // The generated fixture lacks G_CONSTANT i64. Generic mode must ignore that
+  // exclusion; generated mode must reject materialization before changing MI.
+  B.setInsertPt(*MBB, MBB->end());
+  Register FC = B.buildFConstant(LLT::floatIEEE(64), 1.5).getReg(0);
+  MachineInstr *Bits = B.buildInstr(TargetOpcode::G_INTRINSIC)
+                           .addIntrinsicID(Intrinsic::ctlz)
+                           .addUse(FC)
+                           .getInstr();
+  const auto BeforeBits = MBB->size();
+  Step(*Bits, !Configured);
+  if (Strict) {
+    if (Bits->getOperand(1).getReg() != FC || MBB->size() != BeforeBits)
+      fail("intrinsic materialized an unsupported integer constant", &MF);
+  } else if (MRI.getType(Bits->getOperand(1).getReg()) != I64) {
+    fail("generic intrinsic consulted generated constant constraints", &MF);
+  }
+
+  if (!Strict || Configured) {
+    // Also exercise the whole-function worklist, including the newly emitted
+    // extension artifacts and the producers legalized around the intrinsic.
+    MachineFunction &WholeMF = TC.makeFunction("intrinsic_whole_function");
+    MachineBasicBlock *WholeMBB = WholeMF.CreateMachineBasicBlock();
+    WholeMF.push_back(WholeMBB);
+    MachineIRBuilder WB(WholeMF);
+    WB.setMBB(*WholeMBB);
+    Register Left = WB.buildUndef(I8).getReg(0);
+    Register Right = WB.buildUndef(I8).getReg(0);
+    Register Result = WholeMF.getRegInfo().createGenericVirtualRegister(I32);
+    WB.buildInstr(TargetOpcode::G_INTRINSIC)
+        .addDef(Result)
+        .addIntrinsicID(Intrinsic::smax)
+        .addUse(Left)
+        .addUse(Right);
+    keepAlive(WB, WholeMF.getRegInfo(), Result);
+    legalizeAll(TC, WholeMF);
+    MachineInstr *MI = findUniqueOpcode(WholeMF, TargetOpcode::G_INTRINSIC);
+    if (WholeMF.getRegInfo().getType(MI->getOperand(2).getReg()) !=
+            (Configured ? I32 : I16) ||
+        WholeMF.getRegInfo().getType(MI->getOperand(3).getReg()) != I16)
+      fail("whole-function intrinsic used the wrong carrier policy", &WholeMF);
+  }
+}
+
 void runMIRTests(bool Strict, bool Missing) {
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
@@ -576,10 +749,10 @@ void runMIRTests(bool Strict, bool Missing) {
   if (!TM)
     fail("could not construct the native test TargetMachine");
   TestContext TC(std::move(TM));
+  checkIntrinsicPolicies(TC, Strict, Missing);
   checkURemDependencies(TC, Strict, Missing);
-  if (Missing) {
-    if (Strict)
-      checkRejectedSelectDoesNotChangeCFG(TC);
+  if (Missing && Strict) {
+    checkRejectedSelectDoesNotChangeCFG(TC);
     return;
   }
   if (!Strict) {
@@ -589,13 +762,15 @@ void runMIRTests(bool Strict, bool Missing) {
     checkCrossBlockFallback(TC);
     checkRawDefinedExtensionBoundary(TC);
   }
-  checkConstrainedProducerFallback(TC);
-  checkBrCondConfiguredPromotion(TC);
+  if (Strict) {
+    checkConstrainedProducerFallback(TC);
+    checkICmpMultipleUseBoundary(TC);
+  }
+  checkBrCondConfiguredPromotion(TC, Strict);
   checkBrCondCompareCarrier(TC);
-  checkICmpUsesWiderBrCondCarrier(TC);
-  checkICmpMultipleUseBoundary(TC);
-  checkSelectEmitsSupportedBrCond(TC);
-  checkFloatConstantAndComparison(TC);
+  checkICmpUsesWiderBrCondCarrier(TC, Strict);
+  checkSelectEmitsSupportedBrCond(TC, Strict);
+  checkFloatConstantAndComparison(TC, Strict);
   checkFMaximumRemainsOrdinaryOperation(TC);
   checkI1MemoryExpansion(TC);
 }

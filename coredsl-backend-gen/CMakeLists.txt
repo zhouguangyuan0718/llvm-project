@@ -64,9 +64,9 @@ if(BUILD_TESTING)
   set_tests_properties(coredsl-legalizer-mustache-source PROPERTIES
     PASS_REGULAR_EXPRESSION
       "static_cast<unsigned>\\(TargetOpcode::G_BRCOND\\)")
-  # Compile rendered templates and exercise LLVM legality queries. The fixtures
-  # use no target intrinsics, so no fabricated intrinsic header is necessary.
-  foreach(Fixture IN ITEMS policy missing)
+  # Compile rendered templates and exercise LLVM legality queries. Intrinsic
+  # fixtures use built-in IDs, so no fabricated target header is necessary.
+  foreach(Fixture IN ITEMS policy missing ignored)
     set(LegalizerTestDirectory "${CMAKE_CURRENT_BINARY_DIR}/legalizer-${Fixture}")
     set(LegalizerTestTarget "coredsl-legalizer-${Fixture}")
     set(LegalizerFixture "${CMAKE_CURRENT_SOURCE_DIR}/test/GlobalISel/${Fixture}.json")
@@ -122,8 +122,12 @@ if(BUILD_TESTING)
     add_test(NAME ${LegalizerTestTarget}-default COMMAND ${LegalizerTestTarget})
     add_test(NAME ${LegalizerTestTarget}-fallback
       COMMAND ${LegalizerTestTarget} -Example-use-legalizer=false)
-    add_test(NAME ${LegalizerTestTarget}-strict
-      COMMAND ${LegalizerTestTarget} -Example-use-legalizer=true -expect-strict)
+    # The ignored fixture deliberately has unusable generated constraints. Only
+    # the generic policy should run it; even construction must ignore its list.
+    if(NOT Fixture STREQUAL "ignored")
+      add_test(NAME ${LegalizerTestTarget}-strict
+        COMMAND ${LegalizerTestTarget} -Example-use-legalizer=true -expect-strict)
+    endif()
   endforeach()
 
   add_test(
