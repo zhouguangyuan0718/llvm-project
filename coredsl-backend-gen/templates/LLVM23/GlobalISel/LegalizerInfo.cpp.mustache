@@ -774,6 +774,57 @@ static bool legalizeBrCondICmp(LegalizerHelper &Helper, MachineInstr &Cmp) {
   return true;
 }
 
+// An AND cannot introduce set bits. A same-width path of already legal ANDs
+// and COPYs ending at a literal one therefore proves a zero-or-one result.
+// Do not use casts or operations that still need widening as proof: their
+// later legalization may introduce unspecified high bits. This only queries
+// the graph; a dynamic zero-or-one operand must never be replaced by one.
+static bool isLegalAndChainLowBitOnly(LegalizerHelper &Helper, Register Reg) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const LLT Ty = MRI.getType(Reg);
+  if (!isNativeIntegerType(Ty))
+    return false;
+  const LegalizerInfo &LI = Helper.getLegalizerInfo();
+  SmallVector<Register, 16> Pending{Reg};
+  SmallPtrSet<MachineInstr *, 16> Visited;
+  unsigned Budget = 64;
+  while (!Pending.empty() && Budget--) {
+    Register Current = Pending.pop_back_val();
+    if (!Current.isVirtual() || !hasExactType(Ty, MRI.getType(Current)))
+      continue;
+    MachineInstr *Def = MRI.getVRegDef(Current);
+    if (!Def || !Visited.insert(Def).second ||
+        Def->getNumExplicitDefs() != 1)
+      continue;
+    if (Def->getOpcode() == TargetOpcode::G_CONSTANT) {
+      if (Def->getOperand(1).isCImm() &&
+          Def->getOperand(1).getCImm()->getValue().isOne() &&
+          LI.getAction(*Def, MRI).Action == LegalizeActions::Legal)
+        return true;
+      continue;
+    }
+    if (Def->getOpcode() == TargetOpcode::COPY) {
+      if (Def->getNumExplicitOperands() == 2 && Def->getOperand(1).isReg())
+        Pending.push_back(Def->getOperand(1).getReg());
+      continue;
+    }
+    if (Def->getOpcode() != TargetOpcode::G_AND ||
+        Def->getNumExplicitOperands() != 3 ||
+        LI.getAction(*Def, MRI).Action != LegalizeActions::Legal)
+      continue;
+    bool SameType = true;
+    for (unsigned I = 1; I != 3; ++I)
+      SameType &= Def->getOperand(I).isReg() &&
+                  Def->getOperand(I).getReg().isVirtual() &&
+                  hasExactType(Ty, MRI.getType(Def->getOperand(I).getReg()));
+    if (SameType) {
+      Pending.push_back(Def->getOperand(1).getReg());
+      Pending.push_back(Def->getOperand(2).getReg());
+    }
+  }
+  return false;
+}
+
 // AND x, 1 (or AND 1, x) produces exactly zero or one, so its native
 // result can replace any integer truncation/extension on the branch edge.
 static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
@@ -803,7 +854,7 @@ static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
     }
   }
   if (!MaskIndex)
-    return false;
+    return isLegalAndChainLowBitOnly(Helper, MI.getOperand(0).getReg());
 
   const LegalizerInfo &LI = Helper.getLegalizerInfo();
   const auto Step = LI.getAction(MI, MRI);

@@ -396,10 +396,20 @@ The same direct-result optimization also recognizes `G_AND x, 1` and
 is unnecessary. If AND needs widening, its mask is explicitly materialized as
 the numeric value `1` in the native carrier rather than any-extending the old
 mask. Masks recognized through constant copies or defined casts are stabilized
-the same way. Other masks and variable masks are not optimized; ANYEXT's
+the same way. Other masks and unproven variable masks are not optimized; ANYEXT's
 unspecified high bits are not treated as proof of a mask equal to one. Other
 users still keep their original result types. No general arithmetic-result
 optimization is enabled.
+
+Already legal same-width AND chains also qualify when following AND operands
+and same-type COPYs reaches a legal literal `1`: an AND cannot introduce set
+bits, so every result on that path is zero or one. For example,
+`b = x & 1; c = y & b; BRCOND (TRUNC c)` can branch directly on `c` without
+changing either AND. In particular, the dynamic operand `b` is not replaced
+by the constant `1`. This read-only proof visits at most 64 entries, guards
+against cycles, and stops at casts, PHIs, FREEZE, other operations, and ANDs
+that still need legalization. The original direct-AND-one widening path is
+unchanged; other users keep their original narrow results.
 
 Scalar `G_UREM x, y` uses the existing opcode-specific type and promotion
 rules, but its accepted scalar form now has a value-dependent custom step.
@@ -419,6 +429,8 @@ When the native target's CodeGen library is available, CTest's
 `coredsl-icmp-brcond` test compiles the rendered example and checks both visit
 orders, native adapters, long copy chains, other users, cross-block edges and
 non-comparison boundaries, plus AND-by-one widening and negative mask cases.
+AND-chain tests cover nested/commuted operands, COPYs, unchanged dynamic masks,
+other narrow users, traversal limits, and unsupported-width/cast boundaries.
 It also checks constant and dynamic power-of-two remainder, non-rewritten
 divisors, missing replacement operations, and remainder-by-two branch edges.
 These MIR tests do not validate another target's
