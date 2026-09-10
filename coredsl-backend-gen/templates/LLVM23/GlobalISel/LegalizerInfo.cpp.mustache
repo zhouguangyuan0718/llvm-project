@@ -2,11 +2,9 @@
 
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/GlobalISel/GenericMachineInstrs.h"
-#include "llvm/CodeGen/GlobalISel/GISelValueTracking.h"
 #include "llvm/CodeGen/GlobalISel/LegalizerHelper.h"
 #include "llvm/CodeGen/GlobalISel/MachineIRBuilder.h"
 #include "llvm/CodeGen/GlobalISel/Utils.h"
@@ -691,20 +689,34 @@ static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
   return LLT{};
 }
 
-// Only look through adapters to ICMP or a candidate AND-by-one producer.
-// The latter's constant mask is checked before modifying either instruction.
-// Do not cross arithmetic, PHIs or FREEZE. Other users of the narrow result or
-// of these adapters keep their original registers and types.
-static MachineInstr *findBrCondBooleanProducer(MachineRegisterInfo &MRI,
+struct BrCondSource {
+  Register Carrier;
+  MachineInstr *Producer = nullptr;
+};
+
+// G_BRCOND observes only bit 0, including for wide conditions (see
+// MachineIRBuilder::buildBrCond). Integer adapters preserve that bit, so an
+// existing native source can bypass them without proving its high bits zero.
+// Stop at arithmetic, PHIs and FREEZE; never bypass the operation itself.
+// ICMP and AND are also returned for the existing eager legalization policy.
+static BrCondSource findBrCondSource(MachineRegisterInfo &MRI,
                                     Register ConditionReg) {
+  BrCondSource Result;
   SmallPtrSet<MachineInstr *, 8> Visited;
   while (ConditionReg.isVirtual()) {
+    const LLT DstTy = MRI.getType(ConditionReg);
+    if (!DstTy.isInteger())
+      return Result;
     MachineInstr *DefMI = MRI.getVRegDef(ConditionReg);
     if (!DefMI || !Visited.insert(DefMI).second)
-      return nullptr;
+      return {};
+    if (isNativeIntegerType(DstTy))
+      Result.Carrier = ConditionReg;
     if (DefMI->getOpcode() == TargetOpcode::G_ICMP ||
-        DefMI->getOpcode() == TargetOpcode::G_AND)
-      return DefMI;
+        DefMI->getOpcode() == TargetOpcode::G_AND) {
+      Result.Producer = DefMI;
+      return Result;
+    }
     switch (DefMI->getOpcode()) {
     case TargetOpcode::COPY:
     case TargetOpcode::G_TRUNC:
@@ -713,23 +725,32 @@ static MachineInstr *findBrCondBooleanProducer(MachineRegisterInfo &MRI,
     case TargetOpcode::G_SEXT:
       break;
     default:
-      return nullptr;
+      return Result;
     }
     if (DefMI->getNumExplicitDefs() != 1 ||
         DefMI->getNumExplicitOperands() != 2 ||
         !DefMI->getOperand(1).isReg() ||
         !DefMI->getOperand(1).getReg().isVirtual())
-      return nullptr;
+      return Result;
     const Register SourceReg = DefMI->getOperand(1).getReg();
-    const LLT DstTy = MRI.getType(ConditionReg);
     const LLT SrcTy = MRI.getType(SourceReg);
     if (!DstTy.isInteger() || !SrcTy.isInteger() ||
         (DefMI->getOpcode() == TargetOpcode::COPY &&
          !hasExactType(DstTy, SrcTy)))
-      return nullptr;
+      return Result;
     ConditionReg = SourceReg;
   }
-  return nullptr;
+  return Result;
+}
+
+static void setBrCondCarrier(LegalizerHelper &Helper, MachineInstr &Branch,
+                             Register Carrier) {
+  if (Branch.getOperand(0).getReg() == Carrier)
+    return;
+  Helper.Observer.changingInstr(Branch);
+  Branch.getOperand(0).setReg(Carrier);
+  Branch.getOperand(0).setIsKill(false);
+  Helper.Observer.changedInstr(Branch);
 }
 
 // Preflight the existing ICMP rules before touching MIR. On this policy an
@@ -865,21 +886,18 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   // Finalize the producer first, then select its actual result register rather
   // than predicting a width and extending the old narrow result. This also
   // handles a branch whose adapter already has a native (but smaller) type.
-  if (MachineInstr *Producer = findBrCondBooleanProducer(MRI, ConditionReg)) {
+  BrCondSource Source = findBrCondSource(MRI, ConditionReg);
+  if (MachineInstr *Producer = Source.Producer) {
     const bool Legalized = Producer->getOpcode() == TargetOpcode::G_ICMP
                                ? legalizeBrCondICmp(Helper, *Producer)
                                : legalizeBrCondAndOne(Helper, *Producer);
-    if (Legalized) {
-      const Register ProducerReg = Producer->getOperand(0).getReg();
-      if (ProducerReg != ConditionReg) {
-        Helper.Observer.changingInstr(MI);
-        MI.getOperand(0).setReg(ProducerReg);
-        MI.getOperand(0).setIsKill(false);
-        Helper.Observer.changedInstr(MI);
-      }
-      Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-      return true;
-    }
+    if (Legalized)
+      Source.Carrier = Producer->getOperand(0).getReg();
+  }
+  if (Source.Carrier.isValid()) {
+    setBrCondCarrier(Helper, MI, Source.Carrier);
+    Helper.MIRBuilder.setInstrAndDebugLoc(MI);
+    return true;
   }
   if (isNativeIntegerType(ConditionTy))
     return true;
@@ -899,89 +917,6 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
   return true;
 }
 
-// Track only zero bits that remain valid after this target's legalization.
-// In particular, do not rely on ZEXT/SEXT's high bits: this policy later
-// normalizes those instructions to ANYEXT. Unsupported/unfinalized producers
-// and operations outside this small set contribute no known bits.
-static APInt getStableBranchKnownZeroes(
-    LegalizerHelper &Helper, Register Reg, unsigned &Budget,
-    DenseMap<Register, APInt> &Cache) {
-  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  const LLT Ty = MRI.getType(Reg);
-  const unsigned Bits = Ty.getScalarSizeInBits();
-  auto It = Cache.find(Reg);
-  if (It != Cache.end())
-    return It->second;
-  APInt Zeroes(Bits, 0);
-  if (!Budget)
-    return Zeroes;
-  --Budget;
-  Cache.try_emplace(Reg, Zeroes); // Also break cycles conservatively.
-  MachineInstr *Def = MRI.getVRegDef(Reg);
-  if (!Def || Def->getNumExplicitDefs() != 1)
-    return Zeroes;
-  const unsigned Opcode = Def->getOpcode();
-  if (Opcode != TargetOpcode::COPY) {
-    if (!isPreISelGenericOpcode(Opcode))
-      return Zeroes;
-    const auto Action = Helper.getLegalizerInfo().getAction(*Def, MRI).Action;
-    if (Action != LegalizeActions::Legal &&
-        !(Opcode == TargetOpcode::G_TRUNC && Action == LegalizeActions::Custom))
-      return Zeroes;
-  }
-  auto IsIntegerUse = [&](unsigned I) {
-    return I < Def->getNumExplicitOperands() && Def->getOperand(I).isReg() &&
-           Def->getOperand(I).getReg().isVirtual() &&
-           MRI.getType(Def->getOperand(I).getReg()).isInteger();
-  };
-  auto SourceZeroes = [&](unsigned I) {
-    return getStableBranchKnownZeroes(Helper, Def->getOperand(I).getReg(),
-                                     Budget, Cache);
-  };
-  switch (Opcode) {
-  case TargetOpcode::G_CONSTANT:
-    if (Def->getOperand(1).isCImm())
-      Zeroes = ~Def->getOperand(1).getCImm()->getValue().zextOrTrunc(Bits);
-    break;
-  case TargetOpcode::COPY:
-  case TargetOpcode::G_TRUNC:
-  case TargetOpcode::G_ANYEXT:
-    if (IsIntegerUse(1) &&
-        (Opcode != TargetOpcode::COPY ||
-         hasExactType(Ty, MRI.getType(Def->getOperand(1).getReg()))))
-      Zeroes = SourceZeroes(1).zextOrTrunc(Bits);
-    break;
-  case TargetOpcode::G_AND:
-  case TargetOpcode::G_OR:
-  case TargetOpcode::G_XOR:
-    if (!IsIntegerUse(1) || !IsIntegerUse(2) ||
-        !hasExactType(Ty, MRI.getType(Def->getOperand(1).getReg())) ||
-        !hasExactType(Ty, MRI.getType(Def->getOperand(2).getReg())))
-      break;
-    Zeroes = SourceZeroes(2);
-    if (Opcode == TargetOpcode::G_AND) {
-      if (Zeroes.countLeadingOnes() < Bits - 1)
-        Zeroes |= SourceZeroes(1);
-    } else {
-      Zeroes &= SourceZeroes(1);
-    }
-    break;
-  case TargetOpcode::G_ICMP:
-  case TargetOpcode::G_FCMP:
-    if (auto *VT = Helper.getValueTracking()) {
-      Zeroes = VT->getKnownZeroes(Reg);
-    } else {
-      GISelValueTracking LocalVT(Helper.MIRBuilder.getMF());
-      Zeroes = LocalVT.getKnownZeroes(Reg);
-    }
-    break;
-  default:
-    break;
-  }
-  Cache[Reg] = Zeroes;
-  return Zeroes;
-}
-
 // TRUNC artifacts are revisited after ordinary producer legalization. Recheck
 // their branch users here: a SELECT-created branch may already have accepted
 // its i1 condition before an AND was widened and a masking AND was generated.
@@ -999,17 +934,11 @@ static bool applyTruncBrCondRewrite(LegalizerHelper &Helper, MachineInstr &MI) {
       Branches.push_back(&Use);
   if (Branches.empty())
     return true;
-  unsigned Budget = 64;
-  DenseMap<Register, APInt> Cache;
-  const APInt Zeroes = getStableBranchKnownZeroes(Helper, Src, Budget, Cache);
-  if (Zeroes.countLeadingOnes() < Zeroes.getBitWidth() - 1)
+  const Register Carrier = findBrCondSource(MRI, Dst).Carrier;
+  if (!Carrier.isValid())
     return true;
-  for (MachineInstr *Branch : Branches) {
-    Helper.Observer.changingInstr(*Branch);
-    Branch->getOperand(0).setReg(Src);
-    Branch->getOperand(0).setIsKill(false);
-    Helper.Observer.changedInstr(*Branch);
-  }
+  for (MachineInstr *Branch : Branches)
+    setBrCondCarrier(Helper, *Branch, Carrier);
   // Other users still require the original narrow result. Remove the artifact
   // only when no use remains; never rewrite the boolean-producing arithmetic.
   if (MRI.use_empty(Dst))

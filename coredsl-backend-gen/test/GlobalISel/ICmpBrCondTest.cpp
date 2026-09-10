@@ -380,9 +380,9 @@ static void checkOtherAndMasks(TestContext &TC, int MaskValue, bool Variable,
   const auto Size = Entry->size();
   if (Helper.legalizeInstrStep(*Branch, LocObserver) ==
           LegalizerHelper::UnableToLegalize ||
-      Branch->getOperand(0).getReg() != Condition || Entry->size() != Size ||
+      Branch->getOperand(0).getReg() != Result || Entry->size() != Size ||
       And->getOperand(2).getReg() != Mask)
-    fail("AND with a mask other than exact one was rewritten", MF);
+    fail("branch did not bypass adapters or changed the non-one mask", MF);
 }
 
 static void checkURem(TestContext &TC, unsigned Bits, uint64_t DivisorValue,
@@ -614,10 +614,10 @@ static void checkSelectComparisons(TestContext &TC, unsigned InputBits) {
                                        Pred);
 }
 
-static void checkTruncBranchProof(TestContext &TC, int MaskValue,
-                                  unsigned Adapter, unsigned Bits = 32,
-                                  unsigned CopyDepth = 0, bool Swap = false) {
-  MachineFunction &MF = TC.makeFunction("trunc_branch_proof");
+static void checkTruncBranchBitZero(TestContext &TC, int MaskValue,
+                                    unsigned Adapter, unsigned Bits = 32,
+                                    unsigned CopyDepth = 0, bool Swap = false) {
+  MachineFunction &MF = TC.makeFunction("trunc_branch_bit_zero");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
   MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
   MF.push_back(Entry);
@@ -664,23 +664,74 @@ static void checkTruncBranchProof(TestContext &TC, int MaskValue,
   MachineInstr *Branch = B.buildBrCond(Narrow, *Target).getInstr();
   GISelObserverWrapper Observer;
   LegalizerHelper Helper(MF, TC.LI, Observer, B);
-  LostDebugLocObserver LocObserver("trunc-branch-proof-step");
-  const bool Expected = Bits == 32 &&
-                        (!Adapter || Adapter == TargetOpcode::G_OR ||
-                         Adapter == TargetOpcode::G_XOR) &&
-                        CopyDepth < 64 && (MaskValue == 0 || MaskValue == 1);
+  LostDebugLocObserver LocObserver("trunc-branch-bit-zero-step");
+  // The outer AND's high bits, operands and pending legalization are not
+  // relevant: TRUNC and G_BRCOND both observe the same bit 0 of its result.
   const auto Size = Entry->size();
   for (unsigned I = 0; I != 2; ++I)
     if (Helper.legalizeInstrStep(*Trunc, LocObserver) !=
             LegalizerHelper::Legalized ||
-        Branch->getOperand(0).getReg() != (Expected ? Value : Narrow) ||
-        Entry->size() != Size)
-      fail("late truncation proof failed or was not idempotent", MF);
+        Branch->getOperand(0).getReg() != Value || Entry->size() != Size)
+      fail("late bit-zero rewrite failed or was not idempotent", MF);
   if (Outer->getOperand(Swap ? 2 : 1).getReg() != A ||
       Outer->getOperand(Swap ? 1 : 2).getReg() != DynamicMask ||
       Inner->getOperand(Swap ? 1 : 2).getReg() != Mask ||
       Other->getOperand(1).getReg() != Narrow || MRI.getType(Narrow) != I1)
-    fail("late truncation proof changed arithmetic or another user", MF);
+    fail("late bit-zero rewrite changed arithmetic or another user", MF);
+}
+
+static void checkBranchTruncContract(TestContext &TC, unsigned Bits, int Value,
+                                     bool Late, bool OtherUse,
+                                     unsigned ProducerOpcode) {
+  MachineFunction &MF = TC.makeFunction("branch_trunc_contract");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Target = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Target);
+  Entry->addSuccessor(Target);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  auto &MRI = MF.getRegInfo();
+  const LLT Ty = LLT::integer(Bits), I1 = LLT::integer(1);
+  Register Source = B.buildConstant(Ty, Value).getReg(0);
+  if (ProducerOpcode == TargetOpcode::G_FREEZE)
+    Source = B.buildFreeze(Ty, Source).getReg(0);
+  else if (ProducerOpcode == TargetOpcode::G_ADD)
+    Source = B.buildAdd(Ty, Source, B.buildUndef(Ty).getReg(0)).getReg(0);
+  MachineInstr *Producer = MRI.getVRegDef(Source);
+  MachineInstr *Trunc = B.buildTrunc(I1, Source).getInstr();
+  Register Narrow = Trunc->getOperand(0).getReg();
+  MachineInstr *Other = nullptr;
+  if (OtherUse)
+    Other =
+        B.buildCopy(MRI.createGenericVirtualRegister(I1), Narrow).getInstr();
+  MachineInstr *Branch = B.buildBrCond(Narrow, *Target).getInstr();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("branch-trunc-contract-step");
+  const auto Size = Entry->size();
+  const bool Supported = Bits == 16 || Bits == 32 || Bits == 64;
+  const auto ExpectedAction = Late && !Supported
+                                  ? LegalizerHelper::UnableToLegalize
+                                  : LegalizerHelper::Legalized;
+  if (Helper.legalizeInstrStep(Late ? *Trunc : *Branch, LocObserver) !=
+          ExpectedAction ||
+      Branch->getOperand(0).getReg() != (Supported ? Source : Narrow) ||
+      MRI.getVRegDef(Source) != Producer ||
+      Entry->size() != Size - unsigned(Supported && Late && !OtherUse))
+    fail("branch/trunc entry points disagree on the bit-zero contract", MF);
+  if (Other &&
+      (Other->getOperand(1).getReg() != Narrow || MRI.getType(Narrow) != I1))
+    fail("branch truncation rewrite changed another narrow user", MF);
+  if (ProducerOpcode == TargetOpcode::G_CONSTANT) {
+    const APInt &Wide = Producer->getOperand(1).getCImm()->getValue();
+    if (Wide.trunc(1)[0] != Wide[0])
+      fail("truncation did not preserve branch bit 0", MF);
+    // In particular, 2 is false and 3 is true. Nonzero is not the generic
+    // branch contract, and no mask should have been inserted above.
+    if (Wide[0] != ((Value & 1) != 0))
+      fail("unexpected constant branch truth bit", MF);
+  }
 }
 
 static void checkLateSelectAnd(TestContext &TC, bool UseCSE, bool OtherUse,
@@ -775,15 +826,22 @@ int main() {
   for (int Mask : {0, 1, 2, 3, -1})
     for (bool Swap : {false, true}) {
       for (unsigned Depth : {0, 8, 128})
-        checkTruncBranchProof(TC, Mask, 0, 32, Depth, Swap);
+        checkTruncBranchBitZero(TC, Mask, 0, 32, Depth, Swap);
       for (unsigned Op : {TargetOpcode::G_OR, TargetOpcode::G_XOR})
-        checkTruncBranchProof(TC, Mask, Op, 32, 0, Swap);
+        checkTruncBranchBitZero(TC, Mask, Op, 32, 0, Swap);
     }
   for (unsigned Adapter :
        {TargetOpcode::G_ANYEXT, TargetOpcode::G_ZEXT, TargetOpcode::G_SEXT,
         TargetOpcode::G_FREEZE, TargetOpcode::G_IMPLICIT_DEF})
-    checkTruncBranchProof(TC, 1, Adapter);
-  checkTruncBranchProof(TC, 1, 0, 16);
+    checkTruncBranchBitZero(TC, 1, Adapter);
+  checkTruncBranchBitZero(TC, 1, 0, 16);
+  for (unsigned Bits : {8, 16, 32, 64, 128})
+    for (int Value : {0, 1, 2, 3, -1})
+      for (bool Late : {false, true})
+        for (bool OtherUse : {false, true})
+          for (unsigned Op : {TargetOpcode::G_CONSTANT, TargetOpcode::G_ADD,
+                              TargetOpcode::G_FREEZE})
+            checkBranchTruncContract(TC, Bits, Value, Late, OtherUse, Op);
   for (bool UseCSE : {false, true})
     for (bool OtherUse : {false, true})
       for (bool SelectFirst : {false, true})

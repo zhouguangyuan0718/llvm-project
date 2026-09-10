@@ -404,27 +404,33 @@ The same direct-result optimization also recognizes `G_AND x, 1` and
 is unnecessary. If AND needs widening, its mask is explicitly materialized as
 the numeric value `1` in the native carrier rather than any-extending the old
 mask. Masks recognized through constant copies or defined casts are stabilized
-the same way. At this early branch rewrite, other masks and variable masks are
-not optimized; ANYEXT's unspecified high bits are not treated as proof of a
-mask equal to one. Other
-users still keep their original result types. No general arithmetic-result
-optimization is enabled.
+the same way. Other masks and variable masks are not rematerialized or eagerly
+widened by this producer-specific rule. They can still use the shared adapter
+rewrite below. Other users keep their original result types.
+
+All branch adapter elimination follows the generic `G_BRCOND` contract in
+`MachineIRBuilder::buildBrCond`: even a wide condition is observed only at bit
+0. Same-type COPY and integer TRUNC/ANYEXT/ZEXT/SEXT preserve that bit. Both the
+ordinary branch path and late truncation path use the same source lookup and
+operand update. An existing native source can bypass these adapters without
+proving its high bits zero or analyzing the operands of its producer. The
+lookup stops at arithmetic, PHI and FREEZE, retaining that operation's result;
+it does not bypass the operation itself. Cycles are rejected.
 
 Supported `G_TRUNC` pairs also have a late custom step for direct `G_BRCOND`
 users. A branch emitted by SELECT may accept its i1 condition before ordinary
 AND widening creates a `TRUNC i32 -> i1`. At that artifact's legalization step,
-the branch can use the native source directly if every source bit above bit 0
-is provably zero. This handles a dynamic mask such as
+the branch can use the native source directly because TRUNC preserves bit 0.
+This also handles unknown high bits and dynamic masks such as
 `AND a, (AND b, 1)` without changing either AND or its operands. Conversions
 still required by the arithmetic, such as ICMP's i64-to-i32 input to AND, remain.
 Other narrow users keep the truncation; a now-unused truncation is removed.
 
-The proof examines at most 64 distinct registers and only stable facts from currently
-legal constants, AND/OR/XOR, comparisons, same-type COPY and supported
-TRUNC/ANYEXT adapters. ANYEXT adds no high-bit facts. Pending widening,
-ZEXT/SEXT (which this policy later turns into ANYEXT), PHI, FREEZE, unknown
-values and unsupported operations do not supply proof. Ordinary truncations
-with no provably redundant branch edge are accepted unchanged.
+Ordinary truncations with no eligible branch user are accepted unchanged.
+Target branch lowering must implement the generic bit-0 contract. If the
+selected instruction tests whole-register nonzero, its lowering must test bit
+0 explicitly or mask the condition with `AND Src, 1`; a high-bit proof in just
+one legalizer path cannot substitute for that target-wide requirement.
 
 Scalar `G_UREM x, y` uses the existing opcode-specific type and promotion
 rules, but its accepted scalar form now has a value-dependent custom step.
@@ -443,7 +449,7 @@ condition uses the legalized float input's same-width integer carrier. An
 When the native target's CodeGen library is available, CTest's
 `coredsl-icmp-brcond` test compiles the rendered example and checks both visit
 orders, native adapters, long copy chains, other users, cross-block edges and
-non-comparison boundaries, plus AND-by-one widening and negative mask cases.
+non-comparison boundaries, plus AND-by-one widening and other mask cases.
 It also checks constant and dynamic power-of-two remainder, non-rewritten
 divisors, missing replacement operations, and remainder-by-two branch edges.
 SELECT tests cover comparison-first and SELECT-first processing, full worklist
@@ -456,8 +462,10 @@ i1/i16/i32/i64, AND constrained to i32 and ICMP inputs to i64. It exercises an
 i1 ICMP/AND feeding a floating-point SELECT, with CSE on/off, both visit orders
 and other narrow users. The issue's omitted dynamic-mask definition is modeled
 by remainder by two, so the masking AND is generated during legalization.
-One-step tests cover commuted operands, COPY chains, the proof budget, OR/XOR,
-unknown/non-boolean masks, pending widening and extension/FREEZE boundaries.
+One-step tests cover commuted operands, long COPY chains, OR/XOR,
+unknown/non-boolean masks, pending widening and extension/FREEZE operands.
+Both branch and truncation entry points are checked with constants including
+2 (false) and 3 (true), ADD/FREEZE results, other narrow users and native widths.
 These MIR tests do not validate another target's
 instruction selector.
 
