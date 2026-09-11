@@ -22,10 +22,8 @@ entry:
       @llvm.experimental.gc.statepoint.p0(
           i64 1, i32 0, ptr elementtype(void ()) @safepoint,
           i32 0, i32 0, i32 0, i32 0)
-      [ "deopt"(i64 1195461697, i64 15, i64 1,
-                  i64 1095520067, i64 11, ptr %home, i64 0, i64 8,
-                  i64 8, i64 8, i64 1, i64 64, i64 1, i64 1,
-                  i64 1095519299, i64 15),
+      [ "deopt"(i64 1195461697, ptr %home, i64 9, i64 1,
+                  i64 1095519299, i64 5),
         "gc-live"(ptr %home) ]
   %result = load ptr, ptr %home, align 8
   ret ptr %result
@@ -34,12 +32,12 @@ entry:
 ; X86-MIR-LABEL: name: active_scalar
 ; X86-MIR: fixedStack:
 ; X86-MIR-NEXT: - { id: 0, type: spill-slot, offset: 0, size: 8
-; X86-MIR: MOV64mr %fixed-stack.0{{.*}}%ir.home
+; X86-MIR: MOV64mr %fixed-stack.0
 ; X86-MIR: STATEPOINT{{.*}}%fixed-stack.0
 ; A64-MIR-LABEL: name: active_scalar
 ; A64-MIR: fixedStack:
 ; A64-MIR-NEXT: - { id: 0, type: spill-slot, offset: 8, size: 8
-; A64-MIR: STRXui {{.*}}%fixed-stack.0{{.*}}%ir.home
+; A64-MIR: STRXui {{.*}}%fixed-stack.0
 ; A64-MIR: STATEPOINT{{.*}}%fixed-stack.0
 
 ; The aggregate is split into multiple ABI pieces but has one complete home.
@@ -55,10 +53,8 @@ entry:
       @llvm.experimental.gc.statepoint.p0(
           i64 2, i32 0, ptr elementtype(void ()) @safepoint,
           i32 0, i32 0, i32 0, i32 0)
-      [ "deopt"(i64 1195461697, i64 15, i64 1,
-                  i64 1095520067, i64 11, ptr %home, i64 0, i64 24,
-                  i64 8, i64 8, i64 3, i64 64, i64 1, i64 5,
-                  i64 1095519299, i64 15) ]
+      [ "deopt"(i64 1195461697, ptr %home, i64 24, i64 5,
+                  i64 1095519299, i64 5) ]
   ret void
 }
 
@@ -81,10 +77,8 @@ entry:
       @llvm.experimental.gc.statepoint.p0(
           i64 3, i32 0, ptr elementtype(void ()) @safepoint,
           i32 0, i32 0, i32 0, i32 0)
-      [ "deopt"(i64 1195461697, i64 15, i64 1,
-                  i64 1095520067, i64 11, ptr %value.home, i64 0, i64 16,
-                  i64 8, i64 8, i64 2, i64 64, i64 1, i64 3,
-                  i64 1095519299, i64 15) ]
+      [ "deopt"(i64 1195461697, ptr %value.home, i64 16, i64 3,
+                  i64 1095519299, i64 5) ]
   ret void
 }
 

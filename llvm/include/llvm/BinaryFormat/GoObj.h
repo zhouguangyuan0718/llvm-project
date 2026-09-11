@@ -49,37 +49,34 @@ inline constexpr char FMVSymbolSuffixPrefix[] = "<goallc.fmv.";
 // both split and nosplit functions and never denotes a callsite.
 inline constexpr uint64_t EntryArgsStackMapID = 0x476f4e6f53706c74ULL;
 
-// GoALLC encodes pointer maps for fixed allocas as a self-describing suffix of
-// statepoint deopt locations:
+// GoALLC encodes pointer maps for fixed allocas as a self-describing suffix
+// of statepoint deopt locations:
 //
-//   ordinary-deopt*, BEGIN, protocol-length, record-count,
-//     (RECORD-TAG, record-length, direct-base, byte-offset, byte-size,
-//      alignment, pointer-size, contents-live, bit-count, word-bits,
-//      word-count, bitmap-word*)*,
+//   ordinary-deopt*, BEGIN,
+//     (direct-base, encoded-byte-size, bitmap-word*)*,
 //   END, protocol-length
 //
-// Protocol length counts BEGIN through END and excludes its trailing duplicate;
-// record length counts RECORD-TAG through the final bitmap word.
-// contents-live is zero or one and independently says whether the record's
-// contents contribute to that callsite's ArgsPointerMaps or
-// LocalsPointerMaps, according to the alloca's frame region. The direct alloca
-// may still occur in the statepoint gc-live operands when only its frame
-// address needs gc.relocate rematerialization; that occurrence never makes the
-// contents live by itself. A record with contents-live zero identifies a
-// function-level native Go StackObject; argument/result objects use a
-// non-negative argp-relative offset and local objects use a negative
-// varp-relative offset. The producer must repeat that same layout at every
-// ordinary statepoint. The direct address itself remains a rematerialized frame
-// index, not a bitmap slot. The first contract has no version, requires a whole
-// alloca at byte offset zero, and uses 64-bit bitmap words. Bit N, stored
-// low-bit first, describes the pointer-sized slot at direct-base + byte-offset
-// + N * pointer-size. Padding bits must be zero.
-// These tags are intentionally small enough to remain inline StackMaps
-// constants; bitmap payload words may use the StackMaps constant pool.
+// Protocol length counts BEGIN through END and excludes its trailing length.
+// Encoded byte size is byte-size | contents-live. Byte size is nonzero and
+// pointer-aligned, so its low bit is otherwise unused; contents-live says
+// whether the object's pointer words contribute to that callsite's
+// ArgsPointerMaps or LocalsPointerMaps. The bitmap word count is
+// ceil((byte-size / target-pointer-size) / 64). Bit N, stored low-bit first,
+// describes the pointer-sized slot at direct-base + N * pointer-size. Bitmap
+// padding bits are zero.
+//
+// The direct alloca may still occur in the statepoint gc-live operands when
+// only its frame address needs gc.relocate rematerialization; that occurrence
+// never makes the contents live by itself. A record with contents-live clear
+// identifies a function-level native Go StackObject; argument/result objects
+// use a non-negative argp-relative offset and local objects use a negative
+// varp-relative offset. The producer repeats the same layout at every ordinary
+// statepoint. The direct address itself remains a rematerialized frame index,
+// not a bitmap slot. These tags are intentionally small enough to remain
+// inline StackMaps constants; bitmap payload words may use the StackMaps
+// constant pool.
 inline constexpr int64_t AllocaPtrMapBeginMagic = 0x47414c41; // "GALA"
 inline constexpr int64_t AllocaPtrMapEndMagic = 0x414c4c43;   // "ALLC"
-inline constexpr int64_t AllocaPtrMapRecordTag = 0x414c4f43;  // "ALOC"
-inline constexpr uint32_t AllocaPtrMapBitmapWordBits = 64;
 
 // Open-coded defer frame locations are carried in the ordinary statepoint
 // deopt prefix. The alloca ptrmap envelope, when present, follows this record:
