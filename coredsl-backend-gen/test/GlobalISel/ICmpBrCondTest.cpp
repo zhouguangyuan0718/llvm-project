@@ -614,6 +614,84 @@ static void checkSelectComparisons(TestContext &TC, unsigned InputBits) {
                                        Pred);
 }
 
+static void checkSelectPreflight(TestContext &TC, bool HasTerminator,
+                                 bool BadValueType) {
+  MachineFunction &MF = TC.makeFunction("select_rejection_is_read_only");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Exit = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Exit);
+  Entry->addSuccessor(Exit);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  auto &MRI = MF.getRegInfo();
+  const LLT I32 = LLT::integer(32);
+  Register Condition =
+      B.buildUndef(LLT::integer(BadValueType ? 1 : 128)).getReg(0);
+  Register TrueValue = B.buildConstant(I32, 1).getReg(0);
+  Register FalseValue = B.buildConstant(I32, 0).getReg(0);
+  Register BadValue = B.buildUndef(LLT::integer(16)).getReg(0);
+  MachineInstr *Select =
+      B.buildSelect(I32, Condition, TrueValue, FalseValue).getInstr();
+  Register Result = Select->getOperand(0).getReg();
+  if (BadValueType)
+    Select->getOperand(3).setReg(BadValue);
+  if (HasTerminator)
+    B.buildBr(*Exit);
+  B.setMBB(*Exit);
+  B.buildInstr(TargetOpcode::G_PHI, {I32}, {}).addUse(Result).addMBB(Entry);
+  auto Snapshot = [&]() {
+    std::string Text;
+    raw_string_ostream OS(Text);
+    MF.print(OS);
+    return Text;
+  };
+  const std::string Before = Snapshot();
+  const unsigned RegCount = MRI.getNumVirtRegs();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("select-preflight-step");
+  // Bypass action-table filtering deliberately: the custom implementation must
+  // reject unsupported input without relying on its caller's legality query.
+  for (unsigned Attempt = 0; Attempt != 2; ++Attempt) {
+    if (TC.LI.legalizeCustom(Helper, *Select, LocObserver))
+      fail("invalid SELECT was accepted by the custom implementation", MF);
+    if (Snapshot() != Before || MRI.getNumVirtRegs() != RegCount ||
+        MRI.getVRegDef(Result) != Select)
+      fail("rejected SELECT changed MIR, CFG, PHIs or register state", MF);
+  }
+}
+
+static void checkSelectFallback(TestContext &TC) {
+  MachineFunction &MF = TC.makeFunction("select_condition_fallback");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  const LLT I32 = LLT::integer(32);
+  Register Condition = B.buildUndef(LLT::integer(8)).getReg(0);
+  Register T = B.buildConstant(I32, 1).getReg(0);
+  Register F = B.buildConstant(I32, 0).getReg(0);
+  MachineInstr *Select = B.buildSelect(I32, Condition, T, F).getInstr();
+  Register Result = Select->getOperand(0).getReg();
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("select-fallback-step");
+  if (Helper.legalizeInstrStep(*Select, LocObserver) !=
+      LegalizerHelper::Legalized)
+    fail("SELECT fallback expansion failed", MF);
+  MachineInstr &Branch = *Entry->getFirstTerminatorForward();
+  auto &MRI = MF.getRegInfo();
+  MachineInstr *Ext = MRI.getVRegDef(Branch.getOperand(0).getReg());
+  if (Branch.getOpcode() != TargetOpcode::G_BRCOND ||
+      Ext->getOpcode() != TargetOpcode::G_ANYEXT || Ext->getParent() != Entry ||
+      Ext->getOperand(1).getReg() != Condition ||
+      MRI.getType(Ext->getOperand(0).getReg()) != LLT::integer(16) ||
+      MRI.getVRegDef(Result)->getOpcode() != TargetOpcode::G_PHI ||
+      MF.size() != 4)
+    fail("SELECT did not finish CFG expansion using its fallback carrier", MF);
+}
+
 static void checkTruncBranchBitZero(TestContext &TC, int MaskValue,
                                     unsigned Adapter, unsigned Bits = 32,
                                     unsigned CopyDepth = 0, bool Swap = false) {
@@ -822,6 +900,10 @@ int main() {
   if (!TM)
     return 1;
   TestContext TC(std::move(TM));
+  for (bool HasTerminator : {false, true})
+    for (bool BadValueType : {false, true})
+      checkSelectPreflight(TC, HasTerminator, BadValueType);
+  checkSelectFallback(TC);
 #ifdef COREDSL_SELECT_AND_TEST
   for (int Mask : {0, 1, 2, 3, -1})
     for (bool Swap : {false, true}) {

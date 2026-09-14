@@ -344,8 +344,15 @@ merge block. This applies to integer, floating-point, and pointer values and to
 all selects, not only selects introduced by another generated rule. Instructions
 after the select and the original CFG successors are moved to the merge block;
 successor PHIs and the machine-function `NoPHIs` property are updated.
-The new BRCOND is immediately passed through the existing branch-carrier
-rewrite. An `ICMP i64 -> i1 -> SELECT` therefore connects the generated branch
+Before changing MIR or CFG, SELECT validates its operands and checks that a
+fallback branch carrier exists. It then resolves the condition through the
+same helper as ordinary BRCOND, while the original SELECT is still alive.
+From that point the expansion has no recoverable failure exit: block creation,
+branches and the result PHI are completed together. Unsupported input returns
+failure without modifying instructions, registers or CFG. A preflighted
+producer widening unexpectedly failing is an internal error, not an optional
+optimization miss.
+An `ICMP i64 -> i1 -> SELECT` therefore connects the generated branch
 directly to the legalized comparison result when i64 comparisons are supported,
 without first building SELECT's condition ZEXT/SEXT or waiting for a later
 worklist visit. SELECT value promotion/bitcasting and other narrow comparison

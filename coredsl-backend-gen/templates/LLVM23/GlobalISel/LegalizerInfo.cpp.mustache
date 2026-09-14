@@ -19,6 +19,7 @@
 #include "llvm/CodeGenTypes/LowLevelType.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics{{target}}.h"
+#include "llvm/Support/ErrorHandling.h"
 
 #include <cassert>
 #include <initializer_list>
@@ -792,7 +793,7 @@ static bool legalizeBrCondICmp(LegalizerHelper &Helper, MachineInstr &Cmp) {
   for (const auto &[TypeIdx, Ty] : Widenings) {
     Helper.MIRBuilder.setInstrAndDebugLoc(Cmp);
     if (Helper.widenScalar(Cmp, TypeIdx, Ty) != LegalizerHelper::Legalized)
-      return false;
+      report_fatal_error("preflighted branch ICMP widening failed");
   }
   return true;
 }
@@ -849,7 +850,7 @@ static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
   if (Step.Action == LegalizeActions::WidenScalar) {
     Helper.MIRBuilder.setInstrAndDebugLoc(MI);
     if (Helper.widenScalar(MI, 0, CarrierTy) != LegalizerHelper::Legalized)
-      return false;
+      report_fatal_error("preflighted branch AND widening failed");
   }
   const MachineInstr *MaskDef =
       MRI.getVRegDef(MI.getOperand(MaskIndex).getReg());
@@ -870,18 +871,37 @@ static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
   return true;
 }
 
-static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
-                                      MachineInstr &MI) {
-  if (MI.getOpcode() != TargetOpcode::G_BRCOND ||
-      MI.getNumExplicitOperands() < 1 || !MI.getOperand(0).isReg() ||
-      !MI.getOperand(0).getReg().isVirtual())
-    return false;
-
-  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
-  const Register ConditionReg = MI.getOperand(0).getReg();
+// Read-only eligibility check. A valid result guarantees a fallback even when
+// the optional producer rewrite is not applicable.
+static LLT getBrCondFallbackCarrier(MachineRegisterInfo &MRI,
+                                    Register ConditionReg) {
+  if (!ConditionReg.isVirtual())
+    return LLT{};
   const LLT ConditionTy = MRI.getType(ConditionReg);
   if (!ConditionTy.isInteger())
-    return false;
+    return LLT{};
+  const LLT NativeTy =
+      getNativeIntegerTypeForWidth(ConditionTy.getScalarSizeInBits());
+  if (!NativeTy.isValid() || hasExactType(ConditionTy, NativeTy))
+    return NativeTy;
+  const LLT CompareTy = getBrCondCompareCarrier(MRI, ConditionReg);
+  return isNativeIntegerType(CompareTy) &&
+                 CompareTy.getScalarSizeInBits() >=
+                     ConditionTy.getScalarSizeInBits()
+             ? CompareTy
+             : NativeTy;
+}
+
+// Called only after read-only validation has supplied a native fallback.
+// This stage may modify producers but has no recoverable failure exit.
+// Anchor stays alive throughout and supplies the insertion point/debug location
+// for a fallback extension, even if producer legalization moved the builder.
+static Register resolveBrCondCondition(LegalizerHelper &Helper,
+                                       Register ConditionReg, LLT FallbackTy,
+                                       MachineInstr &Anchor) {
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  assert(isNativeIntegerType(FallbackTy) &&
+         "branch condition requires a preflighted fallback");
 
   // Finalize the producer first, then select its actual result register rather
   // than predicting a width and extending the old narrow result. This also
@@ -894,26 +914,29 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
     if (Legalized)
       Source.Carrier = Producer->getOperand(0).getReg();
   }
-  if (Source.Carrier.isValid()) {
-    setBrCondCarrier(Helper, MI, Source.Carrier);
-    Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-    return true;
-  }
-  if (isNativeIntegerType(ConditionTy))
-    return true;
+  if (Source.Carrier.isValid())
+    return Source.Carrier;
+  if (hasExactType(MRI.getType(ConditionReg), FallbackTy))
+    return ConditionReg;
 
-  LLT CarrierTy = getBrCondCompareCarrier(MRI, ConditionReg);
-  if (!CarrierTy.isValid() ||
-      CarrierTy.getScalarSizeInBits() < ConditionTy.getScalarSizeInBits())
-    CarrierTy = getNativeIntegerTypeForWidth(
-        ConditionTy.getScalarSizeInBits());
-  if (!CarrierTy.isValid() || hasExactType(ConditionTy, CarrierTy))
+  Helper.MIRBuilder.setInstrAndDebugLoc(Anchor);
+  return Helper.MIRBuilder.buildAnyExt(FallbackTy, ConditionReg).getReg(0);
+}
+
+static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
+                                      MachineInstr &MI) {
+  if (MI.getOpcode() != TargetOpcode::G_BRCOND ||
+      MI.getNumExplicitOperands() < 1 || !MI.getOperand(0).isReg())
     return false;
-
-  Helper.Observer.changingInstr(MI);
+  const Register ConditionReg = MI.getOperand(0).getReg();
+  const LLT FallbackTy =
+      getBrCondFallbackCarrier(*Helper.MIRBuilder.getMRI(), ConditionReg);
+  if (!FallbackTy.isValid())
+    return false;
+  const Register Carrier =
+      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, MI);
+  setBrCondCarrier(Helper, MI, Carrier);
   Helper.MIRBuilder.setInstrAndDebugLoc(MI);
-  Helper.widenScalarSrc(MI, CarrierTy, 0, TargetOpcode::G_ANYEXT);
-  Helper.Observer.changedInstr(MI);
   return true;
 }
 
@@ -1021,6 +1044,15 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
       !hasExactType(DstTy, MRI.getType(FalseReg)) ||
       !MRI.getType(ConditionReg).isInteger())
     return false;
+  const LLT FallbackTy = getBrCondFallbackCarrier(MRI, ConditionReg);
+  if (!FallbackTy.isValid())
+    return false;
+
+  // All rejecting checks precede any MIR/CFG changes. Resolve the condition
+  // while SELECT is still alive, using the same policy as ordinary BRCOND.
+  // From here on, complete the expansion without a recoverable failure exit.
+  const Register BranchCondition =
+      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, MI);
 
   MachineBasicBlock &HeadMBB = *MI.getParent();
   MachineFunction &MF = Builder.getMF();
@@ -1054,15 +1086,7 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
 
   Builder.setInsertPt(HeadMBB, HeadMBB.end());
   Builder.setDebugLoc(DL);
-  MachineInstr *Branch = Builder.buildBrCond(ConditionReg, *TrueMBB).getInstr();
-  // Resolve the condition while expanding SELECT, not only when the new
-  // branch is eventually visited. In particular, finish ICMP widening and
-  // reuse its real result before artifact combining can insert boolean masks.
-  if (!applyBrCondCarrierRewrite(Helper, *Branch))
-    return false;
-  // The branch rewrite can move the builder back to the defining comparison.
-  Builder.setInsertPt(HeadMBB, HeadMBB.end());
-  Builder.setDebugLoc(DL);
+  Builder.buildBrCond(BranchCondition, *TrueMBB);
   Builder.buildBr(*FalseMBB);
 
   Builder.setInsertPt(*TrueMBB, TrueMBB->end());
