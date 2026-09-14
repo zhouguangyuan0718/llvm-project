@@ -239,6 +239,56 @@ static void checkFloatCompare(TestContext &TC) {
     fail("the existing FCMP branch policy changed", MF);
 }
 
+static void checkFloatCompareAdapters(TestContext &TC, unsigned Copies,
+                                      bool SelectConsumer, bool UseCSE) {
+  MachineFunction &MF = TC.makeFunction("float_compare_adapter_lookup");
+  MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
+  MachineBasicBlock *Exit = MF.CreateMachineBasicBlock();
+  MF.push_back(Entry);
+  MF.push_back(Exit);
+  Entry->addSuccessor(Exit);
+  MachineIRBuilder B(MF);
+  B.setMBB(*Entry);
+  auto &MRI = MF.getRegInfo();
+  const LLT I1 = LLT::integer(1), I32 = LLT::integer(32);
+  Register A = B.buildUndef(LLT::floatIEEE(32)).getReg(0);
+  MachineInstr *Cmp = B.buildFCmp(CmpInst::FCMP_OLT, I1, A, A).getInstr();
+  Register Condition = Cmp->getOperand(0).getReg();
+  for (unsigned I = 0; I != Copies; ++I) {
+    Register Copy = MRI.createGenericVirtualRegister(I1);
+    B.buildCopy(Copy, Condition);
+    Condition = Copy;
+  }
+  Condition = B.buildAnyExt(LLT::integer(8), Condition).getReg(0);
+  Condition = B.buildTrunc(I1, Condition).getReg(0);
+  MachineInstr *Consumer;
+  if (SelectConsumer) {
+    Register T = B.buildConstant(I32, 1).getReg(0);
+    Register F = B.buildConstant(I32, 0).getReg(0);
+    Consumer = B.buildSelect(I32, Condition, T, F).getInstr();
+    B.buildCopy(MRI.createGenericVirtualRegister(I32),
+                Consumer->getOperand(0).getReg());
+    B.buildBr(*Exit);
+  } else {
+    Consumer = B.buildBrCond(Condition, *Exit).getInstr();
+  }
+  GISelObserverWrapper Observer;
+  LegalizerHelper Helper(MF, TC.LI, Observer, B);
+  LostDebugLocObserver LocObserver("float-compare-adapter-step");
+  if (Helper.legalizeInstrStep(*Consumer, LocObserver) !=
+      LegalizerHelper::Legalized)
+    fail("FCMP adapter consumer could not be legalized", MF);
+  MachineInstr &Branch = *Entry->getFirstTerminatorForward();
+  if (Branch.getOpcode() != TargetOpcode::G_BRCOND ||
+      MRI.getType(Branch.getOperand(0).getReg()) != I32 ||
+      MRI.getType(Cmp->getOperand(0).getReg()) != I1)
+    fail("FCMP carrier prediction missed adapters or eagerly widened FCMP", MF);
+  legalizeAll(TC, MF, UseCSE);
+  if (Branch.getOperand(0).getReg() != Cmp->getOperand(0).getReg() ||
+      MRI.getType(Cmp->getOperand(0).getReg()) != I32)
+    fail("FCMP adapter chain survived whole-function legalization", MF);
+}
+
 static void checkNonCompare(TestContext &TC, unsigned Bits, bool Arithmetic) {
   MachineFunction &MF = TC.makeFunction("non_compare_branch");
   MachineBasicBlock *Entry = MF.CreateMachineBasicBlock();
@@ -987,5 +1037,9 @@ int main() {
   checkBarrier(TC, TargetOpcode::G_PHI);
   checkBarrier(TC, TargetOpcode::G_FREEZE);
   checkFloatCompare(TC);
+  for (unsigned Copies : {0, 8, 16, 128})
+    for (bool SelectConsumer : {false, true})
+      for (bool UseCSE : {false, true})
+        checkFloatCompareAdapters(TC, Copies, SelectConsumer, UseCSE);
   outs() << "ICMP/AND-one BRCOND and power-of-two UREM tests passed\n";
 }

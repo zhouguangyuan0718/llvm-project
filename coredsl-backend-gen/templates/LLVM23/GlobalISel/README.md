@@ -452,11 +452,18 @@ Signed remainder is unaffected. In particular, remainder by two produces
 For `G_FCMP`, the previous prediction path is unchanged: a missing-width branch
 condition uses the legalized float input's same-width integer carrier. An
 `f32` comparison therefore reaches `G_BRCOND i32` through artifact combining.
+Comparison prediction and actual carrier selection share a single adapter
+lookup, with the same integer/COPY checks and cycle detection. Prediction
+examines only the terminal instruction; it no longer has a separate eight-hop
+limit. The read-only lookup result is reused when resolving the condition.
+FCMP is still predicted, not eagerly legalized like ICMP.
 
 When the native target's CodeGen library is available, CTest's
 `coredsl-icmp-brcond` test compiles the rendered example and checks both visit
 orders, native adapters, long copy chains, other users, cross-block edges and
 non-comparison boundaries, plus AND-by-one widening and other mask cases.
+Long FCMP adapter chains are checked through both BRCOND and SELECT, including
+whole-function legalization with and without CSE.
 It also checks constant and dynamic power-of-two remainder, non-rewritten
 divisors, missing replacement operations, and remainder-by-two branch edges.
 SELECT tests cover comparison-first and SELECT-first processing, full worklist

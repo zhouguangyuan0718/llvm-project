@@ -637,69 +637,48 @@ static bool applyI1ByteMemoryRewrite(LegalizerHelper &Helper,
 // chooses a carrier before its defining compare is widened. Predict the
 // compare's eventual result carrier to keep both instructions on one type and
 // let the artifact combiner remove the temporary trunc/extension pair.
+// The shared source lookup supplies the terminal instruction; this helper
+// only predicts a comparison's type and never walks the adapter chain.
 static LLT getBrCondCompareCarrier(MachineRegisterInfo &MRI,
-                                   Register ConditionReg) {
-  constexpr unsigned MaxLookThroughDepth = 8;
-  for (unsigned Depth = 0; Depth != MaxLookThroughDepth; ++Depth) {
-    if (!ConditionReg.isVirtual())
-      return LLT{};
-    MachineInstr *DefMI = MRI.getVRegDef(ConditionReg);
-    if (!DefMI)
-      return LLT{};
-
-    switch (DefMI->getOpcode()) {
-    case TargetOpcode::G_ICMP: {
-      if (DefMI->getNumExplicitDefs() != 1 ||
-          DefMI->getNumExplicitOperands() < 4 ||
-          !DefMI->getOperand(2).isReg())
-        return LLT{};
-      const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
-      if (InputTy.isInteger())
-        return getOpcodeIntegerTypeForWidth(
-            TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
-      if (InputTy.isPointer())
-        return getNativeIntegerTypeForWidth(1);
-      return LLT{};
-    }
-    case TargetOpcode::G_FCMP: {
-      if (DefMI->getNumExplicitDefs() != 1 ||
-          DefMI->getNumExplicitOperands() < 4 ||
-          !DefMI->getOperand(2).isReg())
-        return LLT{};
-      const LLT InputTy = MRI.getType(DefMI->getOperand(2).getReg());
-      if (!InputTy.isFloat())
-        return LLT{};
+                                   const MachineInstr *Root) {
+  if (!Root || Root->getNumExplicitDefs() != 1 ||
+      Root->getNumExplicitOperands() < 4 ||
+      !Root->getOperand(2).isReg() ||
+      !Root->getOperand(2).getReg().isVirtual())
+    return LLT{};
+  const LLT InputTy = MRI.getType(Root->getOperand(2).getReg());
+  switch (Root->getOpcode()) {
+  case TargetOpcode::G_ICMP:
+    if (InputTy.isInteger())
+      return getOpcodeIntegerTypeForWidth(
+          TargetOpcode::G_ICMP, 1, InputTy.getScalarSizeInBits());
+    if (InputTy.isPointer())
+      return getNativeIntegerTypeForWidth(1);
+    break;
+  case TargetOpcode::G_FCMP:
+    if (InputTy.isFloat()) {
       const LLT CarrierTy = getOpcodeFloatTypeForWidth(
           TargetOpcode::G_FCMP, 1, InputTy.getScalarSizeInBits());
       return getFCmpResultTypeForInput(CarrierTy);
     }
-    case TargetOpcode::COPY:
-    case TargetOpcode::G_TRUNC:
-    case TargetOpcode::G_ANYEXT:
-    case TargetOpcode::G_ZEXT:
-    case TargetOpcode::G_SEXT:
-      if (DefMI->getNumExplicitOperands() < 2 ||
-          !DefMI->getOperand(1).isReg())
-        return LLT{};
-      ConditionReg = DefMI->getOperand(1).getReg();
-      break;
-    default:
-      return LLT{};
-    }
+    break;
+  default:
+    break;
   }
   return LLT{};
 }
 
 struct BrCondSource {
   Register Carrier;
-  MachineInstr *Producer = nullptr;
+  MachineInstr *Root = nullptr;
 };
 
 // G_BRCOND observes only bit 0, including for wide conditions (see
 // MachineIRBuilder::buildBrCond). Integer adapters preserve that bit, so an
 // existing native source can bypass them without proving its high bits zero.
 // Stop at arithmetic, PHIs and FREEZE; never bypass the operation itself.
-// ICMP and AND are also returned for the existing eager legalization policy.
+// Return the terminal instruction for comparison prediction and the existing
+// ICMP/AND eager legalization policy.
 static BrCondSource findBrCondSource(MachineRegisterInfo &MRI,
                                     Register ConditionReg) {
   BrCondSource Result;
@@ -713,11 +692,6 @@ static BrCondSource findBrCondSource(MachineRegisterInfo &MRI,
       return {};
     if (isNativeIntegerType(DstTy))
       Result.Carrier = ConditionReg;
-    if (DefMI->getOpcode() == TargetOpcode::G_ICMP ||
-        DefMI->getOpcode() == TargetOpcode::G_AND) {
-      Result.Producer = DefMI;
-      return Result;
-    }
     switch (DefMI->getOpcode()) {
     case TargetOpcode::COPY:
     case TargetOpcode::G_TRUNC:
@@ -726,6 +700,7 @@ static BrCondSource findBrCondSource(MachineRegisterInfo &MRI,
     case TargetOpcode::G_SEXT:
       break;
     default:
+      Result.Root = DefMI;
       return Result;
     }
     if (DefMI->getNumExplicitDefs() != 1 ||
@@ -874,7 +849,8 @@ static bool legalizeBrCondAndOne(LegalizerHelper &Helper, MachineInstr &MI) {
 // Read-only eligibility check. A valid result guarantees a fallback even when
 // the optional producer rewrite is not applicable.
 static LLT getBrCondFallbackCarrier(MachineRegisterInfo &MRI,
-                                    Register ConditionReg) {
+                                    Register ConditionReg,
+                                    const BrCondSource &Source) {
   if (!ConditionReg.isVirtual())
     return LLT{};
   const LLT ConditionTy = MRI.getType(ConditionReg);
@@ -884,7 +860,7 @@ static LLT getBrCondFallbackCarrier(MachineRegisterInfo &MRI,
       getNativeIntegerTypeForWidth(ConditionTy.getScalarSizeInBits());
   if (!NativeTy.isValid() || hasExactType(ConditionTy, NativeTy))
     return NativeTy;
-  const LLT CompareTy = getBrCondCompareCarrier(MRI, ConditionReg);
+  const LLT CompareTy = getBrCondCompareCarrier(MRI, Source.Root);
   return isNativeIntegerType(CompareTy) &&
                  CompareTy.getScalarSizeInBits() >=
                      ConditionTy.getScalarSizeInBits()
@@ -898,6 +874,7 @@ static LLT getBrCondFallbackCarrier(MachineRegisterInfo &MRI,
 // for a fallback extension, even if producer legalization moved the builder.
 static Register resolveBrCondCondition(LegalizerHelper &Helper,
                                        Register ConditionReg, LLT FallbackTy,
+                                       BrCondSource Source,
                                        MachineInstr &Anchor) {
   MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
   assert(isNativeIntegerType(FallbackTy) &&
@@ -906,11 +883,19 @@ static Register resolveBrCondCondition(LegalizerHelper &Helper,
   // Finalize the producer first, then select its actual result register rather
   // than predicting a width and extending the old narrow result. This also
   // handles a branch whose adapter already has a native (but smaller) type.
-  BrCondSource Source = findBrCondSource(MRI, ConditionReg);
-  if (MachineInstr *Producer = Source.Producer) {
-    const bool Legalized = Producer->getOpcode() == TargetOpcode::G_ICMP
-                               ? legalizeBrCondICmp(Helper, *Producer)
-                               : legalizeBrCondAndOne(Helper, *Producer);
+  if (MachineInstr *Producer = Source.Root) {
+    bool Legalized = false;
+    switch (Producer->getOpcode()) {
+    case TargetOpcode::G_ICMP:
+      Legalized = legalizeBrCondICmp(Helper, *Producer);
+      break;
+    case TargetOpcode::G_AND:
+      Legalized = legalizeBrCondAndOne(Helper, *Producer);
+      break;
+    default:
+      // FCMP participates in prediction only, not eager legalization.
+      break;
+    }
     if (Legalized)
       Source.Carrier = Producer->getOperand(0).getReg();
   }
@@ -929,12 +914,14 @@ static bool applyBrCondCarrierRewrite(LegalizerHelper &Helper,
       MI.getNumExplicitOperands() < 1 || !MI.getOperand(0).isReg())
     return false;
   const Register ConditionReg = MI.getOperand(0).getReg();
+  MachineRegisterInfo &MRI = *Helper.MIRBuilder.getMRI();
+  const BrCondSource Source = findBrCondSource(MRI, ConditionReg);
   const LLT FallbackTy =
-      getBrCondFallbackCarrier(*Helper.MIRBuilder.getMRI(), ConditionReg);
+      getBrCondFallbackCarrier(MRI, ConditionReg, Source);
   if (!FallbackTy.isValid())
     return false;
   const Register Carrier =
-      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, MI);
+      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, Source, MI);
   setBrCondCarrier(Helper, MI, Carrier);
   Helper.MIRBuilder.setInstrAndDebugLoc(MI);
   return true;
@@ -1044,7 +1031,8 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
       !hasExactType(DstTy, MRI.getType(FalseReg)) ||
       !MRI.getType(ConditionReg).isInteger())
     return false;
-  const LLT FallbackTy = getBrCondFallbackCarrier(MRI, ConditionReg);
+  const BrCondSource Source = findBrCondSource(MRI, ConditionReg);
+  const LLT FallbackTy = getBrCondFallbackCarrier(MRI, ConditionReg, Source);
   if (!FallbackTy.isValid())
     return false;
 
@@ -1052,7 +1040,7 @@ static bool applySelectControlFlowRewrite(LegalizerHelper &Helper,
   // while SELECT is still alive, using the same policy as ordinary BRCOND.
   // From here on, complete the expansion without a recoverable failure exit.
   const Register BranchCondition =
-      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, MI);
+      resolveBrCondCondition(Helper, ConditionReg, FallbackTy, Source, MI);
 
   MachineBasicBlock &HeadMBB = *MI.getParent();
   MachineFunction &MF = Builder.getMF();
